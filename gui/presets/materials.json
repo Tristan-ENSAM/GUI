@@ -1,0 +1,137 @@
+{
+  "format_version": 1,
+  "comment": [
+    "Material presets, stored in Abaqus internal consistent units (t-mm-s-MPa-°C).",
+    "  rho   : t/mm³        (8.96e-9 = 8960 kg/m³)",
+    "  E     : MPa          (124000  = 124 GPa)",
+    "  k     : mW/(mm·°C)   = W/(m·K)",
+    "  Cp    : mJ/(t·°C)    (3.83e8  = 383 J/(kg·K))",
+    "  alpha : 1/°C         = 1/K",
+    "  Tm,Tr : °C",
+    "  Gf    : mJ/mm²       = N/mm",
+    "Johnson-Cook plasticity (A, B, n, m, C, eps_dot0) and damage (D1..D5, eps0, Gf, beta)",
+    "are intentionally left at 0 — fill them yourself from your trusted sources (publications,",
+    "test campaigns). The elastic + thermal block is usually well-defined and is provided here.",
+    "Sources for ρ, E, ν, k, Cp, α: MatWeb / ASM Handbook / Wikipedia at ambient temperature."
+  ],
+  "tool": {
+    "WC-Co (carbide)": {
+      "rho":   1.49e-8,
+      "E":     534000.0,
+      "nu":    0.22,
+      "k":     50.0,
+      "Cp":    4.0e8,
+      "alpha": 5.4e-6
+    },
+    "Cermet (TiCN-Ni)": {
+      "rho":   7.0e-9,
+      "E":     420000.0,
+      "nu":    0.21,
+      "k":     14.0,
+      "Cp":    4.2e8,
+      "alpha": 8.5e-6
+    },
+    "PCD (polycrystalline diamond)": {
+      "rho":   4.1e-9,
+      "E":     900000.0,
+      "nu":    0.07,
+      "k":     560.0,
+      "Cp":    5.0e8,
+      "alpha": 3.8e-6
+    },
+    "HSS (M2)": {
+      "rho":   8.16e-9,
+      "E":     210000.0,
+      "nu":    0.30,
+      "k":     24.0,
+      "Cp":    4.6e8,
+      "alpha": 1.1e-5
+    }
+  },
+  "workpiece": {
+    "Cu pure": {
+      "rho":   8.96e-9,
+      "E":     124000.0,
+      "nu":    0.34,
+      "k":     386.0,
+      "Cp":    3.83e8,
+      "alpha": 5.0e-5,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 1085.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    },
+    "Ti-6Al-4V": {
+      "rho":   4.43e-9,
+      "E":     113800.0,
+      "nu":    0.342,
+      "k":     6.7,
+      "Cp":    5.263e8,
+      "alpha": 8.6e-6,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 1660.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    },
+    "AISI 1045 (C45)": {
+      "rho":   7.85e-9,
+      "E":     200000.0,
+      "nu":    0.29,
+      "k":     49.8,
+      "Cp":    4.86e8,
+      "alpha": 1.15e-5,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 1500.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    },
+    "42CrMo4": {
+      "rho":   7.85e-9,
+      "E":     210000.0,
+      "nu":    0.30,
+      "k":     42.6,
+      "Cp":    4.73e8,
+      "alpha": 1.23e-5,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 1500.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    },
+    "Inconel 718": {
+      "rho":   8.19e-9,
+      "E":     200000.0,
+      "nu":    0.294,
+      "k":     11.4,
+      "Cp":    4.35e8,
+      "alpha": 1.3e-5,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 1336.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    },
+    "Al 2024-T351": {
+      "rho":   2.78e-9,
+      "E":     73100.0,
+      "nu":    0.33,
+      "k":     121.0,
+      "Cp":    8.75e8,
+      "alpha": 2.32e-5,
+      "beta":  0.9,
+      "A": 0.0, "B": 0.0, "n": 0.0, "m": 0.0,
+      "Tm": 502.0, "Tr": 20.0,
+      "C": 0.0, "eps_dot0": 1.0,
+      "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0, "D5": 0.0,
+      "eps0": 1.0, "Gf": 0.0
+    }
+  }
+}
