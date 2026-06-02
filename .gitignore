@@ -1,0 +1,67 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- IDEs / editors ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- GUI runtime files (user-specific, not under VCS) ----
+# Per-user material overrides
+materials_user.json
+# Per-user preferences (paths, defaults, etc.)
+preferences.json
+# Saved Abaqus profiles (binary-ish snapshots — keep examples manually)
+*.acpf
+
+# ---- Abaqus working directory artefacts (in case you point workdir
+#      inside the repo while developing) ----
+*.odb
+*.com
+*.dat
+*.fil
+*.inp
+*.lck
+*.log
+*.msg
+*.mdl
+*.prt
+*.res
+*.sel
+*.sim
+*.sta
+*.stt
+*.SMABulk
+*.SMAManifest
+abaqus_acis.log
+abaqus.rpy*
+abaqus.rec
+
+# ---- Build / packaging artefacts ----
+build/
+dist/
+*.egg-info/
+*.spec
+
+# ---- Local test outputs / screenshots (not part of the codebase) ----
+/home/claude/out/
+test_*.py
+test_*.png
+*.bak
