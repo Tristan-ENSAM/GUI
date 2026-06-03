@@ -104,6 +104,12 @@ class StepTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+        # Apply cfg → widgets once everything is built. This puts the
+        # mass-scaling and history-sync fields into the correct
+        # enabled/disabled state from the start (matching the cfg
+        # defaults), rather than waiting for the first user edit.
+        self.apply_from_cfg()
+
     # =====================================================================
     # Sub-groups
     # =====================================================================
@@ -302,18 +308,37 @@ class StepTab(QWidget):
         self.cb_ho_rf_on_rp.toggled.connect(self._on_change)
         v.addWidget(self.cb_ho_rf_on_rp)
 
-        self.f_ho_dt = NumField(
-            "History sampling interval [s]",
-            self.cfg.step.output.ho_time_interval, "",
-            minimum=1e-12, maximum=1.0, decimals=10,
+        # Sampling: by default we keep the history sampling synchronised
+        # with the field-output sampling (ho_n_intervals = n_frames). The
+        # user can opt out and set a custom interval count if needed —
+        # useful for example to keep fine-grained force data while
+        # writing only a few field frames.
+        self.cb_ho_sync = QCheckBox("Sync with field output (same N intervals)")
+        # The synced state is implicit when ho_n_intervals == n_frames.
+        sync_initial = (self.cfg.step.output.ho_n_intervals
+                         == self.cfg.step.n_frames)
+        self.cb_ho_sync.setChecked(sync_initial)
+        self.cb_ho_sync.setToolTip(
+            "When ticked, the history sampling matches the field-output\n"
+            "sampling (1 history sample per field frame). Each force value\n"
+            "then aligns 1:1 with a field snapshot — useful for plotting\n"
+            "RF vs PEEQ peaks without interpolation."
         )
-        self.f_ho_dt.setToolTip(
-            "Time interval between two history-output samples. Default 1e-6 s\n"
-            "gives 100 samples for a 1e-4 s step — plenty for force/temperature\n"
-            "plots without bloating the .odb."
+        self.cb_ho_sync.toggled.connect(self._on_change)
+        v.addWidget(self.cb_ho_sync)
+
+        self.f_ho_n = IntField(
+            "History number of intervals",
+            self.cfg.step.output.ho_n_intervals,
+            minimum=1, maximum=1_000_000,
         )
-        v.addWidget(self.f_ho_dt)
-        self.f_ho_dt.valueChanged.connect(self._on_change)
+        self.f_ho_n.setToolTip(
+            "Number of equally-spaced history samples written to the .odb\n"
+            "over the step. The .odb actually contains N+1 samples (Abaqus\n"
+            "includes both endpoints)."
+        )
+        v.addWidget(self.f_ho_n)
+        self.f_ho_n.valueChanged.connect(self._on_change)
 
         return g
 
@@ -364,13 +389,26 @@ class StepTab(QWidget):
             setattr(s.output, attr, cb.isChecked())
         s.output.ho_preselect      = self.cb_ho_preselect.isChecked()
         s.output.ho_rf_on_rp       = self.cb_ho_rf_on_rp.isChecked()
-        s.output.ho_time_interval  = self.f_ho_dt.value()
+        # History sampling: when synced, the field-output count drives it.
+        # Otherwise read the user's free value from the IntField.
+        if self.cb_ho_sync.isChecked():
+            s.output.ho_n_intervals = s.n_frames
+        else:
+            s.output.ho_n_intervals = self.f_ho_n.value()
+        # Refresh the IntField enable state + value to reflect the sync
+        # status (block signals so we don't loop).
+        synced = self.cb_ho_sync.isChecked()
+        self.f_ho_n.setEnabled(not synced)
+        if synced:
+            self.f_ho_n.blockSignals(True)
+            self.f_ho_n.set_value(s.n_frames)
+            self.f_ho_n.blockSignals(False)
 
     def apply_from_cfg(self):
         """Push cfg values into widgets (used after Open / New)."""
         s = self.cfg.step
         widgets = [self.f_sim_time, self.f_n_frames, self.cb_ho_preselect,
-                   self.cb_ho_rf_on_rp, self.f_ho_dt,
+                   self.cb_ho_rf_on_rp, self.cb_ho_sync, self.f_ho_n,
                    self.cb_ms_enabled, self.f_ms_eul, self.f_ms_tool] \
                   + list(self._fo_checkboxes.values())
         for w in widgets:
@@ -385,7 +423,11 @@ class StepTab(QWidget):
                 cb.setChecked(getattr(s.output, attr))
             self.cb_ho_preselect.setChecked(s.output.ho_preselect)
             self.cb_ho_rf_on_rp.setChecked(s.output.ho_rf_on_rp)
-            self.f_ho_dt.set_value(s.output.ho_time_interval)
+            # Sync state: true iff the saved n_intervals equals n_frames.
+            synced = (s.output.ho_n_intervals == s.n_frames)
+            self.cb_ho_sync.setChecked(synced)
+            self.f_ho_n.set_value(s.output.ho_n_intervals)
+            self.f_ho_n.setEnabled(not synced)
         finally:
             for w in widgets:
                 w.blockSignals(False)

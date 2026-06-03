@@ -111,7 +111,10 @@ fo_variables = tuple(
 # History output
 ho_preselect      = bool( step_output.get("ho_preselect",     True))
 ho_rf_on_rp       = bool( step_output.get("ho_rf_on_rp",      True))
-ho_time_interval  = float(step_output.get("ho_time_interval", 1e-6))
+# Number of history-output intervals. Defaults to the field-output
+# n_frames so a freshly-loaded profile without this key behaves like
+# "synced with field output".
+ho_n_intervals    = int(  step_output.get("ho_n_intervals",   n_frames))
 
 # -----------------------------------------------------------------------------
 # Mass scaling (Step tab > Mass scaling)
@@ -594,16 +597,23 @@ myModel.FieldOutputRequest(
 )
 
 # History output: optional RF on the tool RP + optional PRESELECT.
+# Both use numIntervals (number of equally-spaced samples) rather than
+# timeInterval (seconds between samples). When the user keeps the
+# "Sync with field output" toggle on in the Step tab, ho_n_intervals
+# equals n_frames, so each history sample lines up 1:1 with a field
+# frame — directly usable to overlay forces against PEEQ/TEMP in the
+# Results tab without interpolation.
 if ho_rf_on_rp:
     myModel.HistoryOutputRequest(
         name='H-Output-1', createStepName='Cut',
         region=RP, variables=('RF1', 'RF2',),
-        timeInterval=ho_time_interval,
+        numIntervals=ho_n_intervals,
     )
 if ho_preselect:
     myModel.HistoryOutputRequest(
         name='H-Output-2', createStepName='Cut',
         variables=PRESELECT,
+        numIntervals=ho_n_intervals,
     )
 #%%% Boundary conditions
 
@@ -754,6 +764,6 @@ myJob = mdb.Job(
     explicitPrecision=DOUBLE,
     nodalOutputPrecision=FULL,
 )
-# myJob.writeInput()
-myJob.submit(consistencyChecking=OFF)
-myJob.waitForCompletion()
+myJob.writeInput()
+# myJob.submit(consistencyChecking=OFF)
+# myJob.waitForCompletion()

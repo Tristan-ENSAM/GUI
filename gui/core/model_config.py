@@ -105,8 +105,16 @@ class OutputCfg:
     # --- history output ---
     ho_preselect:   bool = True   # PRESELECT
     ho_rf_on_rp:    bool = True   # RF1/RF2 on the tool RP
-    # Time interval (in seconds) between consecutive history-output samples
-    ho_time_interval: float = 1e-6
+    # Number of history-output intervals. By design we keep it equal to
+    # the number of field-output frames (StepCfg.n_frames): each field
+    # frame then has a matching history sample, so history-vs-field
+    # correlations (forces vs PEEQ peaks, etc.) plot 1:1 with no
+    # interpolation. The actual *number of samples* in the .odb is
+    # ho_n_intervals + 1 (Abaqus includes both endpoints).
+    # NOTE: previously this was `ho_time_interval` (seconds). The
+    # migration in ModelConfig.from_json_dict handles old .acpf files
+    # by dropping the old key and falling back to the default here.
+    ho_n_intervals: int = 500
 
 
 @dataclass
@@ -580,6 +588,13 @@ class ModelConfig:
             _apply(cfg.step, scalar_data)
             output_data = step_data.get("output")
             if output_data is not None:
+                # Migration: `ho_time_interval` (float, seconds) was
+                # replaced by `ho_n_intervals` (int, number of intervals)
+                # to keep the history sampling in sync with the field
+                # frames. Strip the obsolete key so _apply doesn't try
+                # to setattr() it on the new dataclass.
+                output_data = {k: v for k, v in output_data.items()
+                               if k != "ho_time_interval"}
                 _apply(cfg.step.output, output_data)
         else:
             # Legacy profile: pull sim_time / n_frames from `process` if

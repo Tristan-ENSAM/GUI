@@ -1020,28 +1020,35 @@ class GeometryPreview(QWidget):
         and BR). These are the faces that anchor the rigid tool in the
         CEL setup — visually showing where the tool is held in space.
 
-        The tool polygon vertices are in this order (see _tool_polygon):
-          0: BL  - bottom-left (cutting edge)
-          1..k: rounded corner samples
-          k+1: TL - top-left
-          k+2: TR - top-right
-          k+3: BR - bottom-right
-          k+4: back to BL (closing the polygon)
-
-        Rather than relying on indices that change with the corner-radius
-        sampling, we reconstruct TL / TR / BR from the analytical formulas
-        already used by _tool_polygon, which are identical to the ones in
-        _tool_rp_world_position.
+        Coordinate convention (matches `_tool_polygon`, see
+        `_solve_tool_dimensions` for the derivation):
+            BL = (0, 0)
+            TL = BL + h * (tan(rake), 1)
+            TR = (l, h)
+            BR = BL + l * (1, tan(clear))
+        where (h, l) are NOT the GUI inputs (h_tool, l_tool) but the
+        solved bounding-box dimensions. Previously this method used
+        (l_tool, h_tool) directly, which placed TL/TR/BR at the wrong
+        spots whenever rake or clear was non-zero — so the hatching
+        either overshot or fell short of the actual top/right faces.
+        We catch ToolGeometryError silently here: if the tool failed to
+        build, `_draw_bcs` already skipped this call entirely via its
+        `tool_world is not None` guard, so this is mostly belt-and-braces.
         """
         import math as _m
         g = cfg.tool_geometry
         tx, ty = cfg.tool_position.x0, cfg.tool_position.y0
-        # Same formulas as the polygon builder
-        rake = _m.radians(g.rake_angle)
+        try:
+            h, l = _solve_tool_dimensions(
+                g.h_tool, g.l_tool, g.rake_angle, g.clear_angle
+            )
+        except ToolGeometryError:
+            return
+        rake  = _m.radians(g.rake_angle)
         clear = _m.radians(g.clear_angle)
-        TL = (tx + g.h_tool * _m.tan(rake), ty + g.h_tool)
-        TR = (tx + g.l_tool,                ty + g.h_tool)
-        BR = (tx + g.l_tool,                ty + g.l_tool * _m.tan(clear))
+        TL = (tx + h * _m.tan(rake),  ty + h)
+        TR = (tx + l,                  ty + h)
+        BR = (tx + l,                  ty + l * _m.tan(clear))
 
         # Draw the top edge (l_2) with hatching tick marks slanting the
         # OTHER way (slant_sign=-1) so the two edges (l_2 and l_3) form
