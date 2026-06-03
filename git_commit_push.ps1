@@ -1,11 +1,10 @@
 # =====================================================================
 # git_commit_push.ps1
-# Commits & pushes the current state of the GUI_Abaqus repo.
+# Commits and pushes the current state of the GUI_Abaqus repo.
 #
 # Usage (in PowerShell, from C:\GUI_Abaqus):
-#     .\git_commit_push.ps1
-# or with a custom message:
-#     .\git_commit_push.ps1 -Message "your commit message"
+#     powershell -ExecutionPolicy Bypass -File .\git_commit_push.ps1
+#     powershell -ExecutionPolicy Bypass -File .\git_commit_push.ps1 -Message "your message"
 # =====================================================================
 param(
     [string]$Message = "Step tab + mass scaling + working Run button"
@@ -24,7 +23,17 @@ if (-not (Test-Path ".\.git")) {
     exit 1
 }
 
-# Show what's about to be committed
+# Verify that git is available on PATH. PowerShell otherwise spits a
+# generic "term not recognized" error.
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if (-not $gitCmd) {
+    Write-Host "git is not on PATH in this console." -ForegroundColor Red
+    Write-Host "Open a Git Bash, a regular PowerShell, or run from a console" -ForegroundColor DarkGray
+    Write-Host "where Git for Windows was added to PATH." -ForegroundColor DarkGray
+    exit 1
+}
+
+# Show what is about to be committed
 Write-Host "==> Current changes:" -ForegroundColor Cyan
 git status --short
 Write-Host ""
@@ -33,7 +42,7 @@ Write-Host ""
 Write-Host "==> Staging changes..." -ForegroundColor Cyan
 git add .
 
-# Commit if there's anything to commit
+# Commit only if there is something staged
 $staged = git diff --cached --name-only
 if (-not $staged) {
     Write-Host "Nothing to commit. Working tree clean." -ForegroundColor Yellow
@@ -41,17 +50,20 @@ if (-not $staged) {
 }
 
 Write-Host "==> Committing with message:" -ForegroundColor Cyan
-Write-Host "    `"$Message`"" -ForegroundColor DarkGray
+Write-Host "    $Message" -ForegroundColor DarkGray
 git commit -m $Message | Out-Null
 
 # Push if a remote 'origin' exists
-$remote = git remote
-if ($remote -contains "origin") {
-    Write-Host "==> Pushing to origin..." -ForegroundColor Cyan
-    git push origin (git rev-parse --abbrev-ref HEAD)
+$remotes = git remote
+if ($remotes -contains "origin") {
+    $branch = git rev-parse --abbrev-ref HEAD
+    Write-Host "==> Pushing to origin/$branch ..." -ForegroundColor Cyan
+    git push origin $branch
 } else {
-    Write-Host "==> No 'origin' remote configured — skipping push." -ForegroundColor Yellow
-    Write-Host "    To add one:  git remote add origin <url>" -ForegroundColor DarkGray
+    Write-Host "==> No 'origin' remote configured. Skipping push." -ForegroundColor Yellow
+    # Single-quoted string here so PowerShell does not try to parse `<url>`
+    # as a redirection operator. The text is just displayed as a hint.
+    Write-Host '    To add one:  git remote add origin URL_OF_REMOTE' -ForegroundColor DarkGray
 }
 
 Write-Host ""

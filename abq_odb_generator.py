@@ -754,6 +754,6 @@ myJob = mdb.Job(
     explicitPrecision=DOUBLE,
     nodalOutputPrecision=FULL,
 )
-myJob.writeInput()
-# myJob.submit(consistencyChecking=OFF)
-# myJob.waitForCompletion()
+# myJob.writeInput()
+myJob.submit(consistencyChecking=OFF)
+myJob.waitForCompletion()

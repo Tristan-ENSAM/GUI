@@ -32,6 +32,7 @@ from gui.tabs.bcs_tab import BCsTab
 from gui.tabs.mesh_tab import MeshTab
 from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
+from gui.tabs.results_tab import ResultsTab
 from gui.widgets.preferences_dialog import PreferencesDialog
 
 
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         # JobTab takes a callable so it always sees the freshest prefs
         # (the user may edit them mid-session via Preferences dialog).
         self.job_tab         = JobTab(self.cfg, lambda: self.prefs)
+        self.results_tab     = ResultsTab()
 
         tabs = QTabWidget()
         tabs.addTab(self.analysis_tab,                                        "Analysis")
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.mesh_tab,                                            "Mesh")
         tabs.addTab(self.step_tab,                                            "Step")
         tabs.addTab(self.job_tab,                                             "Job")
+        tabs.addTab(self.results_tab,                                         "Results")
         tabs.addTab(_placeholder("Optimization — coming later"),              "Optimization")
         self.setCentralWidget(tabs)
 

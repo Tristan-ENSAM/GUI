@@ -81,55 +81,120 @@ _ARROW_FLAG = "_gui_legend_arrow"
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
+class ToolGeometryError(ValueError):
+    """Raised when the tool's geometric parameters (h_tool, l_tool, rake,
+    clear) cannot produce a valid trapezoidal outline.
+
+    The user's convention is:
+        h = h_tool + tan(clear) * l
+        l = l_tool + tan(rake)  * h
+    i.e. (h, l)ᵀ = B · (h, l)ᵀ + (h_tool, l_tool)ᵀ with
+        B = [[0,         tan(clear)],
+             [tan(rake), 0         ]].
+    Solving for (h, l):
+        (h, l)ᵀ = (I - B)⁻¹ · (h_tool, l_tool)ᵀ,
+    which exists iff det(I - B) = 1 - tan(rake)·tan(clear) ≠ 0.
+
+    Geometrically, the system becomes ill-defined when rake + clear ≥ 90°
+    (the rake face and the clearance face would meet outside the tool, or
+    on the wrong side). We refuse those configurations here and let the
+    preview show a friendly message rather than crashing matplotlib with
+    a numpy LinAlgError.
+    """
+
+
+def _solve_tool_dimensions(h_tool: float, l_tool: float,
+                            rake_deg: float, clear_deg: float
+                            ) -> tuple[float, float]:
+    """Compute the overall (h, l) bounding-box dimensions of the tool from
+    the four GUI inputs.
+
+    Returns (h, l) where:
+        h = total height between the bottom (BR) and the top of the
+            cutting edge (TL.y = h_tool exact in the matrix derivation),
+            measured at x=0,
+        l = total length between the cutting tip (BL at x=0) and the
+            right edge of the tool (x=l).
+
+    Raises ToolGeometryError if rake + clear is too close to 90° (or
+    beyond), which makes the trapezoidal closure impossible.
+    """
+    rake  = math.radians(rake_deg)
+    clear = math.radians(clear_deg)
+
+    # det(I - B) = 1 - tan(rake) * tan(clear).
+    # We refuse a singular or near-singular system. The 1e-6 threshold is
+    # arbitrary but corresponds to rake + clear within ≈1e-3 rad of 90°,
+    # which is already a deeply pathological tool.
+    det = 1.0 - math.tan(rake) * math.tan(clear)
+    if det <= 1e-6:
+        raise ToolGeometryError(
+            f"Invalid tool geometry: rake={rake_deg:.2f}° and "
+            f"clear={clear_deg:.2f}° give tan(rake)·tan(clear) ≥ 1 — the "
+            f"rake and clearance faces cannot close the tool outline. "
+            f"Reduce rake or clear (typical: rake ≤ 30°, clear ≤ 15°)."
+        )
+
+    # (I - B)⁻¹ · (h_tool, l_tool):
+    #   (I - B)⁻¹ = (1/det) * [[1,         tan(clear)],
+    #                          [tan(rake), 1         ]]
+    h = (h_tool + math.tan(clear) * l_tool) / det
+    l = (math.tan(rake)  * h_tool + l_tool) / det
+
+    if h <= 0.0 or l <= 0.0:
+        raise ToolGeometryError(
+            f"Invalid tool geometry: solved (h={h:.4g}, l={l:.4g}) is "
+            f"non-positive. Check that h_tool and l_tool are positive and "
+            f"that rake/clear are within sensible bounds."
+        )
+    return h, l
+
+
 def _tool_polygon(h_tool: float, l_tool: float, r_tool: float,
                   rake_deg: float, clear_deg: float,
                   n_fillet: int = 24) -> np.ndarray:
     """Build the tool outline in the tool's local frame.
 
-    Convention (updated to match the Abaqus sketch behaviour exactly):
-      - BL = (0, 0)                              cutting edge anchor (before fillet)
-      - TL = BL + h_tool * (tan(rake), 1)        l1 leans by `rake` from vertical;
-                                                 TL.y = h_tool exactly, so l2 is
-                                                 perfectly horizontal.
-      - TR = (l_tool, h_tool)                    top-right corner, hard 90°
-      - BR = BL + l_tool * (1, tan(clear))       l4 inclined by `clear` from
-                                                 horizontal; BR.x = l_tool
-                                                 exactly, so l3 is perfectly
-                                                 vertical.
+    Convention (matches the user's hand-derived equations — see
+    `_solve_tool_dimensions` for the matrix derivation):
 
-    The (tan, 1) / (1, tan) form is preferred over (sin, cos) because it
-    keeps l2 and l3 axis-aligned for any angle, which is what guarantees
-    the perpendicularity at TR. The (sin, cos) form would shrink the y-
-    coordinate of TL with cos(rake), pulling l2 below y=h_tool.
+        BL = (0, 0)                              cutting-edge anchor
+        TL = BL + h * (tan(rake), 1)             rake face leans by `rake`
+        BR = BL + l * (1, tan(clear))            clearance face inclines by `clear`
+        TR = (l, h)                              top-right corner
 
-    Faces:
-      - l1 = rake face       BL -> TL    (tilted by rake from vertical)
-      - l2 = top face        TL -> TR    (horizontal, at y = h_tool)
-      - l3 = right face      TR -> BR    (vertical, at x = l_tool)
-      - l4 = bottom face     BR -> BL    (inclined by clear from horizontal)
-    A circular fillet of radius r_tool replaces the BL corner — that's the
-    physical cutting edge, tangent to l1 and l4.
+    where (h, l) come from solving the closure system in
+    `_solve_tool_dimensions`. This makes h_tool / l_tool the *user-facing*
+    "height-from-the-side" and "length-from-the-top" dimensions, exactly
+    as labelled on the sketch.
 
-    Sign conventions (note: sign of `clear` here matches the convention in
-    the rest of the GUI — increasing clear sends BR upward in our local
-    frame; the negative-y convention used elsewhere is handled by the
-    caller via the tool position):
-      - rake > 0  : top of l1 leans toward +x (positive rake angle, ISO)
-      - clear > 0 : BR moves upward; l4 rises from BL to BR
+    Faces (counterclockwise outline):
+        l1 = rake face       BL -> TL    (tilted by rake from vertical)
+        l2 = top face        TL -> TR    (horizontal, at y = h)
+        l3 = right face      TR -> BR    (vertical, at x = l)
+        l4 = bottom face     BR -> BL    (inclined by clear from horizontal)
 
-    Returns (N, 2) polygon vertices, counterclockwise (matplotlib convention).
+    A circular fillet of radius r_tool replaces the BL corner — the actual
+    cutting edge, tangent to l1 and l4.
+
+    Sign conventions:
+        rake > 0  : top of l1 leans toward +x (positive rake)
+        clear > 0 : BR moves upward (positive clearance)
+
+    Raises ToolGeometryError if the closure system is singular or yields
+    a non-positive (h, l). Callers should catch this and display a
+    friendly message in the preview.
     """
+    # 1. Solve the closure system to get the actual (h, l) of the outline
+    h, l = _solve_tool_dimensions(h_tool, l_tool, rake_deg, clear_deg)
+
     rake  = math.radians(rake_deg)
     clear = math.radians(clear_deg)
 
     BL = np.array([0.0, 0.0])
-    TL = BL + h_tool * np.array([math.tan(rake), 1.0])
-    TR = np.array([l_tool, h_tool])
-    BR = BL + l_tool * np.array([1.0, math.tan(clear)])
-
-    # Sanity: if rake is so large that TL.x >= TR.x, the tool degenerates.
-    if TL[0] >= TR[0]:
-        TL = np.array([TR[0] - 1e-6, TL[1]])
+    TL = BL + h * np.array([math.tan(rake), 1.0])
+    TR = np.array([l, h])
+    BR = BL + l * np.array([1.0, math.tan(clear)])
 
     # Outgoing unit vectors at BL along l1 (rake) and l4 (bottom).
     # The fillet is the convex arc tangent to both, replacing BL.
@@ -311,17 +376,25 @@ class GeometryPreview(QWidget):
         wp_y = -h_wp_eff + cfg.wp_position.y0
 
         g = cfg.tool_geometry
-        tool_local = _tool_polygon(
-            h_tool=g.h_tool, l_tool=g.l_tool, r_tool=g.r_tool,
-            rake_deg=g.rake_angle, clear_deg=g.clear_angle,
-        )
-        tool_world = tool_local + np.array([cfg.tool_position.x0,
-                                            cfg.tool_position.y0])
-
-        xs = [wp_x, wp_x + l_wp_eff,
-              float(tool_world[:, 0].min()), float(tool_world[:, 0].max())]
-        ys = [wp_y, wp_y + h_wp_eff,
-              float(tool_world[:, 1].min()), float(tool_world[:, 1].max())]
+        # The tool geometry may be invalid (e.g. rake + clear ≥ 90°). In
+        # that case we just compute the fit from the other shapes — the
+        # main update_from_config path will already have refused to draw
+        # the tool and displayed a message in its place.
+        try:
+            tool_local = _tool_polygon(
+                h_tool=g.h_tool, l_tool=g.l_tool, r_tool=g.r_tool,
+                rake_deg=g.rake_angle, clear_deg=g.clear_angle,
+            )
+            tool_world = tool_local + np.array([cfg.tool_position.x0,
+                                                cfg.tool_position.y0])
+            xs = [wp_x, wp_x + l_wp_eff,
+                  float(tool_world[:, 0].min()), float(tool_world[:, 0].max())]
+            ys = [wp_y, wp_y + h_wp_eff,
+                  float(tool_world[:, 1].min()), float(tool_world[:, 1].max())]
+        except ToolGeometryError:
+            # No tool contribution to the fit; fall back to the other shapes
+            xs = [wp_x, wp_x + l_wp_eff]
+            ys = [wp_y, wp_y + h_wp_eff]
         if show_euler:
             xs += [eul_x, eul_x + eul_w]
             ys += [eul_y, eul_y + eul_h]
@@ -464,17 +537,45 @@ class GeometryPreview(QWidget):
                             color="#2e7d32")
 
         # --- Tool ---
+        # The tool outline depends on a closure system that can be ill-
+        # conditioned for extreme rake/clear values. We catch the error
+        # so the rest of the scene (Eulerian, workpiece, BCs) still
+        # renders, and we display a friendly message in place of the tool.
         g = cfg.tool_geometry
-        tool_local = _tool_polygon(
-            h_tool=g.h_tool, l_tool=g.l_tool, r_tool=g.r_tool,
-            rake_deg=g.rake_angle, clear_deg=g.clear_angle,
-        )
-        tool_world = tool_local + np.array([cfg.tool_position.x0,
-                                            cfg.tool_position.y0])
-        tool = Polygon(tool_world, closed=True,
-                       facecolor="#f4b860", edgecolor="#a8631c",
-                       linewidth=1.4, alpha=0.9, label="Tool")
-        self._ax.add_patch(tool)
+        tool_world = None        # remains None if the geometry is invalid
+        try:
+            tool_local = _tool_polygon(
+                h_tool=g.h_tool, l_tool=g.l_tool, r_tool=g.r_tool,
+                rake_deg=g.rake_angle, clear_deg=g.clear_angle,
+            )
+            tool_world = tool_local + np.array([cfg.tool_position.x0,
+                                                cfg.tool_position.y0])
+            tool = Polygon(tool_world, closed=True,
+                           facecolor="#f4b860", edgecolor="#a8631c",
+                           linewidth=1.4, alpha=0.9, label="Tool")
+            self._ax.add_patch(tool)
+        except ToolGeometryError as e:
+            # Big in-axes message so the user knows why the tool is missing.
+            # The error message can be long; matplotlib's text wrapping
+            # keeps it readable within the axes regardless of zoom.
+            txt = self._ax.text(
+                0.5, 0.5,
+                "Invalid tool geometry\n" + str(e),
+                transform=self._ax.transAxes,
+                ha="center", va="center",
+                fontsize=10, color="#a8631c",
+                wrap=True,
+                bbox=dict(facecolor="#fff4e6", edgecolor="#a8631c",
+                          boxstyle="round,pad=0.6"),
+            )
+            # Force the message to wrap to a sensible width relative to
+            # the axes (set _get_wrap_line_width to a fixed fraction of
+            # the axis width — matplotlib uses this internally when
+            # wrap=True is set).
+            try:
+                txt._get_wrap_line_width = lambda: 380.0
+            except Exception:
+                pass
 
         # --- Tool RP marker ---
         # Always shown, in both formulations: the Reference Point is where
@@ -483,13 +584,18 @@ class GeometryPreview(QWidget):
         #                 in abq_odb_generator.py).
         #   - Lagrangian: RP is the corner the user picked in the Analysis tab.
         rp_loc = "TR" if not is_lagrangian else cfg.analysis.rp_location
-        rp_world = self._tool_rp_world_position(cfg, tool_world, rp_loc)
-        if rp_world is not None:
-            self._ax.plot(rp_world[0], rp_world[1], marker="o",
-                          markerfacecolor="white",
-                          markeredgecolor="#a8631c",
-                          markersize=8, markeredgewidth=1.5,
-                          label=f"Tool RP ({rp_loc})")
+        rp_world = None    # remains None when the tool geometry is invalid
+        # Only place the RP if we have a valid tool (otherwise no anchor
+        # point makes sense). _tool_rp_world_position returns None when
+        # the closure system is invalid — we double-belt that here.
+        if tool_world is not None:
+            rp_world = self._tool_rp_world_position(cfg, tool_world, rp_loc)
+            if rp_world is not None:
+                self._ax.plot(rp_world[0], rp_world[1], marker="o",
+                              markerfacecolor="white",
+                              markeredgecolor="#a8631c",
+                              markersize=8, markeredgewidth=1.5,
+                              label=f"Tool RP ({rp_loc})")
 
         # --- BBox / ROI (dashed) ---
         bb = cfg.bbox
@@ -501,6 +607,10 @@ class GeometryPreview(QWidget):
             self._ax.add_patch(roi)
 
         # --- Boundary conditions overlay (optional) ---
+        # BC overlays that depend on the tool outline (temperature hatching
+        # on the tool, encastrement marker, etc.) are skipped when the
+        # tool geometry is invalid. The Eulerian-domain BCs (inflow/outflow
+        # arrows, velocity on faces) still render.
         if show_bcs:
             self._draw_bcs(cfg, tool_world, rp_world,
                            eul_x, eul_y, eul_w, eul_h,
@@ -538,16 +648,28 @@ class GeometryPreview(QWidget):
         used by the preview to force TR in CEL mode regardless of the
         Lagrangian-only setting in the Analysis tab.
 
-        Returns None if the location is unknown."""
+        Returns None if the location is unknown or if the tool geometry
+        is invalid (in which case `tool_world` will not have been built
+        either and the caller already handles the error)."""
         g = cfg.tool_geometry
         tx, ty = cfg.tool_position.x0, cfg.tool_position.y0
         loc = rp_location if rp_location is not None else cfg.analysis.rp_location
+        # Resolve the true (h, l) of the tool outline — these are NOT the
+        # raw GUI inputs h_tool / l_tool, they are solved from the closure
+        # system (see _solve_tool_dimensions). The TR / BR corners are at
+        # (l, h) / (l, l*tan(clear)) in the local frame.
+        try:
+            h, l = _solve_tool_dimensions(
+                g.h_tool, g.l_tool, g.rake_angle, g.clear_angle
+            )
+        except ToolGeometryError:
+            return None
         import math as _m
         if loc == "TR":
-            return np.array([g.l_tool + tx, g.h_tool + ty])
+            return np.array([l + tx, h + ty])
         elif loc == "BR":
-            return np.array([g.l_tool + tx,
-                             g.l_tool * _m.tan(_m.radians(g.clear_angle)) + ty])
+            return np.array([l + tx,
+                             l * _m.tan(_m.radians(g.clear_angle)) + ty])
         elif loc == "centroid":
             return np.array([tool_world[:, 0].mean(), tool_world[:, 1].mean()])
         return None
@@ -668,8 +790,9 @@ class GeometryPreview(QWidget):
             # Tini: thin dotted-red hatch pattern on the tool polygon AND
             # inside the Eulerian domain (CEL only).
             T_label = self._format_temperature(b.ambient_temperature, cfg)
-            self._draw_temperature_hatch(tool_world,
-                                         color="#e74c3c", legend=False)
+            if tool_world is not None:
+                self._draw_temperature_hatch(tool_world,
+                                             color="#e74c3c", legend=False)
             if not is_lagrangian:
                 self._draw_eul_temperature_hatch(eul_x, eul_y, eul_w, eul_h,
                                                   color="#e74c3c")
@@ -708,7 +831,7 @@ class GeometryPreview(QWidget):
             cfg.analysis.formulation == "Lagrangian"
             and cfg.analysis.tool_motion == "tool_moves"
         )
-        if tool_is_fixed:
+        if tool_is_fixed and tool_world is not None:
             self._draw_tool_encastrement(tool_world, cfg)
 
     # ---------------------------------------------------------------
