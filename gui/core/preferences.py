@@ -53,9 +53,20 @@ class Preferences:
     Preferences dialog or by editing preferences.json directly."""
 
     # ---- Abaqus executable and scripts ----
+    # The Abaqus CLI does not handle paths with spaces well, so the scripts
+    # live in a folder without any (here `abaqus_scripts/` sits next to the
+    # rest of the repo). If the user clones the repo to a path with spaces
+    # they will need to symlink / copy these to a space-free location and
+    # update these prefs.
+    # `abaqus_script` is now `run_simul.py` (was `abq_odb_generator.py`):
+    # this single script builds the model, submits the analysis, waits
+    # for completion, and writes the (.json + .npz) results bundle.
+    # `abaqus_extract_script` is kept as a *separate* extractor that can
+    # be invoked manually on an existing .odb (no model rebuild). The
+    # Job tab pipeline does not use it anymore.
     abaqus_cmd:            str = r"C:\SIMULIA\Commands\abaqus.bat"
-    abaqus_script:         str = r"C:\TEMP\Abaqus_script\abq_odb_generator.py"
-    abaqus_extract_script: str = r"C:\TEMP\Abaqus_script\abq_extract.py"
+    abaqus_script:         str = r"C:\GUI_Abaqus\abaqus_scripts\run_simul.py"
+    abaqus_extract_script: str = r"C:\GUI_Abaqus\abaqus_scripts\extract_odb.py"
 
     # ---- Default working directory for Abaqus jobs ----
     default_workdir: str = r"C:\TEMP\Abaqus_wd"

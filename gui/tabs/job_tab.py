@@ -16,13 +16,15 @@ A future iteration will:
 """
 from __future__ import annotations
 from pathlib import Path
-from PySide6.QtCore import Signal, Qt, QProcess, QProcessEnvironment
+from PySide6.QtCore import Signal, Qt, QProcess, QProcessEnvironment, QTimer
 from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QSpinBox,
     QDoubleSpinBox, QCheckBox, QPushButton, QPlainTextEdit, QFormLayout,
-    QSplitter, QFileDialog, QFrame, QScrollArea, QMessageBox,
+    QSplitter, QFileDialog, QFrame, QScrollArea, QMessageBox, QProgressBar,
 )
+
+from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
 from gui.core.preferences import Preferences
@@ -61,6 +63,8 @@ class JobTab(QWidget):
         # because the user might never click Run, and a QProcess instance
         # carries a small amount of OS state we don't need until then.
         self._proc: QProcess | None = None
+        # Filled in `_run_abaqus`, read by `_finish_pipeline`.
+        self._pipeline: dict = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -87,6 +91,13 @@ class JobTab(QWidget):
         # default — leave most space for the output panel.
         upper_scroll.setMaximumHeight(220)
         outer.addWidget(upper_scroll, stretch=0)
+
+        # ----- Progress panel (visible only when a run is going) -----
+        # Sits between the controls and the output log. It contains the
+        # progress bar (driven by .sta polling) and a one-line status
+        # label with the latest increment / wall time / kinetic energy.
+        # We hide it by default and show it as soon as Run is clicked.
+        outer.addWidget(self._build_progress_panel(), stretch=0)
 
         # ----- Output preview (native scroll inside QPlainTextEdit) -----
         outer.addWidget(self._build_output_panel(), stretch=1)
@@ -176,6 +187,55 @@ class JobTab(QWidget):
         row.addStretch()
         row.addWidget(self.btn_copy)
         return bar
+
+    def _build_progress_panel(self) -> QGroupBox:
+        """Build the run-progress panel.
+
+        Two lines:
+          1. A `QProgressBar` going from 0 to 100 (percent).
+          2. A `QLabel` with the latest .sta info: stage marker,
+             increment number, step time, wall time, KE, dt.
+
+        The panel is hidden when no run is in progress. We use
+        `setVisible(False)` rather than removing it from the layout so
+        that showing/hiding stays cheap.
+        """
+        g = QGroupBox("Progress")
+        v = QVBoxLayout(g)
+        v.setContentsMargins(8, 4, 8, 4)
+        v.setSpacing(4)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        # Show the percent textually on the bar — easier to read for
+        # long runs than the bar fill alone.
+        self.progress_bar.setFormat("%p%")
+        v.addWidget(self.progress_bar)
+
+        self.progress_label = QLabel("waiting for solver…")
+        # Monospace so columns of numbers don't dance around as the
+        # widths change between updates.
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(9)
+        self.progress_label.setFont(mono)
+        self.progress_label.setStyleSheet("color: #444;")
+        v.addWidget(self.progress_label)
+
+        g.setVisible(False)
+        self._progress_group = g
+
+        # Timer that polls the .sta file at a sensible rate. 800 ms is
+        # frequent enough to feel responsive without hammering the
+        # filesystem; the .sta is only updated once per output frame
+        # anyway (typically every few seconds of wall time).
+        self._sta_timer = QTimer(self)
+        self._sta_timer.setInterval(800)
+        self._sta_timer.timeout.connect(self._poll_sta)
+
+        return g
 
     def _build_output_panel(self) -> QGroupBox:
         g = QGroupBox("Output")
@@ -320,8 +380,18 @@ class JobTab(QWidget):
     # =====================================================================
     # Real Abaqus execution (QProcess, non-blocking, streamed output)
     # =====================================================================
+    # `run_simul.py` is a single Abaqus python script that builds the
+    # model, submits the analysis, waits for completion, AND writes the
+    # (.json + .npz) results bundle when done. We launch it once via
+    # QProcess and stream its output. No two-phase pipeline anymore —
+    # this was previously split (generator + standalone extractor) but
+    # the extractor sometimes raced against the still-running solver
+    # when launched from a separate process. Doing everything inside
+    # one Abaqus python invocation gives us a hard guarantee that the
+    # .odb is complete before extraction starts.
+
     def _run_abaqus(self):
-        """Launch the Abaqus generator script in a child process. Output
+        """Launch the run_simul.py script in a child process. Output
         (stdout + stderr merged) is streamed live into the output panel
         as it arrives. The GUI thread remains responsive throughout.
         """
@@ -345,7 +415,7 @@ class JobTab(QWidget):
         if not Path(prefs.abaqus_cmd).exists():
             problems.append(f"Abaqus command not found: {prefs.abaqus_cmd}")
         if not Path(prefs.abaqus_script).exists():
-            problems.append(f"Generator script not found: {prefs.abaqus_script}")
+            problems.append(f"Script not found: {prefs.abaqus_script}")
         wd = Path(workdir)
         try:
             wd.mkdir(parents=True, exist_ok=True)
@@ -356,10 +426,22 @@ class JobTab(QWidget):
                 self, "Cannot launch Abaqus",
                 "Please fix these issues before running:\n\n• "
                 + "\n• ".join(problems)
-                + "\n\nYou can edit the Abaqus command and generator path\n"
+                + "\n\nYou can edit the Abaqus command and script paths\n"
                   "in the Preferences dialog (top-left menu).",
             )
             return
+
+        # Bookkeeping for the output panel / Open-results message AND
+        # for the .sta poller (the progress bar needs sim_time to compute
+        # the fraction when the frame ratio isn't yet available).
+        self._pipeline = {
+            "workdir":  wd,
+            "job_name": job_name,
+            "out_path": wd / f"{job_name}.results.npz",
+            "sta_path": wd / f"{job_name}.sta",
+            "sim_time": float(self.cfg.step.sim_time),
+            "n_frames": int(self.cfg.step.n_frames),
+        }
 
         # Build the args (same construction as the dry-run + ABQ.run_simul)
         model_params = self.cfg.to_params_dict()
@@ -382,9 +464,9 @@ class JobTab(QWidget):
             f"Working directory:  {workdir}",
             f"CPUs:               {cpus}",
             f"Abaqus command:     {prefs.abaqus_cmd}",
-            f"Generator script:   {prefs.abaqus_script}",
+            f"Script:             {prefs.abaqus_script}",
             "-" * 72,
-            "Live output (stdout + stderr):",
+            "Live output (build + solve + extract):",
             "-" * 72,
             "",
         ]
@@ -406,8 +488,90 @@ class JobTab(QWidget):
         self.btn_cancel.setEnabled(True)
         self.btn_generate.setEnabled(False)
 
+        # Show + reset the progress panel, then start polling the .sta.
+        # The .sta won't exist for the first few seconds (Abaqus is busy
+        # generating the .inp and parsing it); the parser handles missing
+        # files gracefully, so we just keep polling until it appears.
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("starting Abaqus (waiting for solver)…")
+        self._progress_group.setVisible(True)
+        self._sta_timer.start()
+
         # Launch
         self._proc.start(prefs.abaqus_cmd, args)
+
+    def _finish_pipeline(self, success: bool):
+        """Restore button states and emit a final marker. Called once
+        the Abaqus run is over (success or failure)."""
+        # Stop the .sta poller and finalise the progress display.
+        self._sta_timer.stop()
+        if success:
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("done.")
+        else:
+            # Leave the bar where it was so the user can see how far
+            # we got before the failure.
+            self.progress_label.setText("failed — see output below.")
+
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("Run Abaqus")
+        self.btn_cancel.setEnabled(False)
+        self.btn_generate.setEnabled(True)
+        self._proc = None
+        if success:
+            pipe = getattr(self, "_pipeline", None)
+            if pipe and Path(pipe["out_path"]).exists():
+                self._append_output(
+                    "\n[READY] Results bundle written to:\n"
+                    f"  {pipe['out_path']}\n"
+                    "Switch to the Results tab and click 'Load results…' "
+                    "to view it.\n"
+                )
+
+    def _poll_sta(self):
+        """Read the .sta file and update the progress bar + label.
+
+        Called periodically by `_sta_timer`. The parser returns an
+        empty snapshot until the solver has actually produced
+        something; in that case we leave the bar at 0 and the label
+        with its waiting message.
+        """
+        pipe = getattr(self, "_pipeline", {})
+        sta_path = pipe.get("sta_path")
+        if not sta_path:
+            return
+        snap = parse_sta(sta_path)
+        if not snap.is_ready():
+            return
+
+        # Compute the percentage. Prefer the explicit frame ratio from
+        # the "Output Field Frame Number" rows (most reliable). Fall
+        # back to step_time / sim_time if only the inc row is parsed.
+        frac = snap.fraction()
+        if frac is None and snap.step_time is not None:
+            sim_time = pipe.get("sim_time", 0.0) or 0.0
+            if sim_time > 0:
+                frac = snap.step_time / sim_time
+        if frac is not None:
+            pct = max(0, min(100, int(round(frac * 100))))
+            self.progress_bar.setValue(pct)
+
+        # Build the one-line status string. We pick the most useful
+        # fields (inc, step time, wall, dt, KE) and format them tight.
+        parts = []
+        if snap.frame_current is not None and snap.frame_total is not None:
+            parts.append(f"frame {snap.frame_current}/{snap.frame_total}")
+        if snap.inc_number is not None:
+            parts.append(f"inc {snap.inc_number}")
+        if snap.step_time is not None:
+            parts.append(f"t = {snap.step_time:.3e} s")
+        if snap.wall_time is not None:
+            parts.append(f"wall {snap.wall_time}")
+        if snap.stable_dt is not None:
+            parts.append(f"dt = {snap.stable_dt:.2e}")
+        if snap.kinetic_energy is not None:
+            parts.append(f"KE = {snap.kinetic_energy:.2e}")
+        self.progress_label.setText("   ·   ".join(parts))
 
     def _cancel_run(self):
         """Forcefully terminate the running Abaqus process. Use sparingly:
@@ -444,31 +608,41 @@ class JobTab(QWidget):
         self._append_output(text)
 
     def _on_proc_finished(self, exit_code: int, exit_status):
-        """Slot connected to QProcess.finished. Restores button states
-        and prints a summary footer."""
+        """Slot connected to QProcess.finished. The single Abaqus run
+        is over (either it generated the model, ran the solver, and
+        wrote the bundle; or something failed along the way)."""
         # Flush any remaining buffered output before the footer
         if self._proc is not None:
             tail = bytes(self._proc.readAllStandardOutput())
             if tail:
                 self._append_output(tail.decode("cp1252", errors="replace"))
 
-        if exit_status == QProcess.NormalExit and exit_code == 0:
-            footer = "\n" + "=" * 72 + "\n[DONE] Abaqus exited cleanly (code 0)\n"
+        clean = (exit_status == QProcess.NormalExit and exit_code == 0)
+        # Cross-check: did we actually get the .npz on disk? Abaqus's
+        # wrapper sometimes swallows the inner script's exit code.
+        pipe = getattr(self, "_pipeline", {})
+        out_path = pipe.get("out_path")
+        bundle_ok = out_path is not None and Path(out_path).exists()
+        success = clean and bundle_ok
+
+        if success:
+            footer = "\n" + "=" * 72 + "\n[OK] Run finished\n"
+        elif clean and not bundle_ok:
+            footer = (
+                "\n" + "=" * 72 +
+                "\n[FAILED] Abaqus reported success but no results bundle "
+                "was written.\n"
+                f"Expected: {out_path}\n"
+                "Check the output above for the actual error.\n"
+            )
         else:
             footer = (
                 "\n" + "=" * 72 +
-                f"\n[FAILED] Abaqus exit code: {exit_code}, status: {exit_status}\n"
+                f"\n[FAILED] Abaqus exit code: {exit_code}, "
+                f"status: {exit_status}\n"
             )
-            # Hint: Abaqus often writes the actual error to STDOUT before
-            # exiting non-zero, so the output panel above already contains
-            # the diagnostic; we don't need to pop a dialog.
         self._append_output(footer)
-
-        self.btn_run.setEnabled(True)
-        self.btn_run.setText("Run Abaqus")
-        self.btn_cancel.setEnabled(False)
-        self.btn_generate.setEnabled(True)
-        self._proc = None
+        self._finish_pipeline(success=success)
 
     def _on_proc_error(self, error):
         """Slot connected to QProcess.errorOccurred. Fires for issues

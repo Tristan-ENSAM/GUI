@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import sys
+import os
 import argparse
 import ast
 from decimal import Decimal, getcontext
@@ -764,6 +765,452 @@ myJob = mdb.Job(
     explicitPrecision=DOUBLE,
     nodalOutputPrecision=FULL,
 )
-myJob.writeInput()
-# myJob.submit(consistencyChecking=OFF)
-# myJob.waitForCompletion()
+# Run the solver. submit() writes the .inp itself before launching the
+# analysis, so we don't call writeInput() separately. waitForCompletion()
+# blocks until the explicit solver subprocess is fully done — this is
+# critical: it ensures the .odb on disk is complete and ready to read
+# by the extraction block below.
+#
+# We deliberately print just two short markers around the solver call:
+# the per-increment chatter Abaqus dumps to stdout in interactive mode
+# is too noisy for a long Explicit run (hundreds of thousands of incs).
+# The GUI tracks progress by polling the .sta file written by the solver,
+# which has one summary row per output frame — exactly what we need.
+print("[META] job_name=%s" % job_name)
+print("[META] sim_time=%g" % sim_time)
+print("[META] n_frames=%d" % n_frames)
+print("[STAGE] SOLVE_START")
+sys.stdout.flush()
+myJob.submit(consistencyChecking=OFF)
+myJob.waitForCompletion()
+print("[STAGE] SOLVE_DONE")
+sys.stdout.flush()
+
+
+# =============================================================================
+#%% RESULTS EXTRACTION
+# =============================================================================
+# Open the .odb just produced by myJob.submit() and dump a (.json + .npz)
+# bundle following gui/results/FORMAT.md. By running this step *inside*
+# the same Abaqus python invocation we get two guarantees that the
+# previous standalone extract_odb.py couldn't offer:
+#   1. The .odb is complete: waitForCompletion() above blocked until
+#      every frame was written. A separate process spawned afterwards
+#      could (and did) race against the still-running solver in some
+#      edge cases.
+#   2. We always have access to MODEL_CFG (already parsed above), so
+#      the ROI and the cfg snapshot embed naturally without any side
+#      file gymnastics.
+
+print("\n" + "=" * 72)
+print("[STAGE] EXTRACT_START")
+print("EXTRACTING results from %s.odb" % job_name)
+print("=" * 72)
+sys.stdout.flush()
+
+import json as _json
+from odbAccess import openOdb as _openOdb
+from abaqusConstants import CENTROID as _CENTROID
+import numpy as _np
+
+
+def _vprint(msg):
+    """stdout-and-flush — so the GUI's output panel streams progress."""
+    print(msg)
+    sys.stdout.flush()
+
+
+def _bbox_of_array(arr):
+    """Return (min, max) tuples for a (N, 3) numpy array."""
+    return arr.min(axis=0), arr.max(axis=0)
+
+
+def _resolve_roi():
+    """Read bbox from MODEL_CFG. Return a dict {xmin,xmax,...} or None
+    if degenerate. Same contract as parse_roi() in extract_odb.py."""
+    bb = cfg_get(MODEL_CFG, "bbox", {}) or {}
+    try:
+        xmin = float(bb.get("xmin", 0.0)); xmax = float(bb.get("xmax", 0.0))
+        ymin = float(bb.get("ymin", 0.0)); ymax = float(bb.get("ymax", 0.0))
+        zmin = float(bb.get("zmin", 0.0)); zmax = float(bb.get("zmax", 0.0))
+    except (TypeError, ValueError):
+        return None
+    if (xmin == 0 and xmax == 0 and ymin == 0 and ymax == 0
+            and zmin == 0 and zmax == 0):
+        return None
+    return {"xmin": xmin, "xmax": xmax,
+            "ymin": ymin, "ymax": ymax,
+            "zmin": zmin, "zmax": zmax}
+
+
+def _in_bbox(c, roi):
+    """Inclusive bounding-box test."""
+    return (roi["xmin"] <= c[0] <= roi["xmax"]
+            and roi["ymin"] <= c[1] <= roi["ymax"]
+            and roi["zmin"] <= c[2] <= roi["zmax"])
+
+
+def _extract_instance_geometry(inst, roi):
+    """Walk every element of an ODB instance, keep those whose initial
+    centroid is in roi (or all if roi is None). Returns:
+        nodes_init    (n_nodes, 3)  float32, kept nodes only, re-indexed
+        elements      (n_elem, 8)   int32, 0-based connectivity into nodes_init
+        centroids     (n_elem, 3)   float32, initial centroids of kept elements
+        kept_node_ids list[int]     original Abaqus node labels
+        kept_elem_ids list[int]     original Abaqus element labels
+        full_bbox     tuple         ((xmin,ymin,zmin), (xmax,ymax,zmax)) of
+                                    every element in this instance — printed
+                                    as a debug hint so the user can sanity-check
+                                    the ROI against the actual mesh extent.
+    """
+    n_total_nodes = len(inst.nodes)
+    all_coords = _np.zeros((n_total_nodes, 3), dtype=_np.float32)
+    label_to_idx = {}
+    for i in range(n_total_nodes):
+        node = inst.nodes[i]
+        all_coords[i] = node.coordinates
+        label_to_idx[node.label] = i
+
+    n_total_elems = len(inst.elements)
+    all_centroids = _np.zeros((n_total_elems, 3), dtype=_np.float32)
+    elem_connectivities = []
+    elem_labels = []
+    elem_kinds = []  # for filtering
+    for i in range(n_total_elems):
+        elem = inst.elements[i]
+        if elem.type not in ("EC3D8R", "EC3D8RT", "C3D8R", "C3D8RT",
+                              "C3D8", "C3D8T"):
+            elem_connectivities.append(None)
+            elem_labels.append(elem.label)
+            elem_kinds.append(elem.type)
+            continue
+        conn = [label_to_idx[lbl] for lbl in elem.connectivity]
+        all_centroids[i] = all_coords[conn].mean(axis=0)
+        elem_connectivities.append(conn)
+        elem_labels.append(elem.label)
+        elem_kinds.append(elem.type)
+
+    # Compute the mesh's actual bbox (over all hex elements) so the user
+    # can verify their ROI is in the right ballpark.
+    valid_mask = _np.array(
+        [conn is not None for conn in elem_connectivities], dtype=bool
+    )
+    if valid_mask.any():
+        valid_centroids = all_centroids[valid_mask]
+        full_bbox = (valid_centroids.min(axis=0), valid_centroids.max(axis=0))
+    else:
+        full_bbox = (_np.zeros(3), _np.zeros(3))
+
+    # Now apply the ROI filter
+    kept_elements = []
+    kept_centroids = []
+    kept_elem_ids = []
+    for i, conn in enumerate(elem_connectivities):
+        if conn is None:
+            continue
+        if roi is not None and not _in_bbox(all_centroids[i], roi):
+            continue
+        kept_elements.append(conn)
+        kept_centroids.append(all_centroids[i])
+        kept_elem_ids.append(elem_labels[i])
+
+    if len(kept_elements) == 0:
+        return (_np.zeros((0, 3), dtype=_np.float32),
+                _np.zeros((0, 8), dtype=_np.int32),
+                _np.zeros((0, 3), dtype=_np.float32),
+                [], [], full_bbox)
+
+    touched = set()
+    for conn in kept_elements:
+        for n in conn:
+            touched.add(n)
+    touched_sorted = sorted(touched)
+    new_idx_of = {}
+    for new_i, old_i in enumerate(touched_sorted):
+        new_idx_of[old_i] = new_i
+
+    nodes_init = all_coords[touched_sorted]
+    elements_arr = _np.zeros((len(kept_elements), 8), dtype=_np.int32)
+    for i, conn in enumerate(kept_elements):
+        for j in range(8):
+            elements_arr[i, j] = new_idx_of[conn[j]]
+    centroids = _np.asarray(kept_centroids, dtype=_np.float32)
+
+    idx_to_label = {}
+    for lbl, idx in label_to_idx.items():
+        idx_to_label[idx] = lbl
+    kept_node_ids = [idx_to_label[old_i] for old_i in touched_sorted]
+
+    return (nodes_init, elements_arr, centroids,
+            kept_node_ids, kept_elem_ids, full_bbox)
+
+
+def _reduce_VM(vals, comp_labels):
+    """von Mises reduction of a stress tensor."""
+    idx = dict(zip(comp_labels, range(len(comp_labels))))
+    s11 = vals[:, idx["S11"]]; s22 = vals[:, idx["S22"]]
+    s33 = vals[:, idx["S33"]]
+    s12 = vals[:, idx["S12"]] if "S12" in idx else 0.0
+    s13 = vals[:, idx["S13"]] if "S13" in idx else 0.0
+    s23 = vals[:, idx["S23"]] if "S23" in idx else 0.0
+    return _np.sqrt(0.5 * (
+        (s11 - s22) ** 2 + (s22 - s33) ** 2 + (s33 - s11) ** 2
+        + 6.0 * (s12 ** 2 + s13 ** 2 + s23 ** 2)
+    )).astype(_np.float32)
+
+
+def _reduce_identity(vals, comp_labels):
+    if vals.ndim == 2 and vals.shape[1] == 1:
+        return vals[:, 0].astype(_np.float32)
+    return vals.astype(_np.float32)
+
+
+_TENSOR_REDUCERS = {
+    "S_VM": ("S", _reduce_VM),
+}
+
+
+def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly):
+    if var in _TENSOR_REDUCERS:
+        abq_name, reducer = _TENSOR_REDUCERS[var]
+    else:
+        abq_name, reducer = var, _reduce_identity
+
+    kept_set = set(kept_elem_ids)
+    elem_id_to_pos = {}
+    for pos, lbl in enumerate(kept_elem_ids):
+        elem_id_to_pos[lbl] = pos
+    n_elems = len(kept_elem_ids)
+    n_frames = len(step.frames)
+    out = _np.zeros((n_frames, n_elems), dtype=_np.float32)
+
+    for fi in range(n_frames):
+        try:
+            fo = step.frames[fi].fieldOutputs[abq_name]
+        except KeyError:
+            continue
+        try:
+            fo = fo.getSubset(region=root_assembly.instances[inst_name])
+        except (AttributeError, KeyError):
+            pass
+        try:
+            fo = fo.getSubset(position=_CENTROID)
+        except Exception:
+            pass
+        comp_labels = list(fo.componentLabels) if fo.componentLabels else []
+        vals_list = []
+        labels_list = []
+        for v in fo.values:
+            lbl = v.elementLabel
+            if lbl in kept_set:
+                if comp_labels:
+                    vals_list.append(list(v.data))
+                else:
+                    vals_list.append([float(v.data)])
+                labels_list.append(lbl)
+        if not vals_list:
+            continue
+        vals = _np.asarray(vals_list, dtype=_np.float32)
+        if comp_labels:
+            scalars = reducer(vals, comp_labels)
+        else:
+            scalars = _reduce_identity(vals, comp_labels)
+        for k, lbl in enumerate(labels_list):
+            pos = elem_id_to_pos.get(lbl)
+            if pos is not None:
+                out[fi, pos] = scalars[k]
+    return out
+
+
+def _extract_displacements(step, inst_name, kept_node_ids, root_assembly):
+    kept_set = set(kept_node_ids)
+    node_id_to_pos = {}
+    for pos, lbl in enumerate(kept_node_ids):
+        node_id_to_pos[lbl] = pos
+    n_nodes = len(kept_node_ids)
+    n_frames = len(step.frames)
+    out = _np.zeros((n_frames, n_nodes, 3), dtype=_np.float32)
+    for fi in range(n_frames):
+        try:
+            fo = step.frames[fi].fieldOutputs["U"]
+        except KeyError:
+            continue
+        try:
+            fo = fo.getSubset(region=root_assembly.instances[inst_name])
+        except (AttributeError, KeyError):
+            pass
+        for v in fo.values:
+            lbl = v.nodeLabel
+            if lbl in kept_set:
+                pos = node_id_to_pos[lbl]
+                d = v.data
+                out[fi, pos, 0] = d[0]
+                out[fi, pos, 1] = d[1]
+                out[fi, pos, 2] = d[2] if len(d) > 2 else 0.0
+    return out
+
+
+def _extract_history_rf(step):
+    """Return (time, rf1, rf2) or (None, None, None)."""
+    for region_key, region in step.historyRegions.items():
+        outputs = region.historyOutputs
+        if "RF1" in outputs and "RF2" in outputs:
+            rf1_pairs = outputs["RF1"].data
+            rf2_pairs = outputs["RF2"].data
+            t = _np.asarray([p[0] for p in rf1_pairs], dtype=_np.float64)
+            rf1 = _np.asarray([p[1] for p in rf1_pairs], dtype=_np.float32)
+            rf2 = _np.asarray([p[1] for p in rf2_pairs], dtype=_np.float32)
+            return t, rf1, rf2
+    return None, None, None
+
+
+# --- The extraction itself ---
+_roi = _resolve_roi()
+if _roi is None:
+    _vprint("ROI: none (keeping all elements)")
+else:
+    _vprint("ROI: x[%g,%g] y[%g,%g] z[%g,%g]" % (
+        _roi["xmin"], _roi["xmax"],
+        _roi["ymin"], _roi["ymax"],
+        _roi["zmin"], _roi["zmax"]))
+
+_field_vars = ["PEEQ", "TEMP", "S_VM", "EVF"]
+_vprint("Fields requested: " + ", ".join(_field_vars))
+
+_odb_path = job_name + ".odb"
+_vprint("Opening ODB: " + _odb_path)
+_odb = _openOdb(_odb_path, readOnly=True)
+try:
+    _step = _odb.steps["Cut"]
+    _frames = _step.frames
+    _n_frames = len(_frames)
+    _times = _np.asarray([fr.frameValue for fr in _frames], dtype=_np.float64)
+    _vprint("Step 'Cut' has %d frames, t in [%g, %g]"
+            % (_n_frames, _times[0], _times[-1]))
+
+    _npz_payload = {"times": _times}
+    _instances_meta = {}
+
+    for _inst_name in _odb.rootAssembly.instances.keys():
+        _inst = _odb.rootAssembly.instances[_inst_name]
+        _n_elem_total = len(_inst.elements)
+        if _n_elem_total == 0:
+            continue
+        _vprint("\nInstance %s: %d nodes, %d elements"
+                % (_inst_name, len(_inst.nodes), _n_elem_total))
+
+        (_nodes_init, _elements, _centroids,
+         _kept_node_ids, _kept_elem_ids, _full_bbox) = \
+            _extract_instance_geometry(_inst, _roi)
+
+        # Print the full mesh bbox — invaluable when the ROI filter
+        # rejects everything, since it tells the user whether the
+        # ROI numbers are in the right unit/range.
+        _vprint("  mesh bbox: x[%g,%g] y[%g,%g] z[%g,%g]"
+                % (_full_bbox[0][0], _full_bbox[1][0],
+                   _full_bbox[0][1], _full_bbox[1][1],
+                   _full_bbox[0][2], _full_bbox[1][2]))
+        _n_kept_elem = _elements.shape[0]
+        _n_kept_node = _nodes_init.shape[0]
+        _vprint("  kept after ROI: %d nodes, %d elements"
+                % (_n_kept_node, _n_kept_elem))
+        if _n_kept_elem == 0:
+            continue
+
+        _elem_type = _inst.elements[0].type
+        _kind = "eulerian" if _elem_type.startswith("EC") else "lagrangian"
+
+        _npz_payload["%s__nodes_init" % _inst_name] = _nodes_init
+        _npz_payload["%s__elements" % _inst_name] = _elements
+        _npz_payload["%s__element_centroids_init" % _inst_name] = _centroids
+
+        _stored_vars = []
+        for _var in _field_vars:
+            _vprint("  field '%s'..." % _var)
+            try:
+                _arr = _extract_field(_step, _var, _inst_name,
+                                       _kept_elem_ids, _odb.rootAssembly)
+            except KeyError:
+                _vprint("    not available, skipping.")
+                continue
+            _npz_payload["%s__fields__%s" % (_inst_name, _var)] = _arr
+            _stored_vars.append(_var)
+
+        _has_disp = False
+        if _kind == "lagrangian":
+            try:
+                _disp = _extract_displacements(_step, _inst_name,
+                                                _kept_node_ids, _odb.rootAssembly)
+                _npz_payload["%s__displacements" % _inst_name] = _disp
+                _has_disp = True
+                _vprint("  displacements stored.")
+            except Exception as _e:
+                _vprint("  displacement extraction failed: %s" % _e)
+
+        _instances_meta[_inst_name] = {
+            "kind":              _kind,
+            "element_type":      _elem_type,
+            "n_nodes":           int(_n_kept_node),
+            "n_elements":        int(_n_kept_elem),
+            "n_frames":          int(_n_frames),
+            "field_variables":   _stored_vars,
+            "has_displacements": _has_disp,
+        }
+
+    _vprint("\nExtracting history...")
+    _h_t, _rf1, _rf2 = _extract_history_rf(_step)
+    _history_vars = []
+    if _h_t is not None:
+        _npz_payload["history__time"] = _h_t
+        _npz_payload["history__RF1_RP"] = _rf1
+        _npz_payload["history__RF2_RP"] = _rf2
+        _history_vars = ["RF1_RP", "RF2_RP"]
+        _vprint("  history: %d samples, RF1/RF2 stored" % len(_h_t))
+    else:
+        _vprint("  no RP history found.")
+
+    # Metadata
+    from datetime import datetime as _datetime
+    _meta = {
+        "format_version": 1,
+        "saved_at":       _datetime.now().isoformat(),
+        "source_odb":     os.path.abspath(_odb_path),
+        "job_name":       job_name,
+        "step_name":      "Cut",
+        "times":          _times.tolist(),
+        "roi": {
+            "applied": _roi is not None,
+            "xmin": (_roi["xmin"] if _roi else 0.0),
+            "xmax": (_roi["xmax"] if _roi else 0.0),
+            "ymin": (_roi["ymin"] if _roi else 0.0),
+            "ymax": (_roi["ymax"] if _roi else 0.0),
+            "zmin": (_roi["zmin"] if _roi else 0.0),
+            "zmax": (_roi["zmax"] if _roi else 0.0),
+        },
+        "model_config": MODEL_CFG,
+        "instances":    _instances_meta,
+        "history": {
+            "n_samples": int(len(_h_t)) if _h_t is not None else 0,
+            "variables": _history_vars,
+        },
+    }
+
+    _out_npz = job_name + ".results.npz"
+    _out_json = job_name + ".results.json"
+    _vprint("\nWriting %s ..." % _out_npz)
+    _np.savez_compressed(_out_npz, **_npz_payload)
+    _vprint("Writing %s ..." % _out_json)
+    _f = open(_out_json, "w")
+    try:
+        _json.dump(_meta, _f, indent=2)
+    finally:
+        _f.close()
+
+    _vprint("\nDone. Results bundle ready:")
+    _vprint("  " + os.path.abspath(_out_npz))
+    _vprint("  " + os.path.abspath(_out_json))
+finally:
+    _odb.close()
+
+print("[STAGE] EXTRACT_DONE")
+sys.stdout.flush()
