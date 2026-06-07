@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 import numpy as np
 
 from gui.results.reader import ResultsBundle, ResultsLoadError
+from gui.results.export_txt import export_bundle
 from gui.widgets.field_viewer       import FieldViewer
 from gui.widgets.time_series_viewer import TimeSeriesViewer
 
@@ -84,6 +85,14 @@ class ResultsTab(QWidget):
         self.btn_load.clicked.connect(self._on_load_clicked)
         bar.addWidget(self.btn_load)
 
+        self.btn_export = QPushButton("Export…")
+        self.btn_export.setToolTip(
+            "Export every field to .txt (one file per quantity):\n"
+            "rows = elements (index in header), columns = time steps (s)."
+        )
+        self.btn_export.clicked.connect(self._on_export_clicked)
+        bar.addWidget(self.btn_export)
+
         # Run picker (currently single-run, but the combo is here for
         # future multi-run comparison).
         bar.addWidget(QLabel("Run:"))
@@ -91,6 +100,16 @@ class ResultsTab(QWidget):
         self.cb_run.setMinimumWidth(180)
         self.cb_run.currentTextChanged.connect(self._on_run_changed)
         bar.addWidget(self.cb_run)
+
+        bar.addWidget(self._vline())
+
+        # Instance picker (Eulerian workpiece / Lagrangian tool). Defaults
+        # to the Eulerian instance, which carries the cutting fields.
+        bar.addWidget(QLabel("Instance:"))
+        self.cb_inst = QComboBox()
+        self.cb_inst.setMinimumWidth(110)
+        self.cb_inst.currentTextChanged.connect(self._on_instance_changed)
+        bar.addWidget(self.cb_inst)
 
         bar.addWidget(self._vline())
 
@@ -167,6 +186,29 @@ class ResultsTab(QWidget):
             return
         self.load_bundle(path_str)
 
+    def _on_export_clicked(self):
+        """Export every field of the loaded run to .txt (one per quantity)."""
+        if self._active_run is None:
+            QMessageBox.information(self, "Export",
+                                    "Load a results bundle first.")
+            return
+        outdir = QFileDialog.getExistingDirectory(
+            self, "Choose a folder for the exported .txt files", "")
+        if not outdir:
+            return
+        bundle = self._runs[self._active_run]
+        try:
+            written = export_bundle(bundle, outdir)
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        QMessageBox.information(
+            self, "Export complete",
+            "Wrote %d file(s) to:\n%s\n\n"
+            "Layout: one row per element (index in the header column), "
+            "one column per time step (time in seconds in the header row)."
+            % (len(written), outdir))
+
     def load_bundle(self, path: str | Path):
         """Programmatically load a bundle (also used by tests). Wraps
         ResultsBundle.load with friendly error reporting."""
@@ -212,16 +254,34 @@ class ResultsTab(QWidget):
         # comes in phase 2.
         instances = bundle.instance_names
         if not instances:
+            QMessageBox.warning(
+                self, "No field data in this bundle",
+                "This results bundle contains no instance with field data "
+                "(0 elements were kept).\n\n"
+                "The most common cause is an ROI (bbox) that filters out "
+                "every element. Re-extract with no ROI, or set a bbox with "
+                "positive x/y extent that overlaps the workpiece.\n\n"
+                "History curves (RF1/RF2), if present, are still available."
+            )
+            # Still try to show history so the run isn't a total dead end.
+            self.ts_viewer.clear()
+            try:
+                hist_t = bundle.history_time
+                for var in bundle.history_info.variables:
+                    self.ts_viewer.add_series(var, hist_t, bundle.history(var))
+            except Exception:
+                pass
             return
-        info = bundle.instance(instances[0])
-        self.cb_field.blockSignals(True)
-        self.cb_field.clear()
-        for v in info.field_variables:
-            self.cb_field.addItem(v)
-        self.cb_field.blockSignals(False)
+        # ----- Populate the instance picker, default to the Eulerian -----
+        self.cb_inst.blockSignals(True)
+        self.cb_inst.clear()
+        for nm in instances:
+            self.cb_inst.addItem(nm)
+        self.cb_inst.setCurrentText(self._default_instance(bundle))
+        self.cb_inst.blockSignals(False)
 
-        # ----- Build the static mesh in the field viewer -----
-        self._init_field_mesh()
+        # ----- Populate field combo + mesh for the selected instance -----
+        self._load_instance_fields()
 
         # ----- Populate the time-series viewer with history -----
         self.ts_viewer.clear()
@@ -246,6 +306,67 @@ class ResultsTab(QWidget):
         self._on_field_changed()  # uses current cb_field value
 
     # =====================================================================
+    # Instance selection
+    # =====================================================================
+    def _default_instance(self, bundle) -> str:
+        """Pick the instance to show by default: the Eulerian one (the
+        cutting workpiece, which carries PEEQ/TEMP/MISES/EVF); else the
+        instance with the most field variables; else the first."""
+        names = bundle.instance_names
+        euler = [n for n in names
+                 if getattr(bundle.instance(n), "kind", "") == "eulerian"
+                 and bundle.instance(n).field_variables]
+        if euler:
+            return max(euler, key=lambda n: len(bundle.instance(n).field_variables))
+        with_fields = [n for n in names if bundle.instance(n).field_variables]
+        if with_fields:
+            return max(with_fields,
+                       key=lambda n: len(bundle.instance(n).field_variables))
+        return names[0]
+
+    def _current_instance(self):
+        """The instance currently selected in the picker (fallback: first)."""
+        if self._active_run is None:
+            return None
+        names = self._runs[self._active_run].instance_names
+        if not names:
+            return None
+        sel = self.cb_inst.currentText()
+        return sel if sel in names else names[0]
+
+    def _load_instance_fields(self):
+        """Populate the field combo and mesh for the selected instance."""
+        if self._active_run is None:
+            return
+        bundle = self._runs[self._active_run]
+        inst = self._current_instance()
+        if inst is None:
+            return
+        info = bundle.instance(inst)
+        self.cb_field.blockSignals(True)
+        self.cb_field.clear()
+        for v in info.field_variables:
+            self.cb_field.addItem(v)
+        # Default to a field that actually shows structure at frame 0
+        # (PEEQ is zero everywhere initially and looks blank). Prefer EVF
+        # (material vs void), then a temperature field.
+        for pref in ("EVF", "TEMP", "NT11", "V"):
+            i = self.cb_field.findText(pref)
+            if i >= 0:
+                self.cb_field.setCurrentIndex(i)
+                break
+        self.cb_field.blockSignals(False)
+        self._init_field_mesh()
+
+    def _on_instance_changed(self, name: str):
+        """User picked a different instance: rebuild field combo + mesh,
+        then redraw the current frame."""
+        if self._active_run is None or not name:
+            return
+        self._load_instance_fields()
+        self._on_field_changed()
+
+    # =====================================================================
     # Field rendering
     # =====================================================================
     def _init_field_mesh(self):
@@ -254,7 +375,10 @@ class ResultsTab(QWidget):
         if self._active_run is None:
             return
         bundle = self._runs[self._active_run]
-        info = bundle.instance(bundle.instance_names[0])
+        inst = self._current_instance()
+        if inst is None:
+            return
+        info = bundle.instance(inst)
 
         nodes = bundle.nodes_init(info.name)         # (n_nodes, 3)
         elems = bundle.elements(info.name)            # (n_elements, 8)
@@ -262,7 +386,17 @@ class ResultsTab(QWidget):
         # element (the z=zmin face for standard C3D8 ordering).
         # The mesh viewer doesn't care about z.
         nodes_xy = nodes[:, :2]
-        face_idx = elems[:, :4]
+        conn = np.asarray(elems)                      # (n_elem, 8) local idx
+        # Robust 2D face: order each element's projected nodes CCW around
+        # their centroid. Taking elems[:, :4] blindly can pick a face that
+        # spans the thin (z) direction, collapsing to a zero-area quad in
+        # x-y (invisible). Angle-ordering all 8 projected nodes traces the
+        # correct footprint regardless of C3D8 ordering / thin axis.
+        P = nodes_xy[conn]                            # (n_elem, 8, 2)
+        c = P.mean(axis=1, keepdims=True)
+        ang = np.arctan2(P[:, :, 1] - c[:, :, 1], P[:, :, 0] - c[:, :, 0])
+        order = np.argsort(ang, axis=1)
+        face_idx = np.take_along_axis(conn, order, axis=1)   # (n_elem, 8)
         self.field_viewer.set_mesh(nodes_xy, face_idx)
 
     def _on_field_changed(self):
@@ -275,7 +409,10 @@ class ResultsTab(QWidget):
         var = self.cb_field.currentText()
         if not var:
             return
-        info = bundle.instance(bundle.instance_names[0])
+        inst = self._current_instance()
+        if inst is None:
+            return
+        info = bundle.instance(inst)
         try:
             field = bundle.field(info.name, var)
         except KeyError:
@@ -302,7 +439,10 @@ class ResultsTab(QWidget):
         var = self.cb_field.currentText()
         if not var:
             return
-        info = bundle.instance(bundle.instance_names[0])
+        inst = self._current_instance()
+        if inst is None:
+            return
+        info = bundle.instance(inst)
         try:
             field = bundle.field(info.name, var)
         except KeyError:

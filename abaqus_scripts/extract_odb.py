@@ -26,7 +26,9 @@ Arguments:
                 to embed verbatim in the bundle's metadata. The Job tab
                 writes this file alongside the .odb at run time.
     --fields    Comma-separated list of field variables to extract.
-                Default: PEEQ,TEMP,S_VM,EVF (matches the typical CEL run).
+                Default: EVF,TEMP,V (Eulerian: fill fraction, element
+                temperature, nodal velocity magnitude). PEEQ / MISES on
+                request.
     --history   Comma-separated list of history variables to extract,
                 each in the form "name@instance.set". The RP forces are
                 exposed as a special shorthand "RF1_RP" / "RF2_RP".
@@ -109,8 +111,11 @@ def parse_roi_from_cfg(cfg_path):
         zmax = float(bb.get("zmax", 0.0))
     except (TypeError, ValueError):
         return None
-    if (xmin == 0 and xmax == 0 and ymin == 0 and ymax == 0
-            and zmin == 0 and zmax == 0):
+    # An ROI only filters when it has POSITIVE in-plane extent (x AND y).
+    # The model is a thin plane-strain slab whose default bbox only encodes
+    # a tiny z-thickness (e.g. {0,0,0,0,0,1e-4}); the old "all six == 0"
+    # test let that through as an active ROI and dropped every element.
+    if xmax <= xmin or ymax <= ymin:
         return None
     return {"xmin": xmin, "xmax": xmax,
             "ymin": ymin, "ymax": ymax,
@@ -118,11 +123,12 @@ def parse_roi_from_cfg(cfg_path):
 
 
 def in_bbox(c, roi):
-    """Return True iff the (x,y,z) centroid c lies in the ROI bbox.
-    Inclusive on all sides — element on the boundary is kept."""
+    """Return True iff the centroid c lies in the ROI, tested in the
+    (x, y) plane only. z is intentionally ignored: the model is a thin
+    plane-strain slab, so filtering on the slab thickness would exclude
+    every element. Inclusive on all sides."""
     return (roi["xmin"] <= c[0] <= roi["xmax"]
-            and roi["ymin"] <= c[1] <= roi["ymax"]
-            and roi["zmin"] <= c[2] <= roi["zmax"])
+            and roi["ymin"] <= c[1] <= roi["ymax"])
 
 
 # =============================================================================
@@ -152,22 +158,40 @@ def extract_instance_geometry(instance, roi):
         all_coords[i] = node.coordinates
         label_to_idx[node.label] = i
 
-    # Walk every element, compute its centroid, keep it if inside ROI.
-    n_total_elems = len(instance.elements)
+    # Element subset. When a ROI is active, use Abaqus' C-level
+    # getByBoundingBox (much faster than a Python centroid loop on tens of
+    # thousands of elements) and derive the node ROI from the kept
+    # elements' connectivity, so element- and node-outputs stay consistent.
+    elem_seq = instance.elements
+    if roi is not None:
+        zmin = roi.get("zmin"); zmax = roi.get("zmax")
+        zlo = -1.0e20 if zmin is None else zmin
+        zhi = 1.0e20 if zmax is None else zmax
+        # pad slightly so boundary nodes of the thin slab aren't excluded
+        ex = 1.0e-6 * (roi["xmax"] - roi["xmin"] + 1.0)
+        ey = 1.0e-6 * (roi["ymax"] - roi["ymin"] + 1.0)
+        try:
+            elem_seq = instance.elements.getByBoundingBox(
+                xMin=roi["xmin"] - ex, xMax=roi["xmax"] + ex,
+                yMin=roi["ymin"] - ey, yMax=roi["ymax"] + ey,
+                zMin=zlo, zMax=zhi)
+            _vprint("  ROI getByBoundingBox kept %d / %d elements"
+                    % (len(elem_seq), len(instance.elements)))
+        except Exception as _e:
+            _vprint("  getByBoundingBox unavailable (%s); keeping all" % _e)
+            elem_seq = instance.elements
+
     kept_elements = []      # connectivity rows referencing all_coords indices
     kept_centroids = []
     kept_elem_ids = []      # original Abaqus labels (1-based)
 
-    for i in range(n_total_elems):
-        elem = instance.elements[i]
+    for elem in elem_seq:
         if elem.type not in ("EC3D8R", "EC3D8RT", "C3D8R", "C3D8RT",
                               "C3D8", "C3D8T"):
             continue
         # 8 nodes per hex
         conn = [label_to_idx[lbl] for lbl in elem.connectivity]
         c = all_coords[conn].mean(axis=0)
-        if roi is not None and not in_bbox(c, roi):
-            continue
         kept_elements.append(conn)
         kept_centroids.append(c)
         kept_elem_ids.append(elem.label)
@@ -216,16 +240,13 @@ def extract_instance_geometry(instance, roi):
 # of shape (n_elements,). For scalar fields the reducer is the identity.
 def _reduce_VM(vals, comp_labels):
     """Reduce a stress tensor to its von Mises equivalent. Expects 6
-    components in Abaqus order: S11 S22 S33 S12 S13 S23."""
-    # Index the components by their label so we don't depend on a fixed
-    # array order across Abaqus versions.
+    components in Abaqus order: S11 S22 S33 S12 S13 S23. Missing
+    components are treated as zero (never raises)."""
     idx = dict(zip(comp_labels, range(len(comp_labels))))
-    s11 = vals[:, idx["S11"]]
-    s22 = vals[:, idx["S22"]]
-    s33 = vals[:, idx["S33"]]
-    s12 = vals[:, idx["S12"]] if "S12" in idx else 0.0
-    s13 = vals[:, idx["S13"]] if "S13" in idx else 0.0
-    s23 = vals[:, idx["S23"]] if "S23" in idx else 0.0
+    def col(name):
+        return vals[:, idx[name]] if name in idx else 0.0
+    s11, s22, s33 = col("S11"), col("S22"), col("S33")
+    s12, s13, s23 = col("S12"), col("S13"), col("S23")
     return np.sqrt(0.5 * (
         (s11 - s22) ** 2 + (s22 - s33) ** 2 + (s33 - s11) ** 2
         + 6.0 * (s12 ** 2 + s13 ** 2 + s23 ** 2)
@@ -233,10 +254,11 @@ def _reduce_VM(vals, comp_labels):
 
 
 def _reduce_pressure(vals, comp_labels):
-    """Hydrostatic pressure: -(s11 + s22 + s33) / 3."""
+    """Hydrostatic pressure: -(s11 + s22 + s33) / 3. Missing comps = 0."""
     idx = dict(zip(comp_labels, range(len(comp_labels))))
-    return (-(vals[:, idx["S11"]] + vals[:, idx["S22"]]
-              + vals[:, idx["S33"]]) / 3.0).astype(np.float32)
+    def col(name):
+        return vals[:, idx[name]] if name in idx else 0.0
+    return (-(col("S11") + col("S22") + col("S33")) / 3.0).astype(np.float32)
 
 
 def _reduce_identity(vals, comp_labels):
@@ -248,29 +270,111 @@ def _reduce_identity(vals, comp_labels):
 
 # Tensor-derived "virtual" field variables
 TENSOR_REDUCERS = {
-    "S_VM": ("S", _reduce_VM),
-    "S_P":  ("S", _reduce_pressure),
+    "MISES": ("S", _reduce_VM),   # von Mises (Abaqus invariant name)
+    "S_VM":  ("S", _reduce_VM),   # backward-compatible alias
+    "S_P":   ("S", _reduce_pressure),
 }
 
+# Stress invariants available natively on the S field via
+# getScalarField(invariant=...). Preferred over recombining components,
+# which can fail on CEL per-material fields whose componentLabels are not
+# reported as plain 'S11'.. . If the invariant call fails we fall back to
+# the (now guard-safe) component reducers above.
+_STRESS_INVARIANT = {"MISES": "MISES", "S_VM": "MISES", "S_P": "PRESS"}
 
-def extract_field(step, var, instance_name, kept_elem_ids):
+
+def _read_data(v):
+    """Read a field value's data, tolerant of double-precision ODBs.
+
+    Abaqus raises 'Data is double precision. Use dataDouble()' on
+    `value.data` when the analysis ran in double precision (this model
+    does). Fall back to `dataDouble` in that case."""
+    try:
+        return v.data
+    except Exception:
+        return v.dataDouble
+
+
+def _resolve_fo_name(step, abq_var, instance_name, root_assembly, max_probe=3):
+    """Find the real fieldOutputs key for `abq_var` on `instance_name`.
+
+    Abaqus/CEL stores per-material results on an Eulerian instance under a
+    suffixed name, e.g.
+        PEEQ -> 'PEEQ_ASSEMBLY_EULER_EULER-1'
+        S    -> 'S_ASSEMBLY_EULER_EULER-1'
+        TEMP -> 'TEMP_ASSEMBLY_EULER_EULER-1'   (Eulerian)
+        EVF  -> 'EVF_ASSEMBLY_EULER_EULER-1'    (material)  + 'EVF_VOID'
+    while the bare names (e.g. 'TEMP') may carry ONLY the Lagrangian tool's
+    values. We pick the candidate key that actually has values on the
+    target instance, preferring: exact name, then a material-suffixed
+    name, then a '*_VOID' name as last resort.
+
+    Returns the key string, or None if nothing carries values on the
+    instance. The key is consistent across frames, so we resolve once.
+    """
+    inst = root_assembly.instances[instance_name]
+    n = len(step.frames)
+    probe = [0]
+    if n > 2:
+        probe.append(n // 2)
+    probe.append(n - 1)
+
+    def _has_inst_values(fo):
+        try:
+            return len(fo.getSubset(region=inst).values) > 0
+        except Exception:
+            return False
+
+    for fi in probe[:max_probe]:
+        keys = list(step.frames[fi].fieldOutputs.keys())
+        exact     = [k for k in keys if k == abq_var]
+        suffixed  = [k for k in keys if k.startswith(abq_var + "_")]
+        suff_mat  = [k for k in suffixed if not k.endswith("_VOID")]
+        suff_void = [k for k in suffixed if k.endswith("_VOID")]
+        # Bare names can be shared across instances (e.g. 'TEMP' carries
+        # only the Lagrangian tool), so require values ON this instance.
+        for k in exact:
+            if _has_inst_values(step.frames[fi].fieldOutputs[k]):
+                return k
+        # CEL material-suffixed names (e.g. 'S_ASSEMBLY_EULER_EULER-1') are
+        # specific to the Eulerian material/instance. If the key references
+        # THIS instance, trust the name: getSubset/.values can be unreliable
+        # for some tensor fields (S) even though the data is present.
+        for k in (suff_mat + suff_void):
+            if instance_name in k:
+                return k
+        # Otherwise fall back to a getSubset value check (covers suffixes
+        # that don't embed the instance name).
+        for k in (suff_mat + suff_void):
+            if _has_inst_values(step.frames[fi].fieldOutputs[k]):
+                return k
+    return None
+
+
+def extract_field(step, var, instance_name, kept_elem_ids, root_assembly):
     """Build a (n_frames, n_kept_elements) array for `var` over the
     whole step, restricted to the elements we kept.
 
     Strategy:
-      - For each frame, request the field output for `var`.
-      - Filter the values to keep only those whose elementLabel is in
-        `kept_elem_ids` (preserved as a Python set for O(1) lookup).
+      - Resolve the real ODB field name for `var` on this instance
+        (handles CEL per-material suffixes); raise KeyError if none.
+      - For each frame, read the field, restrict to the instance and to
+        element-centroid values, keep only kept_elem_ids.
       - For tensor variables (S), reduce to a scalar (VM or pressure).
     """
-    # Resolve the actual Abaqus variable name and reducer
+    # Resolve the requested Abaqus variable name and reducer
     if var in TENSOR_REDUCERS:
-        abq_name, reducer = TENSOR_REDUCERS[var]
+        abq_var, reducer = TENSOR_REDUCERS[var]
     else:
-        abq_name, reducer = var, _reduce_identity
+        abq_var, reducer = var, _reduce_identity
+    inv_name = _STRESS_INVARIANT.get(var)   # "MISES" | "PRESS" | None
+
+    key = _resolve_fo_name(step, abq_var, instance_name, root_assembly)
+    if key is None:
+        # Not present on this instance (e.g. PEEQ/S/EVF on the rigid tool).
+        raise KeyError(abq_var)
 
     kept_set = set(kept_elem_ids)
-    # We need values in the same element ORDER as kept_elem_ids
     elem_id_to_pos = {}
     for pos, lbl in enumerate(kept_elem_ids):
         elem_id_to_pos[lbl] = pos
@@ -280,37 +384,77 @@ def extract_field(step, var, instance_name, kept_elem_ids):
     n_frames = len(frames)
     out = np.zeros((n_frames, n_elems), dtype=np.float32)
 
-    for fi in range(n_frames):
-        frame = frames[fi]
-        fo = frame.fieldOutputs[abq_name]
-        # Restrict to the instance (in case multiple instances have the var)
+    try:
+        from abaqusConstants import CENTROID
+    except Exception:
+        CENTROID = None
+    # Resolve the native stress invariant constant once (if requested).
+    invariant = None
+    if inv_name is not None:
         try:
-            fo = fo.getSubset(region=step.parent.rootAssembly.instances[instance_name])
-        except (AttributeError, KeyError):
-            pass
-        # Try element-based output (CENTROID position)
-        try:
-            from abaqusConstants import CENTROID
-            fo = fo.getSubset(position=CENTROID)
+            import abaqusConstants as _abqc
+            invariant = getattr(_abqc, inv_name, None)
         except Exception:
-            pass
-        # Build (n_values, n_components) array
+            invariant = None
+
+    inst = root_assembly.instances[instance_name]
+    # Decide once whether restricting to the instance yields values for
+    # this field. Some CEL tensor fields (e.g. S) don't subset by instance
+    # cleanly even though their values belong to it; in that case we read
+    # the full field and rely on element-label filtering below (the
+    # suffixed field only carries this instance's elements anyway).
+    use_region = False
+    probe_fi = (n_frames // 2) if n_frames > 1 else 0
+    try:
+        if len(frames[probe_fi].fieldOutputs[key].getSubset(region=inst).values) > 0:
+            use_region = True
+    except Exception:
+        use_region = False
+
+    for fi in range(n_frames):
+        try:
+            fo = frames[fi].fieldOutputs[key]
+        except KeyError:
+            continue
+        if use_region:
+            try:
+                fo = fo.getSubset(region=inst)
+            except (AttributeError, KeyError):
+                pass
+        # von Mises / pressure: prefer the native scalar invariant (avoids
+        # recombining tensor components, which can fail on CEL S fields).
+        src = fo
+        used_invariant = False
+        if invariant is not None:
+            try:
+                src = fo.getScalarField(invariant=invariant)
+                used_invariant = True
+            except Exception:
+                src, used_invariant = fo, False
+        if not used_invariant and CENTROID is not None:
+            try:
+                src = src.getSubset(position=CENTROID)
+            except Exception:
+                pass
+        comp_labels = [] if used_invariant else (
+            list(src.componentLabels) if src.componentLabels else [])
         vals_list = []
         labels_list = []
-        comp_labels = list(fo.componentLabels) if fo.componentLabels else []
-        for v in fo.values:
+        for v in src.values:
             lbl = v.elementLabel
             if lbl in kept_set:
                 if comp_labels:
-                    vals_list.append(list(v.data))
+                    vals_list.append(list(_read_data(v)))
                 else:
-                    vals_list.append([float(v.data)])
+                    vals_list.append([float(_read_data(v))])
                 labels_list.append(lbl)
         if not vals_list:
             continue
         vals = np.asarray(vals_list, dtype=np.float32)
-        scalars = reducer(vals, comp_labels) if comp_labels else _reduce_identity(vals, comp_labels)
-        # Place each scalar at its correct column based on element label
+        if comp_labels:
+            scalars = reducer(vals, comp_labels)
+        else:
+            scalars = _reduce_identity(vals, comp_labels)
         for k, lbl in enumerate(labels_list):
             pos = elem_id_to_pos.get(lbl)
             if pos is not None:
@@ -322,7 +466,7 @@ def extract_field(step, var, instance_name, kept_elem_ids):
 # =============================================================================
 # Displacement extraction (Lagrangian instances)
 # =============================================================================
-def extract_displacements(step, instance_name, kept_node_ids):
+def extract_displacements(step, instance_name, kept_node_ids, root_assembly):
     """Build a (n_frames, n_nodes, 3) array of U over the kept nodes
     for the given Lagrangian instance."""
     kept_set = set(kept_node_ids)
@@ -335,24 +479,93 @@ def extract_displacements(step, instance_name, kept_node_ids):
     n_frames = len(frames)
     out = np.zeros((n_frames, n_nodes, 3), dtype=np.float32)
 
+    inst = root_assembly.instances[instance_name]
     for fi in range(n_frames):
         try:
             fo = frames[fi].fieldOutputs["U"]
         except KeyError:
             continue
         try:
-            fo = fo.getSubset(region=step.parent.rootAssembly.instances[instance_name])
+            fo = fo.getSubset(region=inst)
         except (AttributeError, KeyError):
             pass
         for v in fo.values:
             lbl = v.nodeLabel
             if lbl in kept_set:
                 pos = node_id_to_pos[lbl]
-                d = v.data
+                d = _read_data(v)
                 out[fi, pos, 0] = d[0]
                 out[fi, pos, 1] = d[1]
                 out[fi, pos, 2] = d[2] if len(d) > 2 else 0.0
     return out
+
+
+# Nodal vector fields (e.g. velocity V) that we display by reducing to a
+# per-node magnitude and averaging onto each element.
+_NODAL_VECTOR_VARS = ("V",)
+
+
+def extract_nodal_vector_to_elem(step, var, instance_name,
+                                 kept_node_ids, elements, root_assembly):
+    """Read a NODAL vector field (e.g. V) and return per-element fields,
+    obtained by averaging each nodal component over an element's nodes:
+
+        {var+"1": Vx, var+"2": Vy, var: magnitude}
+
+    Vx/Vy are SIGNED (they show flow direction); the magnitude is
+    sqrt(Vx^2 + Vy^2) of the per-element averaged components. Each array is
+    (n_frames, n_elements). Raises KeyError if `var` is absent on the
+    instance.
+    """
+    try:
+        from abaqusConstants import NODAL
+    except Exception:
+        NODAL = None
+
+    inst = root_assembly.instances[instance_name]
+    key = _resolve_fo_name(step, var, instance_name, root_assembly)
+    if key is None:
+        raise KeyError(var)
+
+    label_to_local = {}
+    for i, lbl in enumerate(kept_node_ids):
+        label_to_local[int(lbl)] = i
+    n_nodes = len(kept_node_ids)
+    elements = np.asarray(elements)              # (n_elem, 8), local indices
+    n_elem = elements.shape[0]
+    n_frames = len(step.frames)
+    v1_out = np.zeros((n_frames, n_elem), dtype=np.float32)
+    v2_out = np.zeros((n_frames, n_elem), dtype=np.float32)
+
+    for fi in range(n_frames):
+        try:
+            fo = step.frames[fi].fieldOutputs[key]
+        except KeyError:
+            continue
+        sub = fo
+        try:
+            sub = fo.getSubset(region=inst)
+        except (AttributeError, KeyError):
+            pass
+        if NODAL is not None:
+            try:
+                sub = sub.getSubset(position=NODAL)
+            except Exception:
+                pass
+        nodal_v1 = np.zeros(n_nodes, dtype=np.float32)
+        nodal_v2 = np.zeros(n_nodes, dtype=np.float32)
+        for v in sub.values:
+            j = label_to_local.get(int(v.nodeLabel))
+            if j is not None:
+                d = _read_data(v)
+                nodal_v1[j] = d[0]
+                nodal_v2[j] = d[1] if len(d) > 1 else 0.0
+        # Average each (signed) component over the element's nodes.
+        v1_out[fi] = nodal_v1[elements].mean(axis=1)
+        v2_out[fi] = nodal_v2[elements].mean(axis=1)
+
+    mag = np.sqrt(v1_out * v1_out + v2_out * v2_out).astype(np.float32)
+    return {var + "1": v1_out, var + "2": v2_out, var: mag}
 
 
 # =============================================================================
@@ -391,9 +604,11 @@ def main():
     ap.add_argument("--cfg", default=None,
                     help="Optional path to a JSON file containing the "
                          "model config snapshot (embedded verbatim).")
-    ap.add_argument("--fields", default="PEEQ,TEMP,S_VM,EVF",
+    ap.add_argument("--fields", default="EVF,TEMP,V",
                     help="Comma-separated field variables to extract.")
     args = ap.parse_args()
+
+    _vprint("extract_odb.py  [rev: CEL-aware, nodal-V, name-trust]")
 
     # ROI resolution order:
     #   1. --roi on the command line (legacy / manual use)
@@ -482,8 +697,28 @@ def main():
             stored_vars = []
             for var in field_vars:
                 _vprint("  field '%s'..." % var)
+                # Nodal vector fields (velocity): read at nodes, reduce to a
+                # per-element magnitude. Eulerian instances only (the tool is
+                # rigid, its V is ~0 and not of interest).
+                if var in _NODAL_VECTOR_VARS:
+                    if kind != "eulerian":
+                        _vprint("    nodal field, skipping on this instance.")
+                        continue
+                    try:
+                        vfields = extract_nodal_vector_to_elem(
+                            step, var, inst_name, kept_node_ids, elements,
+                            odb.rootAssembly)
+                    except KeyError:
+                        _vprint("    not available for this instance, skipping.")
+                        continue
+                    for vk in (var + "1", var + "2", var):
+                        npz_payload["%s__fields__%s" % (inst_name, vk)] = vfields[vk]
+                        stored_vars.append(vk)
+                    _vprint("    stored %s1, %s2, %s (nodal->elem)" % (var, var, var))
+                    continue
                 try:
-                    arr = extract_field(step, var, inst_name, kept_elem_ids)
+                    arr = extract_field(step, var, inst_name, kept_elem_ids,
+                                        odb.rootAssembly)
                 except KeyError:
                     _vprint("    not available for this instance, skipping.")
                     continue
@@ -494,7 +729,8 @@ def main():
             has_disp = False
             if kind == "lagrangian":
                 try:
-                    disp = extract_displacements(step, inst_name, kept_node_ids)
+                    disp = extract_displacements(step, inst_name, kept_node_ids,
+                                                 odb.rootAssembly)
                     npz_payload["%s__displacements" % inst_name] = disp
                     has_disp = True
                     _vprint("  displacements stored.")

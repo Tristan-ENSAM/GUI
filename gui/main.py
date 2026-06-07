@@ -33,6 +33,7 @@ from gui.tabs.mesh_tab import MeshTab
 from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
+from gui.tabs.sensitivity_tab import SensitivityTab
 from gui.widgets.preferences_dialog import PreferencesDialog
 
 
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         # (the user may edit them mid-session via Preferences dialog).
         self.job_tab         = JobTab(self.cfg, lambda: self.prefs)
         self.results_tab     = ResultsTab()
+        self.sensitivity_tab = SensitivityTab(self.cfg, lambda: self.prefs)
 
         tabs = QTabWidget()
         tabs.addTab(self.analysis_tab,                                        "Analysis")
@@ -94,6 +96,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.step_tab,                                            "Step")
         tabs.addTab(self.job_tab,                                             "Job")
         tabs.addTab(self.results_tab,                                         "Results")
+        tabs.addTab(self.sensitivity_tab,                                     "Sensitivity")
         tabs.addTab(_placeholder("Optimization — coming later"),              "Optimization")
         self.setCentralWidget(tabs)
 
