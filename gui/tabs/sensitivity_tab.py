@@ -101,7 +101,9 @@ class SensitivityTab(QWidget):
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
         pv.addWidget(self.table)
-        split.addWidget(param_box)
+        # (param_box is placed in a horizontal splitter together with the
+        #  controls at the end of __init__, so the output panel below can
+        #  span the full width.)
 
         # ---- QoI + controls + preview ----------------------------------
         bottom = QWidget()
@@ -208,10 +210,23 @@ class SensitivityTab(QWidget):
         self._canvas = FigureCanvas(self._fig)
         cv.addWidget(self._canvas, 1)
         self.tabs_out.addTab(chart_w, "Chart")
-        bl.addWidget(self.tabs_out, 1)
+        bl.addStretch(1)          # keep the controls top-aligned in their column
 
-        split.addWidget(bottom)
-        split.setSizes([320, 320])
+        # ---- Final assembly --------------------------------------------
+        # Top row: parameters table (left) and controls (right) side by side.
+        # Bottom: the Plan/Run log/Results/Chart panel, full width, larger.
+        top_split = QSplitter(Qt.Horizontal)
+        top_split.addWidget(param_box)
+        top_split.addWidget(bottom)
+        top_split.setStretchFactor(0, 3)
+        top_split.setStretchFactor(1, 2)
+        top_split.setSizes([560, 440])
+
+        split.addWidget(top_split)
+        split.addWidget(self.tabs_out)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([300, 480])
 
         self._populate_table()
         self._update_cost()

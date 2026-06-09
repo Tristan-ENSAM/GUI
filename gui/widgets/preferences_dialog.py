@@ -8,6 +8,7 @@ Designed to be lightweight and self-contained:
   - if dlg.exec() returns Accepted, read dlg.result_prefs() and save_preferences(...)
 """
 from __future__ import annotations
+import os
 from dataclasses import replace
 from pathlib import Path
 from PySide6.QtWidgets import (
@@ -18,6 +19,14 @@ from PySide6.QtWidgets import (
 from gui.core.preferences import Preferences
 
 
+def _native_path(p: str) -> str:
+    """Display/store paths with the OS-native separator. Qt's file chooser
+    returns forward slashes on Windows; normalise so the dialog shows (and
+    saves) consistent backslashes there."""
+    p = (p or "").strip()
+    return os.path.normpath(p) if p else p
+
+
 class _PathField(QHBoxLayout):
     """A line-edit + 'Browse...' button on a single row. The dialog wraps
     each path field with this helper so the user can pick from a file
@@ -26,7 +35,7 @@ class _PathField(QHBoxLayout):
     def __init__(self, initial: str, browse_kind: str = "file",
                  file_filter: str = "All files (*)"):
         super().__init__()
-        self.edit = QLineEdit(initial)
+        self.edit = QLineEdit(_native_path(initial))
         self.edit.setMinimumWidth(380)
         btn = QPushButton("Browse…")
         btn.clicked.connect(lambda: self._browse(browse_kind, file_filter))
@@ -44,10 +53,10 @@ class _PathField(QHBoxLayout):
                 file_filter,
             )
         if path:
-            self.edit.setText(path)
+            self.edit.setText(_native_path(path))
 
     def value(self) -> str:
-        return self.edit.text().strip()
+        return _native_path(self.edit.text())
 
 
 class PreferencesDialog(QDialog):
