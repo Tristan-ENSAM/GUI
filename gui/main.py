@@ -84,20 +84,40 @@ class MainWindow(QMainWindow):
         # (the user may edit them mid-session via Preferences dialog).
         self.job_tab         = JobTab(self.cfg, lambda: self.prefs)
         self.results_tab     = ResultsTab()
-        self.sensitivity_tab = SensitivityTab(self.cfg, lambda: self.prefs)
+        self.sensitivity_tab = SensitivityTab(
+            self.cfg, lambda: self.prefs,
+            cpus_getter=lambda: self.job_tab.cpus())
+
+        # Two-level tabs: a top row of theme categories, each holding its
+        # own row of sub-tabs (so the window shows several tab rows).
+        self.model_tabs = QTabWidget()
+        self.model_tabs.addTab(self.analysis_tab,    "Analysis")
+        self.model_tabs.addTab(self.geometry_tab,    "Geometry")
+        self.model_tabs.addTab(self.materials_tab,   "Materials")
+        self.model_tabs.addTab(self.interaction_tab, "Interaction")
+        self.model_tabs.addTab(self.bcs_tab,         "BCs / ICs")
+        self.model_tabs.addTab(self.mesh_tab,        "Mesh")
+        self.model_tabs.addTab(self.step_tab,        "Step")
+        self.model_tabs.addTab(self.job_tab,         "Job")
+        # Results sits with the numerical model: a lightweight "Abaqus-bis"
+        # to spot-check the simulation outputs right after a Job.
+        self.model_tabs.addTab(self.results_tab,     "Results")
+
+        # Experimental data (DIC, infrared thermography, force measurement).
+        # Empty for now — populated when the acquisition tabs are built.
+        self.exp_placeholder = _placeholder(
+            "Experimental data — DIC, IRT and force measurement.\n"
+            "Coming later.")
+
+        self.opt_tabs = QTabWidget()
+        self.opt_tabs.addTab(self.sensitivity_tab,   "Sensitivity")
+        self.opt_tabs.addTab(_placeholder("Inverse identification — coming later"),
+                             "Inverse identification")
 
         tabs = QTabWidget()
-        tabs.addTab(self.analysis_tab,                                        "Analysis")
-        tabs.addTab(self.geometry_tab,                                        "Geometry")
-        tabs.addTab(self.materials_tab,                                       "Materials")
-        tabs.addTab(self.interaction_tab,                                     "Interaction")
-        tabs.addTab(self.bcs_tab,                                             "BCs / ICs")
-        tabs.addTab(self.mesh_tab,                                            "Mesh")
-        tabs.addTab(self.step_tab,                                            "Step")
-        tabs.addTab(self.job_tab,                                             "Job")
-        tabs.addTab(self.results_tab,                                         "Results")
-        tabs.addTab(self.sensitivity_tab,                                     "Sensitivity")
-        tabs.addTab(_placeholder("Optimization — coming later"),              "Optimization")
+        tabs.addTab(self.model_tabs,        "Numerical Model")
+        tabs.addTab(self.exp_placeholder,   "Experimental Data")
+        tabs.addTab(self.opt_tabs,          "Optimization")
         self.setCentralWidget(tabs)
 
         # ----- signal wiring -----

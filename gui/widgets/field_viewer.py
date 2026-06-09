@@ -156,7 +156,16 @@ class FieldViewer(QWidget):
 
         self._polys.set_array(values)
         if cmap is not None:
-            self._polys.set_cmap(cmap)
+            # Copy the colormap so we can mark NaN cells as fully
+            # transparent without mutating the shared registered colormap.
+            try:
+                from matplotlib import colormaps as _cmaps
+                cmo = _cmaps[cmap].copy()
+            except Exception:
+                import matplotlib.cm as _cm
+                cmo = _cm.get_cmap(cmap).copy()
+            cmo.set_bad(alpha=0.0)
+            self._polys.set_cmap(cmo)
         finite = values[np.isfinite(values)]
         if vmin is None:
             vmin = float(finite.min()) if finite.size else 0.0

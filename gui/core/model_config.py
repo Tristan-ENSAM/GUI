@@ -314,12 +314,16 @@ class EulerPosition:
 
 @dataclass
 class BBox:
-    xmin: float = 0.0
-    xmax: float = 0.0
-    ymin: float = 0.0
-    ymax: float = 0.0
-    zmin: float = 0.0
-    zmax: float = 1e-4
+    # Extraction ROI / ZOI (the geometry tab's "ROI" group edits this).
+    # Default = the cutting zone of interest, so runs extract only this
+    # region (faster, smaller .npz, more relevant for sensitivity/ID).
+    # Widen these in the GUI to extract the full Eulerian domain.
+    xmin: float = -0.25
+    xmax: float = 0.05
+    ymin: float = -0.25
+    ymax: float = 0.05
+    zmin: float = -0.001
+    zmax: float = 0.001
 
 
 @dataclass

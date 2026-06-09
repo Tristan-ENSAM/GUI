@@ -33,6 +33,11 @@ from gui.widgets.field_viewer       import FieldViewer
 from gui.widgets.time_series_viewer import TimeSeriesViewer
 
 
+# Eulerian cells with volume fraction below this are treated as empty and
+# hidden when rendering EULER fields (only show where material is present).
+_EVF_MIN = 1e-3
+
+
 class ResultsTab(QWidget):
     """Top-level Results tab."""
 
@@ -450,8 +455,21 @@ class ResultsTab(QWidget):
 
         idx = self._frame_idx
         idx = max(0, min(idx, field.shape[0] - 1))
-        values = np.asarray(field[idx])
+        values = np.asarray(field[idx], dtype=float)
         t = float(bundle.times[idx])
+
+        # Eulerian instance: hide cells with no material (EVF ~ 0). Those
+        # carry meaningless TEMP/V and clutter the plot. NaN cells render
+        # transparent in the field viewer.
+        if "EVF" in info.field_variables:
+            try:
+                evf = np.asarray(bundle.field(info.name, "EVF")[idx],
+                                 dtype=float)
+                if evf.shape == values.shape:
+                    values = values.copy()
+                    values[evf <= _EVF_MIN] = np.nan
+            except (KeyError, IndexError):
+                pass
 
         cmap = self.cb_cmap.currentText() or "viridis"
         title = f"{var}   frame {idx}/{field.shape[0]-1}   t = {t:.3e} s"

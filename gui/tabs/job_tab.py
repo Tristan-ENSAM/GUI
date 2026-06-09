@@ -680,3 +680,8 @@ class JobTab(QWidget):
         """No-op for now: job parameters aren't part of the .acpf profile.
         Workdir defaults to the user-level Preferences each time."""
         pass
+
+    # CPU count chosen here is the single source of truth for any Abaqus
+    # launch (Job run, and the sensitivity runner).
+    def cpus(self) -> int:
+        return int(self.spin_cpus.value())

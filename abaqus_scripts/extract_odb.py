@@ -672,21 +672,22 @@ def main():
             _vprint("\nInstance %s: %d nodes, %d elements"
                     % (inst_name, len(inst.nodes), n_elem_total))
 
-            # Geometry + ROI filtering
+            # Detect kind first: any element type starting with EC = Eulerian
+            elem_type = inst.elements[0].type
+            kind = "eulerian" if elem_type.startswith("EC") else "lagrangian"
+
+            # Geometry + ROI filtering. The ROI/ZOI applies ONLY to the
+            # Eulerian instance (the cutting zone). Lagrangian instances
+            # (e.g. the TOOL) are always extracted whole.
+            inst_roi = roi if kind == "eulerian" else None
             nodes_init, elements, centroids, kept_node_ids, kept_elem_ids = \
-                extract_instance_geometry(inst, roi)
+                extract_instance_geometry(inst, inst_roi)
             n_kept_elem = elements.shape[0]
             n_kept_node = nodes_init.shape[0]
-            _vprint("  kept after ROI: %d nodes, %d elements"
-                    % (n_kept_node, n_kept_elem))
+            _vprint("  kept after ROI (%s): %d nodes, %d elements"
+                    % (kind, n_kept_node, n_kept_elem))
             if n_kept_elem == 0:
                 continue
-
-            # Detect kind: any element type starting with EC = Eulerian
-            elem_type = ""
-            if n_elem_total > 0:
-                elem_type = inst.elements[0].type
-            kind = "eulerian" if elem_type.startswith("EC") else "lagrangian"
 
             # Element/node arrays
             npz_payload["%s__nodes_init" % inst_name] = nodes_init

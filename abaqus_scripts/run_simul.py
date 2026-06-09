@@ -120,9 +120,13 @@ ho_n_intervals    = int(  step_output.get("ho_n_intervals",   n_frames))
 # -----------------------------------------------------------------------------
 # Mass scaling (Step tab > Mass scaling)
 # -----------------------------------------------------------------------------
-# When enabled: rho_eff = factor * rho ; Cp_eff = Cp / factor.
-# Both factors default to 1.0 (no scaling) and are applied directly at
-# material-write time below (see emat / tmat handling).
+# Mass scaling for CEL is done by scaling the Eulerian material density
+# (Abaqus' native mass scaling does not apply to Eulerian EC3D8R elements).
+# rho_eff = factor * rho ; Cp_eff = Cp / factor, so rho*Cp (and thus the
+# temperature) is preserved. Matches the manual reference workflow where
+# both rho and Cp are scaled by hand. Pass PHYSICAL rho/Cp here so the
+# factor scales them once (do not pre-scale by hand as well).
+# Both factors default to 1.0 (no scaling).
 ms_enabled = bool(cfg_get(MODEL_CFG, "step.mass_scaling_enabled", False))
 ms_eul     = float(cfg_get(MODEL_CFG, "step.mass_scaling_factor_eulerian", 1.0))
 ms_tool    = float(cfg_get(MODEL_CFG, "step.mass_scaling_factor_tool",     1.0))
@@ -418,9 +422,15 @@ toolPart = myModel.Part(name="Tool", dimensionality=THREE_D, type=DEFORMABLE_BOD
 toolPart.BaseSolidExtrude(sketch=tool_sketch, depth=elem_size)
 
 #%%% Materials
-# Mass scaling (CEL): rho_eff = factor * rho ; Cp_eff = Cp / factor.
-# When ms_enabled is False the factors above were forced to 1.0, so the
-# arithmetic below is a no-op and the materials are unchanged.
+# Mass scaling for CEL is applied by scaling the Eulerian material density
+# (Abaqus' native mass scaling does not apply to Eulerian EC3D8R elements).
+# rho_eff = factor * rho ; Cp_eff = Cp / factor, so the volumetric heat
+# capacity rho*Cp is preserved and the temperature stays physical. This
+# matches the manual reference workflow, where BOTH rho and Cp are scaled
+# by the same factor by hand.
+# IMPORTANT: pass PHYSICAL rho/Cp in the config and let the factor below do
+# the scaling ONCE. Do not pre-scale by hand AND set the factor, or the
+# material would be scaled twice (rho*f^2) and the solve would diverge.
 EulerMat = myModel.Material(name='Euler')
 EulerMat.Density(table=((float(emat["rho"]) * ms_eul,),))
 EulerMat.Elastic(table=((float(emat["E"]), float(emat["nu"])),))
@@ -1256,9 +1266,15 @@ try:
         _vprint("\nInstance %s: %d nodes, %d elements"
                 % (_inst_name, len(_inst.nodes), _n_elem_total))
 
+        _elem_type = _inst.elements[0].type
+        _kind = "eulerian" if _elem_type.startswith("EC") else "lagrangian"
+
+        # The ROI/ZOI applies ONLY to the Eulerian instance (cutting zone).
+        # Lagrangian instances (e.g. the TOOL) are always kept whole.
+        _inst_roi = _roi if _kind == "eulerian" else None
         (_nodes_init, _elements, _centroids,
          _kept_node_ids, _kept_elem_ids, _full_bbox) = \
-            _extract_instance_geometry(_inst, _roi)
+            _extract_instance_geometry(_inst, _inst_roi)
 
         # Print the full mesh bbox — invaluable when the ROI filter
         # rejects everything, since it tells the user whether the
@@ -1269,13 +1285,10 @@ try:
                    _full_bbox[0][2], _full_bbox[1][2]))
         _n_kept_elem = _elements.shape[0]
         _n_kept_node = _nodes_init.shape[0]
-        _vprint("  kept after ROI: %d nodes, %d elements"
-                % (_n_kept_node, _n_kept_elem))
+        _vprint("  kept after ROI (%s): %d nodes, %d elements"
+                % (_kind, _n_kept_node, _n_kept_elem))
         if _n_kept_elem == 0:
             continue
-
-        _elem_type = _inst.elements[0].type
-        _kind = "eulerian" if _elem_type.startswith("EC") else "lagrangian"
 
         _npz_payload["%s__nodes_init" % _inst_name] = _nodes_init
         _npz_payload["%s__elements" % _inst_name] = _elements
