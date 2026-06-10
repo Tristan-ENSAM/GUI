@@ -17,12 +17,76 @@ exercised in tests without Abaqus.
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import signal
 import subprocess
+import time
 
 from PySide6.QtCore import QObject, Signal
 
 from gui.sensitivity import runner_core as rc
 from gui.results.reader import ResultsBundle
+
+
+def _popen_group_kwargs() -> dict:
+    """Popen kwargs that put the child in its own process group/session so
+    we can later terminate the *whole* tree (Abaqus 'cae' spawns the actual
+    solver as a child — killing only the parent would leak the solver)."""
+    if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP only exists on Windows.
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> None:
+    """Terminate `proc` and every process it spawned. Best-effort and
+    cross-platform.
+
+    POSIX: signal the whole process group, first with SIGTERM (lets the
+    solver clean up), then escalate to SIGKILL if it has not exited within
+    `grace` seconds — some children ignore SIGTERM, and SIGKILL cannot be
+    caught or ignored.
+
+    NOTE: the Windows branch (taskkill /T) cannot be exercised in the
+    Linux dev/CI environment — confirm it on the remote PC."""
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, check=False)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        return
+    # POSIX
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except Exception:
+        pass
+    deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 class SensitivityRunWorker(QObject):
@@ -61,10 +125,7 @@ class SensitivityRunWorker(QObject):
         self._cancel = True
         p = self._proc
         if p is not None:
-            try:
-                p.terminate()
-            except Exception:
-                pass
+            _terminate_process_tree(p)
 
     # -- entry point (run inside the QThread) --------------------------
     def run(self):
@@ -103,7 +164,8 @@ class SensitivityRunWorker(QObject):
         try:
             self._proc = subprocess.Popen(
                 args, cwd=str(self._workdir),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                **_popen_group_kwargs())
         except Exception as e:
             self.log.emit("[run %d] failed to start Abaqus: %s\n" % (i + 1, e))
             self.runDone.emit(i, False)

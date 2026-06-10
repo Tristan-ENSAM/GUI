@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QCheckBox, QPlainTextEdit, QAbstractItemView, QSplitter, QComboBox,
-    QProgressBar, QTabWidget,
+    QProgressBar, QTabWidget, QFileDialog,
 )
 from PySide6.QtCore import QThread, QTimer
 
@@ -31,6 +31,7 @@ from gui.sensitivity import param_registry as pr
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import runner_core as rc
+from gui.sensitivity import export_results as xr
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
@@ -170,6 +171,12 @@ class SensitivityTab(QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
         ctrl.addWidget(self.btn_cancel)
+        self.btn_export = QPushButton("Save results…")
+        self.btn_export.setToolTip("Export the sensitivity table and the "
+                                   "field-SSD ranking to CSV.")
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(self._on_export)
+        ctrl.addWidget(self.btn_export)
         bl.addLayout(ctrl)
 
         self.status = QLabel("")
@@ -520,6 +527,7 @@ class SensitivityTab(QWidget):
         self.btn_run.setEnabled(False)
         self.btn_gen.setEnabled(False)
         self.btn_cancel.setEnabled(True)
+        self.btn_export.setEnabled(False)
         self.status.setStyleSheet("color: #1d4ed8;")
         self.status.setText("Running %d simulations…" % self.plan.n_runs)
 
@@ -531,6 +539,7 @@ class SensitivityTab(QWidget):
         self._run_t0 = {}
         self._run_durations = []
         self._running_index = None
+        self._failed_live = []           # run indices reported failed live
         self._run_clock0 = time.monotonic()
         self._sta_timer = QTimer(self)
         self._sta_timer.setInterval(3000)
@@ -548,6 +557,7 @@ class SensitivityTab(QWidget):
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._on_log)
+        self._worker.runDone.connect(self._on_run_done)
         self._worker.finished.connect(self._on_run_finished)
         self._worker.failed.connect(self._on_run_failed)
         self._thread.start()
@@ -558,6 +568,17 @@ class SensitivityTab(QWidget):
             self.status.setStyleSheet("color: #b45309;")
             self.status.setText("Cancelling after the current run…")
             self.btn_cancel.setEnabled(False)
+
+    def _on_run_done(self, index, ok):
+        """Per-run completion, reported live by the worker. A failed run is
+        flagged immediately in the log (and folded into the estimate line)
+        instead of only surfacing in the final tally."""
+        if not ok:
+            if index not in self._failed_live:
+                self._failed_live.append(index)
+            self.log.appendPlainText(
+                "[run %d] FAILED — no usable results (see output above)."
+                % (index + 1))
 
     def _on_progress(self, done, total):
         import time
@@ -620,7 +641,12 @@ class SensitivityTab(QWidget):
                 _fmt_duration(remaining),
                 _fmt_duration(total * self._per_run_sec))
         msg += "   ·   elapsed %s" % _fmt_duration(elapsed)
-        self.status.setStyleSheet("color: #1d4ed8;")
+        n_failed = len(getattr(self, "_failed_live", []))
+        if n_failed:
+            msg += "   ·   %d failed so far" % n_failed
+            self.status.setStyleSheet("color: #b45309;")
+        else:
+            self.status.setStyleSheet("color: #1d4ed8;")
         self.status.setText(msg)
 
     def _on_log(self, text):
@@ -637,7 +663,26 @@ class SensitivityTab(QWidget):
             "Run finished: %d/%d successful, %d failed. See Results."
             % (n_ok, result.Y.shape[0], len(result.failures)))
         self._show_results(result)
+        self.btn_export.setEnabled(result.Y.shape[0] > 0)
         self.tabs_out.setCurrentWidget(self.results_table)
+
+    def _on_export(self):
+        if self._last_result is None:
+            self._warn("Nothing to export yet — run a plan first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save sensitivity results",
+            "sensitivity_results.csv", "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            label_for = lambda p: pr.spec_for(p).label
+            xr.write_csv(self._last_result, path, label_for=label_for)
+        except Exception as e:
+            self._warn("Export failed: %s" % e)
+            return
+        self.status.setStyleSheet("color: #15803d;")
+        self.status.setText("Results exported to %s" % path)
 
     def _on_run_failed(self, msg):
         self._teardown_thread()

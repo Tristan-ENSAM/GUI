@@ -45,6 +45,7 @@ def build_fake_results(
     sim_time: float = 5e-4,
     job_name: str = "fake_job",
     seed: int = 42,
+    field_scale: float = 1.0,
 ) -> tuple[Path, Path]:
     """Generate a fake (.json + .npz) pair.
 
@@ -66,6 +67,12 @@ def build_fake_results(
         Stored in the metadata and used in plot titles.
     seed:
         RNG seed for reproducible noise in history signals.
+    field_scale:
+        Multiplies the amplitude of every synthetic field (PEEQ, TEMP,
+        S_VM, EVF bulge). Default 1.0 reproduces the historical output.
+        Used by the dry-run harness to make runs with different inputs
+        produce *different* fields, so a field-discrepancy (SSD) QoI is
+        non-zero — purely a test/dev convenience, not physics.
 
     Returns
     -------
@@ -159,13 +166,13 @@ def build_fake_results(
     sigma = 0.04 * W
     for k, tx in enumerate(tip_x_t):
         d2 = (cx - tx) ** 2 + (cy - tip_y) ** 2
-        peeq[k] = (peeq[k-1] if k > 0 else 0.0) + np.exp(-d2 / (2 * sigma**2)) * 0.05
+        peeq[k] = (peeq[k-1] if k > 0 else 0.0) + np.exp(-d2 / (2 * sigma**2)) * 0.05 * field_scale
     fields["PEEQ"] = peeq
 
     # TEMP: similar blob but smoother and reset-ish (no accumulation), in °C
     temp = np.zeros((n_frames, n_elements), dtype=np.float32)
     ambient = 20.0
-    peak    = 600.0
+    peak    = 20.0 + (600.0 - 20.0) * field_scale  # ambient + scaled rise
     for k, tx in enumerate(tip_x_t):
         d2 = (cx - tx) ** 2 + (cy - tip_y) ** 2
         # Add some persistent heating behind the tip
@@ -179,7 +186,7 @@ def build_fake_results(
     s_vm = np.zeros((n_frames, n_elements), dtype=np.float32)
     for k, tx in enumerate(tip_x_t):
         d2 = (cx - tx) ** 2 + (cy - tip_y) ** 2
-        s_vm[k] = 800.0 * np.exp(-d2 / (2 * (0.7*sigma)**2))
+        s_vm[k] = 800.0 * field_scale * np.exp(-d2 / (2 * (0.7*sigma)**2))
     fields["S_VM"] = s_vm
 
     # EVF: 1.0 above y=0 (chip/workpiece), 0.0 below (void). The interface
@@ -189,7 +196,7 @@ def build_fake_results(
         evf[k] = (cy > 0.0).astype(np.float32)
         # near the tip, the interface bulges
         d2 = (cx - tip_x_t[k]) ** 2 + (cy - tip_y) ** 2
-        bulge = np.exp(-d2 / (2 * (1.2*sigma)**2)) * 0.3
+        bulge = np.exp(-d2 / (2 * (1.2*sigma)**2)) * 0.3 * field_scale
         evf[k] = np.clip(evf[k] + bulge, 0.0, 1.0)
     fields["EVF"] = evf
 

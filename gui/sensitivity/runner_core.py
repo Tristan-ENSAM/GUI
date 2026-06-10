@@ -30,14 +30,29 @@ from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import field_metrics as fm
 
 
+def _instance_names(bundle):
+    """Return the list of instance names, tolerating both the real
+    ResultsBundle API (``instance_names`` is a *property* returning a
+    list — see gui/results/reader.py) and any test double that exposes it
+    as a *method*. Returns [] if neither works."""
+    attr = getattr(bundle, "instance_names", None)
+    if attr is None:
+        return []
+    names = attr() if callable(attr) else attr
+    try:
+        return list(names)
+    except TypeError:
+        return []
+
+
 def eulerian_instance(bundle):
     """Name of the Eulerian instance (the one carrying EVF), else the first."""
     try:
-        for name in bundle.instance_names():
+        names = _instance_names(bundle)
+        for name in names:
             info = bundle.instance(name)
             if "EVF" in getattr(info, "field_variables", []):
                 return name
-        names = bundle.instance_names()
         return names[0] if names else None
     except Exception:
         return None
