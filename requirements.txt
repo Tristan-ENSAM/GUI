@@ -13,6 +13,9 @@
 PySide6==6.11.1
 numpy==2.4.4
 matplotlib==3.10.8
+# Image reading for the Experimental Data tab (JPEG/TIFF/BMP folders).
+# matplotlib reads PNG natively, but other formats need Pillow (or imageio).
+Pillow>=10.0
 
 # ---- Tests / development ----
 pytest==9.0.3

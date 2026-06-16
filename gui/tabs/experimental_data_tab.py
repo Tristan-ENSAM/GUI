@@ -176,17 +176,23 @@ class AcquisitionTab(QWidget):
 
         fld_path = QLineEdit(cfg.path)
         fld_path.setReadOnly(True)
-        b_browse = QPushButton("Browse…")
-        b_browse.clicked.connect(lambda: self._browse_image(key, noload=False))
-        r1 = QHBoxLayout(); r1.addWidget(fld_path, 1); r1.addWidget(b_browse)
+        b_folder = QPushButton("Folder…")
+        b_folder.setToolTip("Load the folder containing the image sequence "
+                            "(png, jpg, tiff, … one file per frame).")
+        b_folder.clicked.connect(
+            lambda: self._browse_image(key, noload=False))
+        r1 = QHBoxLayout(); r1.addWidget(fld_path, 1)
+        r1.addWidget(b_folder)
         w1 = QWidget(); w1.setLayout(r1)
         form.addRow("Cutting:", w1)
 
         fld_noload = QLineEdit(cfg.noload_path)
         fld_noload.setReadOnly(True)
-        b_browse_nl = QPushButton("Browse…")
-        b_browse_nl.clicked.connect(lambda: self._browse_image(key, noload=True))
-        r2 = QHBoxLayout(); r2.addWidget(fld_noload, 1); r2.addWidget(b_browse_nl)
+        b_folder_nl = QPushButton("Folder…")
+        b_folder_nl.clicked.connect(
+            lambda: self._browse_image(key, noload=True))
+        r2 = QHBoxLayout(); r2.addWidget(fld_noload, 1)
+        r2.addWidget(b_folder_nl)
         w2 = QWidget(); w2.setLayout(r2)
         form.addRow("No-load (a vide):", w2)
 
@@ -309,7 +315,8 @@ class AcquisitionTab(QWidget):
     # Browse + preview
     # =====================================================================
     def _browse_image(self, key: str, noload: bool):
-        path = self._ask_image_path()
+        path = QFileDialog.getExistingDirectory(
+            self, "Pick the folder containing the image sequence", "")
         if not path:
             return
         cfg = getattr(self.session, key)
@@ -322,17 +329,6 @@ class AcquisitionTab(QWidget):
         self.sessionChanged.emit()
         if not noload:
             (self._refresh_visible if key == "visible" else self._refresh_ir)()
-
-    def _ask_image_path(self) -> str:
-        # Let the user pick a file (tiff/video/npz/npy) or a directory.
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Pick an image stream", "",
-            "Image streams (*.tif *.tiff *.npz *.npy *.mp4 *.avi *.cine);;"
-            "All files (*)")
-        if path:
-            return path
-        return QFileDialog.getExistingDirectory(
-            self, "…or pick a directory of frames", "")
 
     def _browse_forces(self, noload: bool):
         path, _ = QFileDialog.getOpenFileName(

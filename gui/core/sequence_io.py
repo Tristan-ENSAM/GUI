@@ -20,7 +20,51 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 
-_IMAGE_EXTS = (".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp", ".npy")
+_IMAGE_EXTS = (".png", ".tif", ".tiff", ".jpg", ".jpeg", ".jpe", ".jfif",
+               ".bmp", ".webp", ".jp2", ".ppm", ".pgm", ".gif", ".npy")
+
+
+def _natural_key(path):
+    """Sort key that orders embedded numbers numerically, so a folder of
+    frames like img2, img10, img100 sorts in capture order (not img10 before
+    img2). Operates on the file name (case-insensitive)."""
+    import re
+    name = path.name.lower()
+    return [int(tok) if tok.isdigit() else tok
+            for tok in re.split(r"(\d+)", name)]
+
+
+def _read_image(path):
+    """Read a single image file to a numpy array, using whatever backend is
+    installed: Pillow, then imageio, then matplotlib (always present, reads
+    PNG natively; other formats via Pillow). Raises a clear, actionable
+    error if none can read the file."""
+    errors = []
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return np.asarray(im)
+    except Exception as e:                      # noqa: BLE001
+        errors.append("Pillow: %s" % e)
+    try:
+        import imageio.v3 as iio
+        return np.asarray(iio.imread(path))
+    except Exception as e:                      # noqa: BLE001
+        errors.append("imageio: %s" % e)
+    try:
+        import matplotlib.image as mpimg
+        return np.asarray(mpimg.imread(str(path)))
+    except Exception as e:                      # noqa: BLE001
+        errors.append("matplotlib: %s" % e)
+    raise RuntimeError(
+        "Could not read image %s. Install Pillow (pip install pillow) for "
+        "JPEG/TIFF/BMP support. Tried -> %s" % (path, "; ".join(errors)))
+
+
+# Single still-image formats (a lone file = a 1-frame sequence). Multi-page
+# TIFF and videos are handled by the lazy imageio reader instead.
+_STILL_EXTS = (".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".bmp", ".webp",
+               ".jp2", ".ppm", ".pgm", ".gif")
 
 
 class ImageSequence:
@@ -59,9 +103,9 @@ class ImageSequence:
         if not p.exists():
             raise RuntimeError("Path does not exist: %s" % p)
         if p.is_dir():
-            files = sorted(
-                q for q in p.iterdir()
-                if q.suffix.lower() in _IMAGE_EXTS)
+            files = [q for q in p.iterdir()
+                     if q.suffix.lower() in _IMAGE_EXTS]
+            files.sort(key=_natural_key)     # frame2 before frame10
             if not files:
                 raise RuntimeError("No image files in directory: %s" % p)
             seq._files = files
@@ -72,24 +116,9 @@ class ImageSequence:
             with np.load(p) as z:
                 key = "frames" if "frames" in z else list(z.keys())[0]
                 return cls.from_array(z[key], fps=fps, t0=t0, source=str(p))
-        # multi-page TIFF or video -> lazy reader via imageio
-        try:
-            import imageio.v3 as iio
-            # number of frames
-            try:
-                props = iio.improps(p, plugin=None)
-                n = int(props.n_images) if props.n_images else 0
-            except Exception:
-                n = 0
-            seq._reader = (iio, p)
-            seq._reader_len = n
-            if n == 0:
-                # Fall back: read all into memory (small files only).
-                stack = iio.imread(p)
-                return cls.from_array(stack, fps=fps, t0=t0, source=str(p))
-            return seq
-        except Exception as e:
-            raise RuntimeError("Unsupported image stream %s (%s)" % (p, e))
+        # Any other single file is treated as a one-frame image, read with
+        # the first available backend (Pillow / imageio / matplotlib).
+        return cls.from_array(_read_image(p), fps=fps, t0=t0, source=str(p))
 
     # -- access -----------------------------------------------------------
     @property
@@ -110,11 +139,7 @@ class ImageSequence:
         if self._array is not None:
             return np.asarray(self._array[i])
         if self._files:
-            import imageio.v3 as iio
-            return np.asarray(iio.imread(self._files[i]))
-        if self._reader is not None:
-            iio, p = self._reader
-            return np.asarray(iio.imread(p, index=i))
+            return np.asarray(_read_image(self._files[i]))
         raise IndexError("no backend")
 
     def time(self, i: int) -> float:

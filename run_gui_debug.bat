@@ -15,7 +15,7 @@ set "REQ_MARKER=%VENV_DIR%\.requirements_installed"
 
 REM --- Fast path: a working venv with deps already present -> just launch ----
 if exist "%VENV_PY%" (
-    "%VENV_PY%" -c "import PySide6, matplotlib, numpy" >nul 2>&1
+    "%VENV_PY%" -c "import PySide6, matplotlib, numpy, PIL" >nul 2>&1
     if !errorlevel! == 0 goto :launch
     REM venv exists but can it even run python at all?
     "%VENV_PY%" -c "import sys" >nul 2>&1
@@ -64,11 +64,11 @@ if defined BASE_PREFIX (
     )
 )
 "%VENV_PY%" -m pip install --upgrade pip
-"%VENV_PY%" -m pip install PySide6 matplotlib numpy
+"%VENV_PY%" -m pip install PySide6 matplotlib numpy Pillow
 if !errorlevel! neq 0 (
     echo [ERROR] Install failed. If it is an SSL/proxy error, your machine may
     echo         block PyPI; use a corporate proxy, e.g.:
-    echo           "%VENV_PY%" -m pip install --proxy http://USER:PASS@HOST:PORT PySide6 matplotlib numpy
+    echo           "%VENV_PY%" -m pip install --proxy http://USER:PASS@HOST:PORT PySide6 matplotlib numpy Pillow
     pause
     exit /b 1
 )

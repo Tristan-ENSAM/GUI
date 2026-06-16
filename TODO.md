@@ -333,3 +333,18 @@ Tests : 28 verts (les 2 tests time-scaling retirés).
 - Alignement : bouton « Écrire dans Numerical Model » (rake/clear angles,
   (x0,y0) outil/pièce) — nécessitera de passer `cfg` + le geometry_tab au
   conteneur.
+
+## Experimental Data — correctifs Acquisition (chargement images)
+
+- **Dépendance imageio retirée du chemin critique.** Nouveau `_read_image`
+  (`sequence_io.py`) à backends multiples : Pillow → imageio → matplotlib
+  (matplotlib lit le PNG nativement, donc le PNG marche sans dépendance
+  supplémentaire ; JPEG/TIFF/BMP nécessitent Pillow ou imageio). Message
+  d'erreur explicite « Install Pillow » si aucun backend ne lit le format.
+- **Pillow ajouté** à `requirements.txt` et à `run_gui_debug.bat`
+  (`pip install … Pillow`).
+- **Boutons « File… » retirés** de l'onglet Acquisition : chargement par
+  **dossier uniquement** (`_browse_image` = sélecteur de dossier).
+  `from_path` lit un dossier (tri naturel) ou un `.npz/.npy` ; un fichier
+  image isolé reste lu comme séquence 1-frame.
+- 40 tests verts.
