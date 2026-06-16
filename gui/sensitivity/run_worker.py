@@ -21,10 +21,12 @@ import os
 import signal
 import subprocess
 import time
+import logging
 
 from PySide6.QtCore import QObject, Signal
 
 from gui.sensitivity import runner_core as rc
+from gui.core.logging_util import log_swallowed
 from gui.results.reader import ResultsBundle
 
 
@@ -74,7 +76,8 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
     try:
         os.killpg(pgid, signal.SIGTERM)
     except Exception:
-        pass
+        log_swallowed("sending SIGTERM to the run process group",
+                      level=logging.DEBUG)
     deadline = time.monotonic() + max(0.0, grace)
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -83,6 +86,8 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
     try:
         os.killpg(pgid, signal.SIGKILL)
     except Exception:
+        log_swallowed("sending SIGKILL to the run process group",
+                      level=logging.DEBUG)
         try:
             proc.kill()
         except Exception:
@@ -150,7 +155,8 @@ class SensitivityRunWorker(QObject):
             if out_path.exists():
                 out_path.unlink()           # avoid reading a stale bundle
         except Exception:
-            pass
+            log_swallowed("removing stale bundle %s" % out_path,
+                          level=logging.DEBUG)
 
         model_params = cfg.to_params_dict()
         run_params = {"cpus": self._cpus, "job_name": job_name}
@@ -178,7 +184,8 @@ class SensitivityRunWorker(QObject):
                     break
                 self.log.emit(raw.decode("cp1252", errors="replace"))
         except Exception:
-            pass
+            log_swallowed("streaming Abaqus stdout for run %d" % (i + 1),
+                          level=logging.DEBUG)
         self._proc.wait()
         rc_code = self._proc.returncode
         self._proc = None

@@ -53,6 +53,33 @@ def field_rmse(field_a, field_b) -> float:
     return float(np.sqrt(np.mean(d * d)))
 
 
+def field_rel_change_pct(base_field, pert_field) -> float:
+    """Relative change of the field, in percent, weighted (averaged) over
+    nodes/points AND frames:
+
+        dF% = 100 * RMS_{nodes,frames}(pert - base) / RMS_{nodes,frames}(base)
+            = 100 * sqrt(mean((pert - base)^2)) / sqrt(mean(base^2))
+
+    Using the mean (not the sum) makes the result independent of the number
+    of nodes and frames -- each node and each frame is weighted equally. The
+    same finite mask is applied to numerator and denominator (only paired,
+    finite entries count). Returns NaN if the base field has no finite
+    energy on the ZOI. Note the count cancels in the ratio, so this equals
+    the relative L2 norm ||pert-base|| / ||base||."""
+    a, b = _align(pert_field, base_field)   # a = pert, b = base
+    d = (a - b).ravel()
+    bb = b.ravel()
+    m = np.isfinite(d) & np.isfinite(bb)
+    if not m.any():
+        return float("nan")
+    d = d[m]
+    bb = bb[m]
+    denom = np.sqrt(np.mean(bb * bb))
+    if denom == 0.0:
+        return float("nan")
+    return float(100.0 * np.sqrt(np.mean(d * d)) / denom)
+
+
 def jacobian_field_sensitivity(base_field, pert_field, delta=None,
                                metric="ssd"):
     """Field sensitivity of one parameter for one field variable.

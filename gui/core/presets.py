@@ -33,6 +33,41 @@ def _user_path() -> Path:
     return Path(__file__).resolve().parent.parent.parent / "materials_user.json"
 
 
+def profiles_dir() -> Path:
+    """Dedicated folder holding one JSON file per saved material profile.
+    Lives next to the launcher so the user can browse/delete files there
+    directly. Created on first access."""
+    d = Path(__file__).resolve().parent.parent.parent / "material_profiles"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def save_profile_file(path, material: dict) -> Path:
+    """Write a material dict to `path` as JSON (overwriting). Returns the
+    path actually written (with a .json suffix enforced)."""
+    import json
+    p = Path(path)
+    if p.suffix.lower() != ".json":
+        p = p.with_suffix(".json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(material, f, indent=2, ensure_ascii=False)
+    return p
+
+
+def load_profile_file(path) -> dict:
+    """Read a material profile JSON file and return the material dict.
+    Raises ValueError if the file is not a JSON object."""
+    import json
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("A material profile must be a JSON object.")
+    return data
+
+
 # ---------------------------------------------------------------------------
 # PresetLibrary
 # ---------------------------------------------------------------------------

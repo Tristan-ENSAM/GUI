@@ -17,7 +17,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QScrollArea,
-    QFrame, QComboBox, QPushButton, QInputDialog, QMessageBox,
+    QFrame, QComboBox, QPushButton, QInputDialog, QMessageBox, QFileDialog,
 )
 
 from gui.core.model_config import ModelConfig
@@ -106,12 +106,6 @@ class MaterialsTab(QWidget):
         self._tool_widgets: dict[str, NumField] = {}
         self._wp_widgets:   dict[str, NumField] = {}
 
-        # Preset combo boxes (used by _refresh_combo and the apply/save/copy
-        # button handlers). Stored on self so we can refresh them after
-        # the user saves a new preset.
-        self._tool_combo: QComboBox | None = None
-        self._wp_combo:   QComboBox | None = None
-
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
@@ -133,140 +127,77 @@ class MaterialsTab(QWidget):
     # Preset bar (one per column)
     # =====================================================================
     def _build_preset_bar(self, kind: str) -> QWidget:
-        """Build a row with: [Library combo] [Apply] [Save as...] [Copy from other].
+        """Row with [Load...] [Save as...] for material profiles.
 
-        The Apply button is preferred over auto-applying on combo change,
-        so the user can scan presets without losing the current values."""
+        Profiles are individual JSON files in a dedicated folder
+        (presets.profiles_dir()). Load opens that folder so the user can
+        pick a profile file; Save as writes the current material there
+        (choosing an existing file overwrites it). Deleting a profile is
+        done by removing its file from the folder."""
         bar = QWidget()
         h = QHBoxLayout(bar)
         h.setContentsMargins(0, 0, 0, 4)
         h.setSpacing(6)
+        h.addWidget(QLabel("Profile:"))
 
-        h.addWidget(QLabel("Library:"))
-        combo = QComboBox()
-        combo.setMinimumWidth(180)
-        self._refresh_combo(combo, kind)
-        h.addWidget(combo, stretch=1)
+        btn_load = QPushButton("Load...")
+        btn_load.setToolTip("Load a material profile (.json) from the "
+                            "material-profiles folder and apply it here.")
+        btn_load.clicked.connect(lambda: self._load_profile(kind))
+        h.addWidget(btn_load)
 
-        btn_apply = QPushButton("Apply")
-        btn_apply.setToolTip("Replace the current material with the selected preset.")
-        btn_apply.clicked.connect(lambda: self._apply_preset(kind, combo))
-        h.addWidget(btn_apply)
-
-        btn_save = QPushButton("Save as…")
-        btn_save.setToolTip("Save the current material as a new user preset.")
-        btn_save.clicked.connect(lambda: self._save_as_preset(kind))
+        btn_save = QPushButton("Save as...")
+        btn_save.setToolTip("Save the current material as a profile file in "
+                            "the material-profiles folder (pick an existing "
+                            "file to overwrite it).")
+        btn_save.clicked.connect(lambda: self._save_as_profile(kind))
         h.addWidget(btn_save)
-
-        # Cross-copy button: copy the OTHER side's current material into this
-        # side. Useful when you want to use the same alloy on both — saves
-        # re-applying the same preset twice. Doesn't touch the library.
-        other_kind = "workpiece" if kind == "tool" else "tool"
-        btn_copy = QPushButton(f"← Copy {other_kind}")
-        btn_copy.setToolTip(
-            f"Copy the current {other_kind} material into the {kind} side."
-        )
-        btn_copy.clicked.connect(lambda: self._copy_from_other(kind))
-        h.addWidget(btn_copy)
-
-        if kind == "tool":
-            self._tool_combo = combo
-        else:
-            self._wp_combo = combo
+        h.addStretch(1)
         return bar
 
-    def _refresh_combo(self, combo: QComboBox, kind: str):
-        """Populate a combo with the current preset names for `kind`.
-        User-defined presets get a small marker so they're distinguishable
-        from bundled ones at a glance."""
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("— select a preset —", None)
-        for name in self.lib.list_presets(kind):
-            label = name
-            if self.lib.is_user_defined(kind, name):
-                label = f"{name}  (user)"
-            combo.addItem(label, name)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
+    def _target_material(self, kind: str) -> dict:
+        return (self.cfg.tool_material if kind == "tool"
+                else self.cfg.euler_material)
 
-    # ----- handlers -----
-    def _apply_preset(self, kind: str, combo: QComboBox):
-        name = combo.currentData()
-        if not name:
-            QMessageBox.information(
-                self, "Apply preset", "Select a preset from the list first."
-            )
+    def _load_profile(self, kind: str):
+        from gui.core import presets
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load %s material profile" % kind,
+            str(presets.profiles_dir()), "Material profiles (*.json)")
+        if not path:
             return
-        material = self.lib.get(kind, name)
-        if material is None:
-            QMessageBox.warning(self, "Apply preset",
-                                f"Preset {name!r} not found.")
+        try:
+            material = presets.load_profile_file(path)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Load profile",
+                "Could not load profile:\n%s: %s" % (type(e).__name__, e))
             return
-        target = (self.cfg.tool_material if kind == "tool"
-                  else self.cfg.euler_material)
+        target = self._target_material(kind)
         target.clear()
         target.update(material)
         self.apply_from_cfg()
         self.materialsChanged.emit()
 
-    def _save_as_preset(self, kind: str):
-        # Make sure cfg reflects the latest typed-in values
+    def _save_as_profile(self, kind: str):
+        from gui.core import presets
         self._pull_from_widgets()
-        name, ok = QInputDialog.getText(
-            self, "Save as preset",
-            f"Name for the new {kind} preset:",
-        )
-        if not ok or not name.strip():
+        suggested = str(presets.profiles_dir() / ("%s_material.json" % kind))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save %s material profile" % kind,
+            suggested, "Material profiles (*.json)")
+        if not path:
             return
-        name = name.strip()
-
-        if self.lib.is_user_defined(kind, name):
-            reply = QMessageBox.question(
-                self, "Overwrite",
-                f"A user preset named {name!r} already exists. Overwrite it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
-        material = (self.cfg.tool_material if kind == "tool"
-                    else self.cfg.euler_material)
         try:
-            self.lib.save_user_preset(kind, name, material)
+            written = presets.save_profile_file(path, self._target_material(kind))
         except Exception as e:
             QMessageBox.critical(
-                self, "Save preset",
-                f"Failed to save preset:\n{type(e).__name__}: {e}",
-            )
+                self, "Save profile",
+                "Could not save profile:\n%s: %s" % (type(e).__name__, e))
             return
+        QMessageBox.information(self, "Save profile",
+                                "Saved profile to:\n%s" % written)
 
-        combo = self._tool_combo if kind == "tool" else self._wp_combo
-        if combo is not None:
-            self._refresh_combo(combo, kind)
-            idx = combo.findData(name)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-
-    def _copy_from_other(self, kind: str):
-        """Copy the OTHER side's current material into `kind`."""
-        if kind == "tool":
-            source = self.cfg.euler_material
-            target = self.cfg.tool_material
-        else:
-            source = self.cfg.tool_material
-            target = self.cfg.euler_material
-
-        # Only the elastic-thermal block is shared between tool and workpiece;
-        # JC params on the workpiece are left untouched when copying tool ->
-        # workpiece, and there's no JC on the tool side to copy in the other
-        # direction.
-        common_keys = ("rho", "E", "nu", "k", "Cp", "alpha")
-        for k in common_keys:
-            if k in source:
-                target[k] = source[k]
-        self.apply_from_cfg()
-        self.materialsChanged.emit()
 
     # =====================================================================
     # Column builders
@@ -437,24 +368,30 @@ class MaterialsTab(QWidget):
             w.set_value(units.abaqus_to_gui(key, abq, tu))
 
     def refresh_temp_unit(self):
-        """Called when the user toggles °C ↔ K. We rebuild the labels of
-        Tm/Tr/... and recompute their displayed values from the (unchanged)
-        Abaqus-internal storage."""
+        """Back-compat alias: a temperature-base change is just a unit-system
+        change, so refresh everything."""
+        self.refresh_units()
+
+    def refresh_units(self):
+        """Recompute every field's displayed value AND its unit label from
+        the (unchanged) Abaqus-internal storage, under the active unit
+        system. Called after the user edits the unit system in Settings (or
+        toggles °C/K)."""
         tu = self._temp_unit()
         for store, mat in (
             (self._tool_widgets, self.cfg.tool_material),
             (self._wp_widgets,   self.cfg.euler_material),
         ):
             for key, w in store.items():
-                spec = units.MATERIAL_FIELDS.get(key)
-                if spec is None:
-                    continue
-                _, unit_marker, _ = spec
-                if unit_marker != "TEMP":
-                    continue
-                # Update the displayed value (Kelvin <-> Celsius)
                 abq = mat.get(key, 0.0)
-                w.set_value(units.abaqus_to_gui(key, abq, tu))
-                # Update the label
-                full_label = f"{units.display_label(key)} [{units.display_unit(key, tu)}]"
-                w._lbl.setText(full_label)
+                w.blockSignals(True)
+                try:
+                    w.set_value(units.abaqus_to_gui(key, abq, tu))
+                finally:
+                    w.blockSignals(False)
+                unit_str = units.display_unit(key, tu)
+                base = units.display_label(key)
+                full = f"{base} [{unit_str}]" if unit_str and unit_str != "—" \
+                    else base
+                if hasattr(w, "_lbl"):
+                    w._lbl.setText(full)

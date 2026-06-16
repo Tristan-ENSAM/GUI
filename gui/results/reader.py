@@ -20,9 +20,12 @@ Design:
 from __future__ import annotations
 from pathlib import Path
 import json
+import logging
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
+
+from gui.core.logging_util import log_swallowed
 
 
 class ResultsLoadError(RuntimeError):
@@ -170,7 +173,7 @@ class ResultsBundle:
             try:
                 self._arr.close()
             except Exception:
-                pass
+                log_swallowed("closing the .npz handle", level=logging.DEBUG)
             self._arr = None
 
     def __enter__(self):

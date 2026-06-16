@@ -79,12 +79,9 @@ class PreferencesDialog(QDialog):
                                        "file", "Batch files (*.bat);;All files (*)")
         self.fld_script  = _PathField(prefs.abaqus_script,
                                        "file", "Python scripts (*.py);;All files (*)")
-        self.fld_extract = _PathField(prefs.abaqus_extract_script,
-                                       "file", "Python scripts (*.py);;All files (*)")
 
         f_paths.addRow("Abaqus command (.bat):",      self.fld_cmd)
         f_paths.addRow("Model-generator script:",     self.fld_script)
-        f_paths.addRow("Extraction script (.odb):",   self.fld_extract)
         outer.addWidget(g_paths)
 
         note = QLabel(
@@ -132,7 +129,6 @@ class PreferencesDialog(QDialog):
             self._initial,
             abaqus_cmd            = self.fld_cmd.value(),
             abaqus_script         = self.fld_script.value(),
-            abaqus_extract_script = self.fld_extract.value(),
             default_workdir       = self.fld_workdir.value(),
             temp_unit_default     = "K" if self.cb_kelvin_default.isChecked() else "C",
         )

@@ -5,7 +5,9 @@ Export a sensitivity RunResult to CSV.
 One row per (QoI, parameter). Scalar-QoI rows carry the full Jacobian
 breakdown (sensitivity, raw dQ/dx, whether it was normalised, the base
 point x0 and the base QoI value Q0); field-discrepancy QoI rows (ids
-ending in " [field]") carry only the SSD-based sensitivity. The file is
+ending in " [field]") carry the SSD-based sensitivity, and the parallel
+relative-change rows (ids ending in " \u0394% (rel)") carry the field's
+relative change in percent, weighted over nodes and frames. The file is
 sorted within each QoI by descending |sensitivity| — i.e. it doubles as
 the ranking the optimisation step will consume.
 

@@ -64,16 +64,16 @@ def discretize(dim, element_size):
 # =============================================================================
 # %% PARAMETERS EXTRACTION
 # =============================================================================
-elem_size = float(cfg_get(MODEL_CFG, "euler.elem_size", 0.01))
+elem_size = float(cfg_get(MODEL_CFG, "mesh.elem_size", 0.01))
 
-cutting_speed = float(cfg_get(MODEL_CFG, "process.cutting_speed", 1000.0))
+cutting_speed = float(cfg_get(MODEL_CFG, "bcs.cutting_speed", 1000.0))
 # `sim_time` and `n_frames` are now owned by the Step tab. They are
 # mirrored into `process` for backwards compatibility, but the preferred
 # read path is `step`. Try step first, fall back to process.
 sim_time      = float(cfg_get(MODEL_CFG, "step.sim_time",
-                              cfg_get(MODEL_CFG, "process.sim_time",  0.0001)))
+                              cfg_get(MODEL_CFG, "step.sim_time",  0.0001)))
 n_frames      = int(  cfg_get(MODEL_CFG, "step.n_frames",
-                              cfg_get(MODEL_CFG, "process.n_frames",  1)))
+                              cfg_get(MODEL_CFG, "step.n_frames",  1)))
 
 # -----------------------------------------------------------------------------
 # Output selection (Step tab > Field output / History output)
@@ -134,15 +134,19 @@ if not ms_enabled:
     ms_eul  = 1.0
     ms_tool = 1.0
 
-h_tool      = float(cfg_get(MODEL_CFG, "tool.geometry.h_tool",      0.3))
-l_tool      = float(cfg_get(MODEL_CFG, "tool.geometry.l_tool",      0.5))
-r_tool      = float(cfg_get(MODEL_CFG, "tool.geometry.r_tool",      0.01))
-rake_angle  = float(cfg_get(MODEL_CFG, "tool.geometry.rake_angle",  40.0))
-clear_angle = float(cfg_get(MODEL_CFG, "tool.geometry.clear_angle", 10.0))
-tool_tx     = float(cfg_get(MODEL_CFG, "tool.position.x0", 0.0))
-tool_ty     = float(cfg_get(MODEL_CFG, "tool.position.y0", -0.05))
+# Time scaling was removed from the GUI. Keep kt = 1.0 (no effect) so any
+# legacy profile that still carries the flag has no influence on Cp.
+kt = 1.0
 
-egeom  = cfg_get(MODEL_CFG, "euler.geometry", {})
+h_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.h_tool",      0.3))
+l_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.l_tool",      0.5))
+r_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.r_tool",      0.01))
+rake_angle  = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.rake_angle",  40.0))
+clear_angle = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.clear_angle", 10.0))
+tool_tx     = float(cfg_get(MODEL_CFG, "geometry.tool.position.x0", 0.0))
+tool_ty     = float(cfg_get(MODEL_CFG, "geometry.tool.position.y0", -0.05))
+
+egeom  = cfg_get(MODEL_CFG, "geometry.euler.geometry", {})
 h_wp   = float(egeom.get("h_wp",   0.3))
 h_void = float(egeom.get("h_void", 0.2))
 l_wp   = float(egeom.get("l_wp",   0.5))
@@ -153,21 +157,21 @@ if bool(egeom.get("discretize", True)):
     l_wp   = discretize(l_wp,   elem_size)
     l_void = discretize(l_void, elem_size)
 
-mesh_tx = float(cfg_get(MODEL_CFG, "euler.position.x0",            0.0))
-mesh_ty = float(cfg_get(MODEL_CFG, "euler.position.y0",            0.0))
-wp_tx   = float(cfg_get(MODEL_CFG, "euler.workpiece_position.x0",  0.0))
-wp_ty   = float(cfg_get(MODEL_CFG, "euler.workpiece_position.y0",  0.0))
+mesh_tx = float(cfg_get(MODEL_CFG, "geometry.euler.position.x0",            0.0))
+mesh_ty = float(cfg_get(MODEL_CFG, "geometry.euler.position.y0",            0.0))
+wp_tx   = float(cfg_get(MODEL_CFG, "geometry.euler.workpiece_position.x0",  0.0))
+wp_ty   = float(cfg_get(MODEL_CFG, "geometry.euler.workpiece_position.y0",  0.0))
 
 margin = elem_size / 2
-xmin = float(cfg_get(MODEL_CFG, "bbox.xmin", -0.5))
-xmax = float(cfg_get(MODEL_CFG, "bbox.xmax",  0.5))
-ymin = float(cfg_get(MODEL_CFG, "bbox.ymin", -0.5))
-ymax = float(cfg_get(MODEL_CFG, "bbox.ymax",  0.5))
-zmin = float(cfg_get(MODEL_CFG, "bbox.zmin",  0.0))
-zmax = float(cfg_get(MODEL_CFG, "bbox.zmax",  margin))
+xmin = float(cfg_get(MODEL_CFG, "geometry.bbox.xmin", -0.5))
+xmax = float(cfg_get(MODEL_CFG, "geometry.bbox.xmax",  0.5))
+ymin = float(cfg_get(MODEL_CFG, "geometry.bbox.ymin", -0.5))
+ymax = float(cfg_get(MODEL_CFG, "geometry.bbox.ymax",  0.5))
+zmin = float(cfg_get(MODEL_CFG, "geometry.bbox.zmin",  0.0))
+zmax = float(cfg_get(MODEL_CFG, "geometry.bbox.zmax",  margin))
 
-emat = cfg_get(MODEL_CFG, "euler.material", {})
-tmat = cfg_get(MODEL_CFG, "tool.material",  {})
+emat = cfg_get(MODEL_CFG, "materials.euler", {})
+tmat = cfg_get(MODEL_CFG, "materials.tool",  {})
 
 # Eulerian material default values
 emat.setdefault("rho",      4.44e-09);  emat.setdefault("E",        109000.0)
@@ -250,12 +254,15 @@ def _elem_cfg(path):
         "lkc_value":             float(d.get("linear_kinematic_conversion_value", 0.0)),
     }
 
-eul_cfg  = _elem_cfg("euler.element")
-tool_cfg = _elem_cfg("tool.element")
+eul_cfg  = _elem_cfg("mesh.euler_element")
+tool_cfg = _elem_cfg("mesh.tool_element")
 
 job_name = cfg_get(RUN_CFG, "job_name", "default_name")
 cpus     = int(cfg_get(RUN_CFG, "cpus",    4))
 domains  = cfg_get(RUN_CFG, "domains", cpus)
+# When True, build the model and write the .inp deck only — no solver run,
+# no .odb, no results extraction. Lets the user inspect/keep the input file.
+write_inp_only = bool(cfg_get(RUN_CFG, "write_inp_only", False))
 
 
 # =============================================================================
@@ -435,7 +442,7 @@ EulerMat = myModel.Material(name='Euler')
 EulerMat.Density(table=((float(emat["rho"]) * ms_eul,),))
 EulerMat.Elastic(table=((float(emat["E"]), float(emat["nu"])),))
 EulerMat.Conductivity(table=((float(emat["k"]),),))
-EulerMat.SpecificHeat(table=((float(emat["Cp"]) / ms_eul,),), law=CONSTANTPRESSURE)
+EulerMat.SpecificHeat(table=((float(emat["Cp"]) / (ms_eul * kt),),), law=CONSTANTPRESSURE)
 EulerMat.Expansion(table=((float(emat["alpha"]),),))
 EulerMat.InelasticHeatFraction(fraction=float(emat["beta"]))
 
@@ -458,7 +465,7 @@ ToolMat = myModel.Material(name='Tool')
 ToolMat.Density(table=((float(tmat["rho"]) * ms_tool,),))
 ToolMat.Elastic(table=((float(tmat["E"]), float(tmat["nu"])),))
 ToolMat.Conductivity(table=((float(tmat["k"]),),))
-ToolMat.SpecificHeat(table=((float(tmat["Cp"]) / ms_tool,),))
+ToolMat.SpecificHeat(table=((float(tmat["Cp"]) / (ms_tool * kt),),))
 ToolMat.Expansion(table=((float(tmat["alpha"]),),))
 
 #%%% Sections
@@ -549,6 +556,18 @@ roi_nodes = eul_instance.nodes.getByBoundingBox(
     zMin=zmin - margin, zMax=zmax + margin
 )
 assembly.Set(name='ROI', nodes=roi_nodes)
+
+# ZOI (zone of interest) sets used by extraction: one element set and one
+# node set covering the user's ROI on the z = 0 face. They are also created
+# here so they appear in the model/.inp; extraction re-derives the labels
+# from the ODB and stops with an error if either is empty.
+roi_elems = eul_instance.elements.getByBoundingBox(
+    xMin=xmin - margin, xMax=xmax + margin,
+    yMin=ymin - margin, yMax=ymax + margin,
+    zMin=zmin - margin, zMax=zmax + margin
+)
+assembly.Set(name='ZOI_nodes', nodes=roi_nodes)
+assembly.Set(name='ZOI_elems', elements=roi_elems)
 
 #%%% Contact
 # All knobs (tangential formulation, friction coefficient, slip tolerance,
@@ -789,6 +808,15 @@ myJob = mdb.Job(
 print("[META] job_name=%s" % job_name)
 print("[META] sim_time=%g" % sim_time)
 print("[META] n_frames=%d" % n_frames)
+if write_inp_only:
+    # Write the .inp deck and stop — no analysis, no .odb, no extraction.
+    print("[STAGE] WRITE_INP_START")
+    sys.stdout.flush()
+    myJob.writeInput(consistencyChecking=OFF)
+    print("[STAGE] INP_WRITTEN")
+    print("[OK] Wrote %s.inp (no analysis run)." % job_name)
+    sys.stdout.flush()
+    sys.exit(0)
 print("[STAGE] SOLVE_START")
 sys.stdout.flush()
 myJob.submit(consistencyChecking=OFF)
@@ -837,8 +865,9 @@ def _bbox_of_array(arr):
 
 def _resolve_roi():
     """Read bbox from MODEL_CFG. Return a dict {xmin,xmax,...} or None
-    if degenerate. Same contract as parse_roi() in extract_odb.py."""
-    bb = cfg_get(MODEL_CFG, "bbox", {}) or {}
+    if degenerate (the ZOI/ROI is the bbox of the user's region of
+    interest, used to crop the extracted fields)."""
+    bb = cfg_get(MODEL_CFG, "geometry.bbox", {}) or {}
     try:
         xmin = float(bb.get("xmin", 0.0)); xmax = float(bb.get("xmax", 0.0))
         ymin = float(bb.get("ymin", 0.0)); ymax = float(bb.get("ymax", 0.0))
@@ -1285,8 +1314,29 @@ try:
                    _full_bbox[0][2], _full_bbox[1][2]))
         _n_kept_elem = _elements.shape[0]
         _n_kept_node = _nodes_init.shape[0]
-        _vprint("  kept after ROI (%s): %d nodes, %d elements"
+        _vprint("  ZOI after ROI (%s): ZOI_nodes=%d, ZOI_elems=%d"
                 % (_kind, _n_kept_node, _n_kept_elem))
+
+        # The ROI defines the ZOI sets on the Eulerian (cutting) instance.
+        # If the ROI selects nothing there, extraction cannot proceed: tell
+        # the user to size a larger ROI and stop with a non-zero exit code.
+        if _kind == "eulerian" and (_n_kept_elem == 0 or _n_kept_node == 0):
+            _vprint("")
+            _vprint("[ERROR] The ROI selects an empty zone of interest on the "
+                    "Eulerian instance")
+            _vprint("        (ZOI_nodes=%d, ZOI_elems=%d)."
+                    % (_n_kept_node, _n_kept_elem))
+            _vprint("        Mesh bbox is x[%g,%g] y[%g,%g]; your ROI is "
+                    "x[%g,%g] y[%g,%g]."
+                    % (_full_bbox[0][0], _full_bbox[1][0],
+                       _full_bbox[0][1], _full_bbox[1][1],
+                       (_roi or {}).get("xmin", 0.0), (_roi or {}).get("xmax", 0.0),
+                       (_roi or {}).get("ymin", 0.0), (_roi or {}).get("ymax", 0.0)))
+            _vprint("        Increase the ROI (Geometry tab) so it overlaps "
+                    "the mesh, then re-run.")
+            sys.stdout.flush()
+            _odb.close()
+            sys.exit(2)
         if _n_kept_elem == 0:
             continue
 

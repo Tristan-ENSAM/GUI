@@ -44,9 +44,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
+import logging
 import numpy as np
 
 from gui.results.reader import ResultsBundle
+from gui.core.logging_util import log_swallowed
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +193,7 @@ def compute_qois(bundle: ResultsBundle,
         except Exception:
             # Last-resort guard: a QoI fn should already return nan on
             # missing data, but never let one bad run abort the batch.
+            log_swallowed("computing QoI %r" % qid, level=logging.DEBUG)
             out[qid] = float("nan")
     return out
 
@@ -208,6 +211,7 @@ def compute_qois_from_path(npz_or_json_path,
     try:
         bundle = ResultsBundle.load(npz_or_json_path)
     except Exception:
+        log_swallowed("loading results bundle %r" % str(npz_or_json_path))
         return {qid: float("nan") for qid in ids}
     try:
         return compute_qois(bundle, ids, instance, warmup_frac)

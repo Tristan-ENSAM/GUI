@@ -28,6 +28,36 @@ Quick reference for common materials (so the user can sanity-check values):
 """
 from __future__ import annotations
 
+import dataclasses
+
+from gui.core import unit_system as _us
+
+# ----------------------------------------------------------------------------
+# Active display unit system. The whole app converts through THIS object; the
+# default reproduces the historical engineering display exactly (see the
+# constants below and tests/test_unit_system.py). MainWindow swaps it when the
+# user edits the unit system in Settings.
+# ----------------------------------------------------------------------------
+_ACTIVE = _us.UnitSystem()
+
+
+def set_active_system(system: "_us.UnitSystem") -> None:
+    global _ACTIVE
+    _ACTIVE = system
+
+
+def active_system() -> "_us.UnitSystem":
+    return _ACTIVE
+
+
+def _sys_for(temp_unit):
+    """The active system, with its temperature base overridden by an explicit
+    `temp_unit` argument when one is given (backwards-compat: callers still
+    pass 'C'/'K')."""
+    if temp_unit is None or temp_unit == _ACTIVE.temp:
+        return _ACTIVE
+    return dataclasses.replace(_ACTIVE, temp=temp_unit)
+
 # ----------------------------------------------------------------------------
 # Conversion factors (GUI value × FACTOR = Abaqus internal value)
 # ----------------------------------------------------------------------------
@@ -128,36 +158,32 @@ MATERIAL_FIELDS = {
 
 def gui_to_abaqus(key: str, gui_value: float, temp_unit: str = "C") -> float:
     """Convert a single material field from GUI display value to Abaqus
-    internal value. `temp_unit` only matters for Tm/Tr."""
-    spec = MATERIAL_FIELDS.get(key)
-    if spec is None:
-        return gui_value  # unknown key, passthrough
-    _, unit, factor = spec
-    if unit == "TEMP":
-        return temp_to_abaqus(gui_value, temp_unit)
-    return gui_value * factor
+    internal value, using the active unit system. `temp_unit` overrides the
+    active system's temperature base (backwards-compat)."""
+    kind = _us.field_kind(key)
+    return _sys_for(temp_unit).to_internal(kind, gui_value)
 
 
 def abaqus_to_gui(key: str, abq_value: float, temp_unit: str = "C") -> float:
     """Inverse of `gui_to_abaqus`."""
-    spec = MATERIAL_FIELDS.get(key)
-    if spec is None:
-        return abq_value
-    _, unit, factor = spec
-    if unit == "TEMP":
-        return temp_from_abaqus(abq_value, temp_unit)
-    return abq_value / factor
+    kind = _us.field_kind(key)
+    return _sys_for(temp_unit).from_internal(kind, abq_value)
 
 
 def display_unit(key: str, temp_unit: str = "C") -> str:
-    """Return the unit string for a key, resolving the K/°C toggle."""
-    spec = MATERIAL_FIELDS.get(key)
-    if spec is None:
-        return ""
-    _, unit, _ = spec
-    if unit == "TEMP":
-        return "K" if temp_unit == "K" else "°C"
-    return unit
+    """Return the unit string for a key under the active unit system."""
+    kind = _us.field_kind(key)
+    return _sys_for(temp_unit).unit_label(kind)
+
+
+def speed_factor() -> float:
+    """m/min↔mm/s style factor for the active system's velocity unit:
+    display_value * speed_factor() = internal mm/s."""
+    return _ACTIVE.factor("velocity_named")
+
+
+def speed_unit() -> str:
+    return _ACTIVE.unit_label("velocity_named")
 
 
 def display_label(key: str) -> str:

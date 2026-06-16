@@ -59,8 +59,6 @@ class StepTab(QWidget):
         "Eulerian-specific (element)": [
             ("fo_EVF",    "EVF",    "Element volume fraction"),
             ("fo_MFL",    "MFL",    "Mass flux"),
-            ("fo_A",      "A",      "Nodal acceleration"),
-            ("fo_V",      "V",      "Nodal velocity"),
         ],
         "Damage / failure (element)": [
             ("fo_DMICRT", "DMICRT", "Damage initiation criterion"),
@@ -75,6 +73,8 @@ class StepTab(QWidget):
             ("fo_U",      "U",      "Nodal displacement"),
             ("fo_RF",     "RF",     "Nodal reaction force"),
             ("fo_NT",     "NT",     "Nodal temperature"),
+            ("fo_V",      "V",      "Nodal velocity"),
+            ("fo_A",      "A",      "Nodal acceleration"),
         ],
     }
 
@@ -89,8 +89,10 @@ class StepTab(QWidget):
         inner_lay.setSpacing(10)
         inner_lay.addWidget(self._build_duration_group())
         inner_lay.addWidget(self._build_mass_scaling_group())
-        inner_lay.addWidget(self._build_field_output_group())
-        inner_lay.addWidget(self._build_history_output_group())
+        # Field/history output selection and time scaling were removed: what
+        # the solver computes is fixed in the generator source by an expert,
+        # and extraction defaults are fixed (nodal V + NT11, element EVF,
+        # history RF1/RF2 synced to the field frames).
         inner_lay.addStretch()
 
         scroll = QScrollArea()
@@ -147,6 +149,16 @@ class StepTab(QWidget):
             "QLabel { color: #555; font-style: italic; padding-left: 4px; }"
         )
         v.addWidget(self.lbl_dt)
+
+        # Live estimate of the explicit stable time increment and the
+        # resulting number of increments (driven by the Eulerian material
+        # E/ρ, the element size and any mass/time scaling).
+        self.lbl_stable_dt = QLabel()
+        self.lbl_stable_dt.setStyleSheet(
+            "QLabel { color: #1f4060; padding-left: 4px; }"
+        )
+        self.lbl_stable_dt.setWordWrap(True)
+        v.addWidget(self.lbl_stable_dt)
 
         self.f_sim_time.valueChanged.connect(self._on_change)
         self.f_n_frames.valueChanged.connect(self._on_change)
@@ -241,133 +253,62 @@ class StepTab(QWidget):
         else:
             self.lbl_ms_speedup.setText("(disabled — materials unchanged)")
 
-    def _build_field_output_group(self) -> QGroupBox:
-        g = QGroupBox("Field output — variables")
-        v = QVBoxLayout(g)
-        v.setSpacing(4)
-        explainer = QLabel(
-            "Tick the variables you want written to the .odb at each frame. "
-            "Unticking a variable shrinks the .odb file size."
-        )
-        explainer.setStyleSheet("color: #666; font-style: italic;")
-        explainer.setWordWrap(True)
-        v.addWidget(explainer)
-
-        # Master select-all / clear-all row
-        all_row = QHBoxLayout()
-        from PySide6.QtWidgets import QPushButton
-        btn_all  = QPushButton("Select all")
-        btn_none = QPushButton("Clear all")
-        btn_def  = QPushButton("Defaults")
-        btn_all.clicked.connect(lambda: self._set_all_field_outputs(True))
-        btn_none.clicked.connect(lambda: self._set_all_field_outputs(False))
-        btn_def.clicked.connect(self._set_field_outputs_default)
-        all_row.addWidget(btn_all); all_row.addWidget(btn_none)
-        all_row.addWidget(btn_def); all_row.addStretch()
-        all_w = QWidget(); all_w.setLayout(all_row)
-        v.addWidget(all_w)
-
-        # Per-category groups of checkboxes
-        self._fo_checkboxes: dict[str, QCheckBox] = {}
-        for category, items in self.FIELD_VARS.items():
-            v.addWidget(_section_header(category))
-            grid = QGridLayout()
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(8); grid.setVerticalSpacing(2)
-            for i, (attr, ident, desc) in enumerate(items):
-                cb = QCheckBox(f"{ident}")
-                cb.setToolTip(desc)
-                cb.setChecked(getattr(self.cfg.step.output, attr))
-                cb.toggled.connect(self._on_change)
-                self._fo_checkboxes[attr] = cb
-                # 3 columns
-                grid.addWidget(cb, i // 3, i % 3)
-            v.addLayout(grid)
-
-        return g
-
-    def _build_history_output_group(self) -> QGroupBox:
-        g = QGroupBox("History output")
-        v = QVBoxLayout(g)
-        v.setSpacing(4)
-
-        self.cb_ho_preselect = QCheckBox("PRESELECT (default Abaqus history variables)")
-        self.cb_ho_preselect.setChecked(self.cfg.step.output.ho_preselect)
-        self.cb_ho_preselect.setToolTip(
-            "Abaqus's PRESELECT history variable list. Lightweight."
-        )
-        self.cb_ho_preselect.toggled.connect(self._on_change)
-        v.addWidget(self.cb_ho_preselect)
-
-        self.cb_ho_rf_on_rp = QCheckBox("Reaction forces on Tool RP (RF1, RF2)")
-        self.cb_ho_rf_on_rp.setChecked(self.cfg.step.output.ho_rf_on_rp)
-        self.cb_ho_rf_on_rp.setToolTip(
-            "History output of RF1 and RF2 at the tool's reference point —\n"
-            "directly readable as cutting forces (Fx, Fy) over time."
-        )
-        self.cb_ho_rf_on_rp.toggled.connect(self._on_change)
-        v.addWidget(self.cb_ho_rf_on_rp)
-
-        # Sampling: by default we keep the history sampling synchronised
-        # with the field-output sampling (ho_n_intervals = n_frames). The
-        # user can opt out and set a custom interval count if needed —
-        # useful for example to keep fine-grained force data while
-        # writing only a few field frames.
-        self.cb_ho_sync = QCheckBox("Sync with field output (same N intervals)")
-        # The synced state is implicit when ho_n_intervals == n_frames.
-        sync_initial = (self.cfg.step.output.ho_n_intervals
-                         == self.cfg.step.n_frames)
-        self.cb_ho_sync.setChecked(sync_initial)
-        self.cb_ho_sync.setToolTip(
-            "When ticked, the history sampling matches the field-output\n"
-            "sampling (1 history sample per field frame). Each force value\n"
-            "then aligns 1:1 with a field snapshot — useful for plotting\n"
-            "RF vs PEEQ peaks without interpolation."
-        )
-        self.cb_ho_sync.toggled.connect(self._on_change)
-        v.addWidget(self.cb_ho_sync)
-
-        self.f_ho_n = IntField(
-            "History number of intervals",
-            self.cfg.step.output.ho_n_intervals,
-            minimum=1, maximum=1_000_000,
-        )
-        self.f_ho_n.setToolTip(
-            "Number of equally-spaced history samples written to the .odb\n"
-            "over the step. The .odb actually contains N+1 samples (Abaqus\n"
-            "includes both endpoints)."
-        )
-        v.addWidget(self.f_ho_n)
-        self.f_ho_n.valueChanged.connect(self._on_change)
-
-        return g
-
-    # =====================================================================
-    # Helpers
-    # =====================================================================
-    def _set_all_field_outputs(self, on: bool):
-        for cb in self._fo_checkboxes.values():
-            cb.blockSignals(True)
-            cb.setChecked(on)
-            cb.blockSignals(False)
-        self._on_change()
-
-    def _set_field_outputs_default(self):
-        """Restore the dataclass defaults (everything ON, matches what the
-        current abq_odb_generator.py hardcodes)."""
-        from gui.core.model_config import OutputCfg
-        defaults = OutputCfg()
-        for attr, cb in self._fo_checkboxes.items():
-            cb.blockSignals(True)
-            cb.setChecked(getattr(defaults, attr))
-            cb.blockSignals(False)
-        self._on_change()
-
     def _refresh_dt_label(self):
         st = self.f_sim_time.value()
         n  = max(1, self.f_n_frames.value())
         dt = st / n
         self.lbl_dt.setText(f"≈ 1 frame every {dt:.3e} s")
+
+    def _stable_increment_estimate(self):
+        """Rough explicit stable time increment Δt ≈ Lₑ / c_d, with the
+        dilatational wave speed c_d ≈ √(E/ρ) of the Eulerian (workpiece)
+        material, in the Abaqus t-mm-s system (E in MPa = N/mm², ρ in
+        t/mm³ → c_d in mm/s). Mass scaling lowers c_d by √κ_m (ρ_eff =
+        κ_m·ρ). Returns (Δt_seconds, n_increments) or (None, None).
+
+        This is an *estimate*: the real solver increment is recomputed on
+        the smallest deformed element with stability/​bulk-viscosity
+        corrections, so treat it as an order of magnitude."""
+        m = getattr(self.cfg, "euler_material", {}) or {}
+        try:
+            E = float(m.get("E", 0.0))        # MPa internal
+            rho = float(m.get("rho", 0.0))    # t/mm³ internal
+            Le = float(getattr(self.cfg, "elem_size", 0.0))  # mm
+        except (TypeError, ValueError):
+            return None, None
+        if E <= 0.0 or rho <= 0.0 or Le <= 0.0:
+            return None, None
+        rho_eff = rho
+        ms_on = getattr(self, "cb_ms_enabled", None)
+        if ms_on is not None and ms_on.isChecked():
+            rho_eff *= max(1.0, self.f_ms_eul.value())
+        c_d = (E / rho_eff) ** 0.5            # mm/s
+        if c_d <= 0.0:
+            return None, None
+        dt = Le / c_d                          # s
+        sim = self.f_sim_time.value()
+        n = (sim / dt) if dt > 0 else None
+        return dt, n
+
+    def _refresh_stable_dt_label(self):
+        dt, n = self._stable_increment_estimate()
+        if dt is None:
+            self.lbl_stable_dt.setText(
+                "Stable increment: need E, ρ (Materials) and element size "
+                "(Mesh) to estimate.")
+            return
+        txt = (f"≈ stable increment ~{dt:.3e} s  ·  "
+               f"~{n:,.0f} increments over the step (estimate)")
+        ms_on = getattr(self, "cb_ms_enabled", None)
+        if ms_on is not None and ms_on.isChecked():
+            txt += f"  ·  mass scaling ×{self.f_ms_eul.value():.0f} applied"
+        self.lbl_stable_dt.setText(txt)
+
+    def showEvent(self, event):
+        # The Eulerian material (E/ρ) and element size are edited in other
+        # tabs; refresh the estimate every time the Step tab is shown.
+        super().showEvent(event)
+        self._refresh_stable_dt_label()
 
     # =====================================================================
     # Sync widgets ↔ cfg
@@ -375,6 +316,7 @@ class StepTab(QWidget):
     def _on_change(self, *_):
         self._pull_from_widgets()
         self._refresh_dt_label()
+        self._refresh_stable_dt_label()
         self._refresh_ms_visibility()
         self.stepChanged.emit()
 
@@ -385,32 +327,19 @@ class StepTab(QWidget):
         s.mass_scaling_enabled         = self.cb_ms_enabled.isChecked()
         s.mass_scaling_factor_eulerian = self.f_ms_eul.value()
         s.mass_scaling_factor_tool     = self.f_ms_tool.value()
-        for attr, cb in self._fo_checkboxes.items():
-            setattr(s.output, attr, cb.isChecked())
-        s.output.ho_preselect      = self.cb_ho_preselect.isChecked()
-        s.output.ho_rf_on_rp       = self.cb_ho_rf_on_rp.isChecked()
-        # History sampling: when synced, the field-output count drives it.
-        # Otherwise read the user's free value from the IntField.
-        if self.cb_ho_sync.isChecked():
-            s.output.ho_n_intervals = s.n_frames
-        else:
-            s.output.ho_n_intervals = self.f_ho_n.value()
-        # Refresh the IntField enable state + value to reflect the sync
-        # status (block signals so we don't loop).
-        synced = self.cb_ho_sync.isChecked()
-        self.f_ho_n.setEnabled(not synced)
-        if synced:
-            self.f_ho_n.blockSignals(True)
-            self.f_ho_n.set_value(s.n_frames)
-            self.f_ho_n.blockSignals(False)
+        # Time scaling removed: keep it disabled in the config.
+        s.time_scaling_enabled = False
+        # History sampling is always synced to the field-output frame count;
+        # RF1/RF2 and PRESELECT are always written (fixed extraction).
+        s.output.ho_n_intervals = s.n_frames
+        s.output.ho_preselect   = True
+        s.output.ho_rf_on_rp    = True
 
     def apply_from_cfg(self):
         """Push cfg values into widgets (used after Open / New)."""
         s = self.cfg.step
-        widgets = [self.f_sim_time, self.f_n_frames, self.cb_ho_preselect,
-                   self.cb_ho_rf_on_rp, self.cb_ho_sync, self.f_ho_n,
-                   self.cb_ms_enabled, self.f_ms_eul, self.f_ms_tool] \
-                  + list(self._fo_checkboxes.values())
+        widgets = [self.f_sim_time, self.f_n_frames,
+                   self.cb_ms_enabled, self.f_ms_eul, self.f_ms_tool]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -419,17 +348,14 @@ class StepTab(QWidget):
             self.cb_ms_enabled.setChecked(s.mass_scaling_enabled)
             self.f_ms_eul.set_value(s.mass_scaling_factor_eulerian)
             self.f_ms_tool.set_value(s.mass_scaling_factor_tool)
-            for attr, cb in self._fo_checkboxes.items():
-                cb.setChecked(getattr(s.output, attr))
-            self.cb_ho_preselect.setChecked(s.output.ho_preselect)
-            self.cb_ho_rf_on_rp.setChecked(s.output.ho_rf_on_rp)
-            # Sync state: true iff the saved n_intervals equals n_frames.
-            synced = (s.output.ho_n_intervals == s.n_frames)
-            self.cb_ho_sync.setChecked(synced)
-            self.f_ho_n.set_value(s.output.ho_n_intervals)
-            self.f_ho_n.setEnabled(not synced)
         finally:
             for w in widgets:
                 w.blockSignals(False)
+        # Keep the fixed-output / no-time-scaling invariants in the config.
+        s.time_scaling_enabled = False
+        s.output.ho_n_intervals = s.n_frames
+        s.output.ho_preselect   = True
+        s.output.ho_rf_on_rp    = True
         self._refresh_dt_label()
+        self._refresh_stable_dt_label()
         self._refresh_ms_visibility()

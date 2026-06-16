@@ -110,6 +110,9 @@ class ParamSpec:
     dtype: str = "float"          # "float" | "int"
     factor: float = 1.0           # displayed * factor = stored
     is_temp: bool = False         # stored °C; displayed per temp_unit
+    mat_key: str = ""             # material key -> convert via the ACTIVE
+                                  # unit system (units.*), not the static
+                                  # factor, so it follows Settings.
     # Default ± half-range used to pre-fill the UI min/max, expressed on the
     # DISPLAYED value. If the displayed default is ~0 (e.g. rake_angle=0),
     # `abs_range` is used as an absolute half-width instead of `rel_range`.
@@ -120,13 +123,25 @@ class ParamSpec:
     def to_display(self, stored: float, temp_unit: str = "C") -> float:
         if self.is_temp:
             return units.temp_from_abaqus(stored, temp_unit)
+        if self.mat_key:
+            return units.abaqus_to_gui(self.mat_key, stored, temp_unit)
         return stored / self.factor if self.factor else stored
 
     def to_stored(self, displayed: float, temp_unit: str = "C") -> float:
         if self.is_temp:
             return units.temp_to_abaqus(displayed, temp_unit)
+        if self.mat_key:
+            val = units.gui_to_abaqus(self.mat_key, displayed, temp_unit)
+            return int(round(val)) if self.dtype == "int" else val
         val = displayed * self.factor
         return int(round(val)) if self.dtype == "int" else val
+
+    def unit_str(self, temp_unit: str = "C") -> str:
+        """Live display unit: material keys resolve through the active unit
+        system; other params keep their authored `display_unit`."""
+        if self.mat_key:
+            return units.display_unit(self.mat_key, temp_unit)
+        return self.display_unit
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +196,7 @@ def _material_specs() -> list[ParamSpec]:
             dtype="float",
             factor=f,
             is_temp=is_temp,
+            mat_key=key,
             rel_range=rel,
             # absolute fallback when displayed default is ~0
             abs_range=0.0,

@@ -109,7 +109,7 @@ class JobTab(QWidget):
         g = QGroupBox("Job parameters")
         form = QFormLayout(g)
 
-        self.fld_job_name = QLineEdit("Cutting_job")
+        self.fld_job_name = QLineEdit(self.cfg.job.job_name)
         self.fld_job_name.setMaximumWidth(260)
         self.fld_job_name.setToolTip(
             "Used as the .inp/.odb base name. Avoid spaces and slashes;\n"
@@ -119,7 +119,7 @@ class JobTab(QWidget):
 
         self.spin_cpus = QSpinBox()
         self.spin_cpus.setRange(1, 256)
-        self.spin_cpus.setValue(4)
+        self.spin_cpus.setValue(self.cfg.job.cpus)
         self.spin_cpus.setMaximumWidth(100)
         self.spin_cpus.setToolTip("Number of CPU cores for the Abaqus solver.")
         form.addRow("CPUs:", self.spin_cpus)
@@ -130,24 +130,18 @@ class JobTab(QWidget):
         # warrants its own UI later. For now we let Abaqus pick its own
         # defaults given `cpus`.
 
-        # Workdir + browse
-        wd_row = QHBoxLayout()
-        self.fld_workdir = QLineEdit(self._get_prefs().default_workdir)
-        self.fld_workdir.setToolTip(
-            "Folder where the .inp, .odb, .log and .msg files will be written.\n"
-            "Defaults to the value in Preferences; override per-job here."
+        # Working directory is taken from Preferences (read-only here).
+        self.lbl_workdir = QLabel(self._get_prefs().default_workdir)
+        self.lbl_workdir.setStyleSheet("color: #555;")
+        self.lbl_workdir.setToolTip(
+            "Folder where the .inp, .odb, .log and .msg files are written.\n"
+            "Set it in Preferences - Settings (it is machine-specific)."
         )
-        btn_browse = QPushButton("Browse…")
-        btn_browse.clicked.connect(self._browse_workdir)
-        wd_row.addWidget(self.fld_workdir, stretch=1)
-        wd_row.addWidget(btn_browse)
-        wd_w = QWidget(); wd_w.setLayout(wd_row)
-        form.addRow("Working directory:", wd_w)
+        form.addRow("Working directory:", self.lbl_workdir)
 
         # Wire change handlers
         self.fld_job_name.textChanged.connect(self._on_change)
         self.spin_cpus.valueChanged.connect(self._on_change)
-        self.fld_workdir.textChanged.connect(self._on_change)
         return g
 
     def _build_run_controls(self) -> QWidget:
@@ -171,6 +165,15 @@ class JobTab(QWidget):
         )
         self.btn_run.clicked.connect(self._run_abaqus)
         row.addWidget(self.btn_run)
+
+        self.btn_write_inp = QPushButton("Write .inp only")
+        self.btn_write_inp.setToolTip(
+            "Build the model and write the Abaqus input deck (.inp) into the\n"
+            "working directory — without running the solver. Useful to\n"
+            "inspect or archive the deck, or to run it elsewhere."
+        )
+        self.btn_write_inp.clicked.connect(self._write_inp)
+        row.addWidget(self.btn_write_inp)
 
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
@@ -265,15 +268,11 @@ class JobTab(QWidget):
     # =====================================================================
     # Actions
     # =====================================================================
-    def _browse_workdir(self):
-        cur = self.fld_workdir.text() or self._get_prefs().default_workdir
-        path = QFileDialog.getExistingDirectory(
-            self, "Pick working directory", cur or str(Path.home()),
-        )
-        if path:
-            self.fld_workdir.setText(path)
-
     def _on_change(self, *_):
+        # Persist the portable job parameters into the profile (workdir stays
+        # machine-specific and is not stored in the project file).
+        self.cfg.job.job_name = self.fld_job_name.text().strip() or "Cutting_job"
+        self.cfg.job.cpus = int(self.spin_cpus.value())
         self.jobChanged.emit()
 
     def _copy_output(self):
@@ -286,7 +285,7 @@ class JobTab(QWidget):
 
         job_name = self.fld_job_name.text().strip() or "Cutting_job"
         cpus     = int(self.spin_cpus.value())
-        workdir  = self.fld_workdir.text().strip() or prefs.default_workdir
+        workdir  = prefs.default_workdir
 
         # The model_params dict that abq_odb_generator.py will receive.
         model_params = self.cfg.to_params_dict()
@@ -391,9 +390,20 @@ class JobTab(QWidget):
     # .odb is complete before extraction starts.
 
     def _run_abaqus(self):
+        """Launch a full build + solve + extract run."""
+        self._launch_abaqus(write_inp_only=False)
+
+    def _write_inp(self):
+        """Build the model and write only the .inp deck (no solver run)."""
+        self._launch_abaqus(write_inp_only=True)
+
+    def _launch_abaqus(self, write_inp_only: bool = False):
         """Launch the run_simul.py script in a child process. Output
         (stdout + stderr merged) is streamed live into the output panel
         as it arrives. The GUI thread remains responsive throughout.
+
+        When `write_inp_only` is True, run_simul writes the .inp and stops
+        (no solver, no .odb, no results bundle).
         """
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:
             # Already running — protect the user from launching twice.
@@ -407,7 +417,7 @@ class JobTab(QWidget):
         prefs = self._get_prefs()
         job_name = self.fld_job_name.text().strip() or "Cutting_job"
         cpus     = int(self.spin_cpus.value())
-        workdir  = self.fld_workdir.text().strip() or prefs.default_workdir
+        workdir  = prefs.default_workdir
 
         # Sanity checks before launching — we want the user to see the
         # error as a dialog, not as a cryptic QProcess errorOccurred signal.
@@ -437,15 +447,19 @@ class JobTab(QWidget):
         self._pipeline = {
             "workdir":  wd,
             "job_name": job_name,
-            "out_path": wd / f"{job_name}.results.npz",
+            "out_path": wd / (f"{job_name}.inp" if write_inp_only
+                              else f"{job_name}.results.npz"),
             "sta_path": wd / f"{job_name}.sta",
             "sim_time": float(self.cfg.step.sim_time),
             "n_frames": int(self.cfg.step.n_frames),
+            "write_inp_only": write_inp_only,
         }
 
         # Build the args (same construction as the dry-run + ABQ.run_simul)
         model_params = self.cfg.to_params_dict()
         run_params   = {"cpus": cpus, "job_name": job_name}
+        if write_inp_only:
+            run_params["write_inp_only"] = True
         args = [
             "cae",
             f"noGUI={prefs.abaqus_script}",
@@ -457,16 +471,20 @@ class JobTab(QWidget):
         ]
 
         # Header in the output panel — replaces the dry-run text.
+        title = (f"WRITING .inp — job: {job_name}" if write_inp_only
+                 else f"RUNNING Abaqus — job: {job_name}")
+        body = ("Live output (build + write .inp):" if write_inp_only
+                else "Live output (build + solve + extract):")
         header = [
             "=" * 72,
-            f"RUNNING Abaqus — job: {job_name}",
+            title,
             "=" * 72,
             f"Working directory:  {workdir}",
             f"CPUs:               {cpus}",
             f"Abaqus command:     {prefs.abaqus_cmd}",
             f"Script:             {prefs.abaqus_script}",
             "-" * 72,
-            "Live output (build + solve + extract):",
+            body,
             "-" * 72,
             "",
         ]
@@ -485,17 +503,24 @@ class JobTab(QWidget):
         # Disable Run + enable Cancel during execution
         self.btn_run.setEnabled(False)
         self.btn_run.setText("Running…")
+        self.btn_write_inp.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.btn_generate.setEnabled(False)
 
-        # Show + reset the progress panel, then start polling the .sta.
-        # The .sta won't exist for the first few seconds (Abaqus is busy
-        # generating the .inp and parsing it); the parser handles missing
-        # files gracefully, so we just keep polling until it appears.
-        self.progress_bar.setValue(0)
-        self.progress_label.setText("starting Abaqus (waiting for solver)…")
-        self._progress_group.setVisible(True)
-        self._sta_timer.start()
+        if write_inp_only:
+            # No solver -> no .sta to poll. Show an indeterminate-style note.
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("building model and writing .inp…")
+            self._progress_group.setVisible(True)
+        else:
+            # Show + reset the progress panel, then start polling the .sta.
+            # The .sta won't exist for the first few seconds (Abaqus is busy
+            # generating the .inp and parsing it); the parser handles missing
+            # files gracefully, so we just keep polling until it appears.
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("starting Abaqus (waiting for solver)…")
+            self._progress_group.setVisible(True)
+            self._sta_timer.start()
 
         # Launch
         self._proc.start(prefs.abaqus_cmd, args)
@@ -515,18 +540,25 @@ class JobTab(QWidget):
 
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Abaqus")
+        self.btn_write_inp.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.btn_generate.setEnabled(True)
         self._proc = None
         if success:
             pipe = getattr(self, "_pipeline", None)
             if pipe and Path(pipe["out_path"]).exists():
-                self._append_output(
-                    "\n[READY] Results bundle written to:\n"
-                    f"  {pipe['out_path']}\n"
-                    "Switch to the Results tab and click 'Load results…' "
-                    "to view it.\n"
-                )
+                if pipe.get("write_inp_only"):
+                    self._append_output(
+                        "\n[READY] Input deck written to:\n"
+                        f"  {pipe['out_path']}\n"
+                    )
+                else:
+                    self._append_output(
+                        "\n[READY] Results bundle written to:\n"
+                        f"  {pipe['out_path']}\n"
+                        "Switch to the Results tab and click 'Load results…' "
+                        "to view it.\n"
+                    )
 
     def _poll_sta(self):
         """Read the .sta file and update the progress bar + label.
@@ -628,9 +660,11 @@ class JobTab(QWidget):
         if success:
             footer = "\n" + "=" * 72 + "\n[OK] Run finished\n"
         elif clean and not bundle_ok:
+            what = ("input deck (.inp)" if pipe.get("write_inp_only")
+                    else "results bundle")
             footer = (
                 "\n" + "=" * 72 +
-                "\n[FAILED] Abaqus reported success but no results bundle "
+                f"\n[FAILED] Abaqus reported success but no {what} "
                 "was written.\n"
                 f"Expected: {out_path}\n"
                 "Check the output above for the actual error.\n"
@@ -677,9 +711,18 @@ class JobTab(QWidget):
     # they don't live in ModelConfig yet)
     # =====================================================================
     def apply_from_cfg(self):
-        """No-op for now: job parameters aren't part of the .acpf profile.
-        Workdir defaults to the user-level Preferences each time."""
-        pass
+        """Load the portable job parameters (name, CPUs) from the profile.
+        The working directory is machine-specific and is reset to the
+        user-level Preferences default each time a profile is loaded."""
+        for w in (self.fld_job_name, self.spin_cpus):
+            w.blockSignals(True)
+        try:
+            self.fld_job_name.setText(self.cfg.job.job_name)
+            self.spin_cpus.setValue(int(self.cfg.job.cpus))
+            self.lbl_workdir.setText(self._get_prefs().default_workdir)
+        finally:
+            for w in (self.fld_job_name, self.spin_cpus):
+                w.blockSignals(False)
 
     # CPU count chosen here is the single source of truth for any Abaqus
     # launch (Job run, and the sensitivity runner).

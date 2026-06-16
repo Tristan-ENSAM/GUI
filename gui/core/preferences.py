@@ -60,13 +60,12 @@ class Preferences:
     # update these prefs.
     # `abaqus_script` is now `run_simul.py` (was `abq_odb_generator.py`):
     # this single script builds the model, submits the analysis, waits
-    # for completion, and writes the (.json + .npz) results bundle.
-    # `abaqus_extract_script` is kept as a *separate* extractor that can
-    # be invoked manually on an existing .odb (no model rebuild). The
-    # Job tab pipeline does not use it anymore.
+    # for completion, and writes the (.json + .npz) results bundle. The
+    # old standalone extractor (extract_odb.py) has been removed — its
+    # logic now lives inline in run_simul.py, so there is no separate
+    # extractor preference anymore.
     abaqus_cmd:            str = r"C:\SIMULIA\Commands\abaqus.bat"
     abaqus_script:         str = r"C:\GUI_Abaqus\abaqus_scripts\run_simul.py"
-    abaqus_extract_script: str = r"C:\GUI_Abaqus\abaqus_scripts\extract_odb.py"
 
     # ---- Default working directory for Abaqus jobs ----
     default_workdir: str = r"C:\TEMP\Abaqus_wd"

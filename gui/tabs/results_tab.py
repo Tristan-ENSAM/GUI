@@ -26,11 +26,13 @@ from PySide6.QtWidgets import (
 )
 
 import numpy as np
+import logging
 
 from gui.results.reader import ResultsBundle, ResultsLoadError
 from gui.results.export_txt import export_bundle
 from gui.widgets.field_viewer       import FieldViewer
 from gui.widgets.time_series_viewer import TimeSeriesViewer
+from gui.core.logging_util import log_swallowed
 
 
 # Eulerian cells with volume fraction below this are treated as empty and
@@ -275,7 +277,8 @@ class ResultsTab(QWidget):
                 for var in bundle.history_info.variables:
                     self.ts_viewer.add_series(var, hist_t, bundle.history(var))
             except Exception:
-                pass
+                log_swallowed("showing history after a load issue",
+                              level=logging.DEBUG)
             return
         # ----- Populate the instance picker, default to the Eulerian -----
         self.cb_inst.blockSignals(True)

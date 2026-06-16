@@ -127,36 +127,12 @@ class InteractionTab(QWidget):
     def _build_normal_group(self) -> QGroupBox:
         g = QGroupBox("Normal behaviour")
         v = QVBoxLayout(g)
-
+        # Pressure-overclosure is always HARD in this build.
+        self.cfg.interaction.pressure_overclosure = "hard"
         v.addWidget(_section_header("Pressure-overclosure"))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Type:"))
-        self.cb_normal = QComboBox()
-        for label, value in self.NORMAL_FORMS:
-            self.cb_normal.addItem(label, value)
-        idx = self.cb_normal.findData(self.cfg.interaction.pressure_overclosure)
-        if idx >= 0:
-            self.cb_normal.setCurrentIndex(idx)
-        self.cb_normal.setToolTip(
-            "Hard: penalty-stiffness enforces no penetration (default).\n"
-            "Soft (exponential / linear): allows a small overclosure-pressure\n"
-            "relationship — useful for surface roughness or compliant contact\n"
-            "but parameters must be calibrated."
-        )
-        row.addWidget(self.cb_normal, stretch=1)
-        v.addLayout(row)
-
-        # When soft is selected we'd expose more parameters; left as a future
-        # extension to keep the UI focused on what the CEL generator currently
-        # uses.
-        note = QLabel(
-            "Note: Soft-contact parameters (clearance, max pressure...) are not\n"
-            "exposed yet. Stay on Hard unless you have a specific need."
-        )
-        note.setStyleSheet("color: #888; font-style: italic;")
-        v.addWidget(note)
-
-        self.cb_normal.currentIndexChanged.connect(self._on_change)
+        lbl = QLabel("Hard contact (penalty stiffness enforces no penetration).")
+        lbl.setStyleSheet("color: #555;")
+        v.addWidget(lbl)
         return g
 
     def _build_heat_group(self) -> QGroupBox:
@@ -180,25 +156,15 @@ class InteractionTab(QWidget):
             self.cfg.interaction.heat_fraction_to_slave,
             "—", minimum=0.0, maximum=1.0, compact=True,
         )
-        self.f_heat_master = NumField(
-            "Fraction to master (tool)",
-            self.cfg.interaction.heat_fraction_to_master,
-            "—", minimum=0.0, maximum=1.0, compact=True,
-        )
         self.f_heat_slave.setToolTip(
             "Fraction of frictional heat absorbed by the workpiece side.\n"
-            "Equal split (0.5 / 0.5) is the Abaqus default."
+            "Equal split (0.5) is the Abaqus default."
         )
-        self.f_heat_master.setToolTip(
-            "Fraction of frictional heat absorbed by the tool side.\n"
-            "Should typically sum with 'to slave' to 1.0."
-        )
-        v.addWidget(PairRow(self.f_heat_slave, self.f_heat_master))
+        v.addWidget(self.f_heat_slave)
 
         # Wire and set initial visibility
         self.cb_heat.valueChanged.connect(self._on_change)
         self.f_heat_slave.valueChanged.connect(self._on_change)
-        self.f_heat_master.valueChanged.connect(self._on_change)
         self._refresh_heat_visibility()
         return g
 
@@ -222,7 +188,6 @@ class InteractionTab(QWidget):
     def _refresh_heat_visibility(self):
         enabled = self.cb_heat.value()
         self.f_heat_slave.setEnabled(enabled)
-        self.f_heat_master.setEnabled(enabled)
 
     # =====================================================================
     # Sync widgets -> cfg
@@ -238,16 +203,17 @@ class InteractionTab(QWidget):
         i.tangential_formulation = self.cb_tang.currentData()
         i.friction_coeff         = self.f_mu.value()
         i.slip_tolerance         = self.f_slip.value()
-        i.pressure_overclosure   = self.cb_normal.currentData()
+        i.pressure_overclosure   = "hard"     # fixed in this build
         i.heat_generation         = self.cb_heat.value()
         i.heat_fraction_to_slave  = self.f_heat_slave.value()
-        i.heat_fraction_to_master = self.f_heat_master.value()
+        # Master gets the remainder so the split is consistent.
+        i.heat_fraction_to_master = max(0.0, 1.0 - self.f_heat_slave.value())
 
     def apply_from_cfg(self):
         """Push cfg.interaction values into the widgets without firing
         the change signals (used when loading a profile)."""
-        widgets = (self.cb_tang, self.f_mu, self.f_slip, self.cb_normal,
-                   self.cb_heat, self.f_heat_slave, self.f_heat_master)
+        widgets = (self.cb_tang, self.f_mu, self.f_slip,
+                   self.cb_heat, self.f_heat_slave)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -257,12 +223,8 @@ class InteractionTab(QWidget):
                 self.cb_tang.setCurrentIndex(idx)
             self.f_mu.set_value(i.friction_coeff)
             self.f_slip.set_value(i.slip_tolerance)
-            idx = self.cb_normal.findData(i.pressure_overclosure)
-            if idx >= 0:
-                self.cb_normal.setCurrentIndex(idx)
             self.cb_heat.set_value(i.heat_generation)
             self.f_heat_slave.set_value(i.heat_fraction_to_slave)
-            self.f_heat_master.set_value(i.heat_fraction_to_master)
         finally:
             for w in widgets:
                 w.blockSignals(False)

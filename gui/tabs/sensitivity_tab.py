@@ -35,6 +35,8 @@ from gui.sensitivity import export_results as xr
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
+from gui.core.logging_util import log_swallowed
+import logging
 
 # QoI ticked by default — the ones we can also measure on the planing rig
 # (cutting/feed forces and peak temperature).
@@ -62,6 +64,8 @@ class SensitivityTab(QWidget):
         self._worker = None              # SensitivityRunWorker
         self._last_result = None         # rc.RunResult
         self._per_run_sec = None         # measured/estimated wall-clock per run
+        self._per_frame_sec = None       # measured wall-clock between two frames
+        self._cur_frame = None           # (current, total) for the running run
         self._run_t0 = {}                # run index -> monotonic start
         self._run_durations = []         # measured durations of finished runs
         self._running_index = None       # index of the run in progress
@@ -112,18 +116,47 @@ class SensitivityTab(QWidget):
 
         # ---- Method selector -------------------------------------------
         method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Method: Jacobian (finite differences)"))
+        method_row.addWidget(QLabel("Method:"))
+        self.cb_method = QComboBox()
+        self.cb_method.addItems(["Jacobian (finite differences)",
+                                 "Morris (global screening)"])
+        self.cb_method.currentIndexChanged.connect(self._on_method_changed)
+        method_row.addWidget(self.cb_method)
         method_row.addSpacing(16)
-        method_row.addWidget(QLabel("FD scheme:"))
+
+        # Jacobian-only controls
+        self.lbl_scheme = QLabel("FD scheme:")
+        method_row.addWidget(self.lbl_scheme)
         self.cb_scheme = QComboBox()
         self.cb_scheme.addItems(["central", "forward", "backward"])
         self.cb_scheme.currentIndexChanged.connect(self._update_cost)
         method_row.addWidget(self.cb_scheme)
+
+        # Morris-only controls
+        self.lbl_traj = QLabel("Trajectories N:")
+        method_row.addWidget(self.lbl_traj)
+        self.spin_traj = QSpinBox()
+        self.spin_traj.setRange(2, 1000)
+        self.spin_traj.setValue(10)
+        self.spin_traj.setToolTip(
+            "Number of Morris trajectories. Total runs = N × (k+1) for k\n"
+            "parameters. 10–20 is typical for screening.")
+        self.spin_traj.valueChanged.connect(self._update_cost)
+        method_row.addWidget(self.spin_traj)
+        self.lbl_levels = QLabel("Grid levels:")
+        method_row.addWidget(self.lbl_levels)
+        self.spin_levels = QSpinBox()
+        self.spin_levels.setRange(2, 20)
+        self.spin_levels.setValue(4)
+        self.spin_levels.setToolTip("Morris grid levels p (4 is the common default).")
+        method_row.addWidget(self.spin_levels)
+
         self.lbl_hint = QLabel("step = Delta per parameter")
         self.lbl_hint.setStyleSheet("color: #6b7280;")
         method_row.addWidget(self.lbl_hint)
         method_row.addStretch(1)
         bl.addLayout(method_row)
+        self._on_method_changed()   # set initial visibility
 
         qoi_box = QGroupBox("Quantities of interest (QoI) to screen")
         qg = QGridLayout(qoi_box)
@@ -303,7 +336,7 @@ class SensitivityTab(QWidget):
                                "The real Min/Max/Delta below stay unchanged.")
                 self.table.setItem(r, 7, nrm)
                 # col 8: unit (read-only)
-                unit = QTableWidgetItem(spec.display_unit)
+                unit = QTableWidgetItem(spec.unit_str(tu))
                 unit.setFlags(Qt.ItemIsEnabled)
                 self.table.setItem(r, 8, unit)
         self.table.blockSignals(False)
@@ -392,28 +425,102 @@ class SensitivityTab(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.refresh_from_model()
+
+    def refresh_from_model(self):
+        """Public hook: mirror the current Numerical Model into this tab.
+        Called by MainWindow when Sensitivity becomes the visible page
+        (showEvent is unreliable for a doubly-nested tab page)."""
+        self._resync_reference_values()   # mirror the current Numerical Model
         self._update_cost()          # refresh CPU mirror + cost estimate
+
+    def _resync_reference_values(self):
+        """Refresh the Ref column (col 2) from the *current* ModelConfig, so
+        edits made in the Numerical Model tabs are reflected here. For rows
+        the user is actively configuring (Vary ticked), Min/Max and Delta%
+        are preserved and only the absolute Delta is recomputed from the new
+        Ref; untouched rows get their default trust region recomputed."""
+        tu = self._temp_unit()
+        self.table.blockSignals(True)
+        try:
+            for r, spec in self._row_spec.items():
+                try:
+                    new_ref = pr.get_display(self.cfg, spec, tu)
+                except Exception:
+                    log_swallowed("resyncing Ref for %s" % spec.path,
+                                  level=logging.DEBUG)
+                    continue
+                self._set_cell(r, 2, _fmt(new_ref))
+                # keep the unit column in sync too (it can depend on tu)
+                self._set_cell(r, 8, spec.unit_str(tu))
+                chk = self.table.item(r, 0)
+                is_checked = (chk is not None
+                              and chk.checkState() == Qt.Checked)
+                if is_checked:
+                    # preserve the user's trust region + relative step;
+                    # rescale only the absolute Delta to the new Ref.
+                    pct = self._cell_float(r, 6)
+                    if pct is not None and new_ref:
+                        self._set_cell(r, 5, _fmt(pct / 100.0 * abs(new_ref)))
+                    self._flag_trust_region(r, new_ref)
+                else:
+                    lo, hi = pr.default_display_bounds(self.cfg, spec, tu)
+                    delta = (hi - lo) / 2.0
+                    self._set_cell(r, 3, _fmt(lo))
+                    self._set_cell(r, 4, _fmt(hi))
+                    self._set_cell(r, 5, _fmt(delta))
+                    pct = (100.0 * delta / abs(new_ref)) if new_ref else 0.0
+                    self._set_cell(r, 6, _fmt(pct))
+                    self._flag_trust_region(r, new_ref)
+        finally:
+            self.table.blockSignals(False)
 
     def _current_cpus(self) -> int:
         if self._cpus_getter:
             try:
                 return int(self._cpus_getter())
             except Exception:
-                pass
+                log_swallowed("reading CPU count from getter",
+                              level=logging.DEBUG)
         return 1
 
     def _n_runs(self) -> int:
         k = len(self._selected_rows())
-        return jac.n_runs(k, self._scheme()) if k else 0
+        if not k:
+            return 0
+        if self._method() == "morris":
+            return mp.n_runs(k, self.spin_traj.value())
+        return jac.n_runs(k, self._scheme())
+
+    def _method(self) -> str:
+        return "morris" if self.cb_method.currentIndex() == 1 else "jacobian"
+
+    def _on_method_changed(self, *_):
+        morris = self._method() == "morris"
+        for w in (self.lbl_scheme, self.cb_scheme):
+            w.setVisible(not morris)
+        for w in (self.lbl_traj, self.spin_traj, self.lbl_levels, self.spin_levels):
+            w.setVisible(morris)
+        self.lbl_hint.setText(
+            "screens Min..Max globally (mu*, sigma)" if morris
+            else "step = Delta per parameter")
+        self._update_cost()
 
     def _update_cost(self):
+        if not hasattr(self, "lbl_cpus"):
+            return   # called during construction before the cost labels exist
         self.lbl_cpus.setText(str(self._current_cpus()))
         k = len(self._selected_rows())
         if k == 0:
             self.lbl_cost.setText("0 parameters selected")
             return
-        runs = jac.n_runs(k, self._scheme())
-        base = "k=%d  →  %d runs (%s FD)" % (k, runs, self._scheme())
+        if self._method() == "morris":
+            runs = mp.n_runs(k, self.spin_traj.value())
+            base = "k=%d  →  %d runs (Morris N=%d × (k+1))" % (
+                k, runs, self.spin_traj.value())
+        else:
+            runs = jac.n_runs(k, self._scheme())
+            base = "k=%d  →  %d runs (%s FD)" % (k, runs, self._scheme())
         # Total wall-clock is estimated live from the running job's .sta
         # (see the run section); before any run we can only give the count.
         if self._per_run_sec:
@@ -427,10 +534,12 @@ class SensitivityTab(QWidget):
         selected = []
         for r, spec in self._selected_rows():
             try:
-                lo = float(self.table.item(r, 2).text())
-                hi = float(self.table.item(r, 4).text())
+                lo = float(self.table.item(r, 3).text())   # Min
+                hi = float(self.table.item(r, 4).text())   # Max
             except (ValueError, AttributeError):
                 raise ValueError("%s: min/max must be numbers." % spec.label)
+            if hi <= lo:
+                raise ValueError("%s: Max must be greater than Min." % spec.label)
             selected.append((spec, lo, hi))
         return selected
 
@@ -455,36 +564,67 @@ class SensitivityTab(QWidget):
         return [v for v, cb in self._field_checks.items() if cb.isChecked()]
 
     def _on_generate(self):
+        method = self._method()
         try:
             qois = self._selected_qoi_specs()
             field_vars = self._selected_field_vars()
-            if not qois and not field_vars:
-                self._warn("Tick at least one QoI (a scalar QoI, or a ZOI "
-                           "field).")
-                return
-            selected = self._collect_jacobian()
-            if not selected:
-                self._warn("Tick at least one parameter to vary.")
-                return
-            plan = jac.build_plan(selected, scheme=self._scheme(),
-                                  temp_unit=self._temp_unit())
+            if method == "morris":
+                # Morris screens scalar QoI globally (mu*, sigma). The field
+                # (ZOI) sensitivity is a Jacobian-only construction.
+                if field_vars:
+                    self._warn("Field (ZOI) screening is only available with "
+                               "the Jacobian method; ignoring the field "
+                               "selection for Morris.")
+                    field_vars = []
+                if not qois:
+                    self._warn("Tick at least one scalar QoI for Morris.")
+                    return
+                selected = self._collect_morris()
+                if not selected:
+                    self._warn("Tick at least one parameter to vary.")
+                    return
+                plan = mp.build_plan(selected, N=self.spin_traj.value(),
+                                     num_levels=self.spin_levels.value(),
+                                     temp_unit=self._temp_unit())
+            else:
+                if not qois and not field_vars:
+                    self._warn("Tick at least one QoI (a scalar QoI, or a ZOI "
+                               "field).")
+                    return
+                selected = self._collect_jacobian()
+                if not selected:
+                    self._warn("Tick at least one parameter to vary.")
+                    return
+                plan = jac.build_plan(selected, scheme=self._scheme(),
+                                      temp_unit=self._temp_unit())
         except ValueError as e:
             self._warn(str(e))
+            return
+        except ImportError as e:
+            self._warn("Morris needs the SALib package: %s\n"
+                       "Install it (pip install SALib) and try again." % e)
             return
         except Exception as e:                       # pragma: no cover
             self._warn("Could not build the plan: %s" % e)
             return
 
         self.plan = plan
-        self.plan_kind = "jacobian"
+        self.plan_kind = method
         self.selected_qois = qois
         qoi_names = [q.id for q in qois] + ["%s[field]" % v for v in field_vars]
         self.status.setStyleSheet("color: #15803d;")
-        self.status.setText(
-            "Jacobian (%s FD) plan ready: %d parameters, %d runs, %d QoI "
-            "(%s). Ready for the run step." % (
-                self._scheme(), plan.k, plan.n_runs, len(qoi_names),
-                ", ".join(qoi_names) if qoi_names else "—"))
+        if method == "morris":
+            self.status.setText(
+                "Morris plan ready: %d parameters, N=%d trajectories, "
+                "%d runs, %d QoI (%s). Ready for the run step." % (
+                    plan.k, plan.N, plan.n_runs, len(qoi_names),
+                    ", ".join(qoi_names) if qoi_names else "—"))
+        else:
+            self.status.setText(
+                "Jacobian (%s FD) plan ready: %d parameters, %d runs, %d QoI "
+                "(%s). Ready for the run step." % (
+                    self._scheme(), plan.k, plan.n_runs, len(qoi_names),
+                    ", ".join(qoi_names) if qoi_names else "—"))
         self._show_preview(plan)
         self.btn_run.setEnabled(True)
         self.tabs_out.setCurrentWidget(self.preview)
@@ -539,6 +679,9 @@ class SensitivityTab(QWidget):
         self._run_t0 = {}
         self._run_durations = []
         self._running_index = None
+        self._per_run_sec = None
+        self._per_frame_sec = None
+        self._cur_frame = None
         self._failed_live = []           # run indices reported failed live
         self._run_clock0 = time.monotonic()
         self._sta_timer = QTimer(self)
@@ -583,8 +726,7 @@ class SensitivityTab(QWidget):
     def _on_progress(self, done, total):
         import time
         now = time.monotonic()
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
+        self._run_total = total
         # The run that was in progress just finished -> record its duration.
         if self._running_index is not None and self._running_index in self._run_t0:
             dur = now - self._run_t0[self._running_index]
@@ -595,51 +737,85 @@ class SensitivityTab(QWidget):
         if done < total:
             self._running_index = done
             self._run_t0[done] = now
+            self._cur_frame = None        # fresh .sta for the new run
         else:
             self._running_index = None
-        self._update_estimate(done, total)
+            self._cur_frame = None
+        # Smooth bar on a 0..1000 scale (sub-run progress added by _poll_sta).
+        self.progress.setRange(0, 1000)
+        if total > 0:
+            self.progress.setValue(int(round(len(self._run_durations)
+                                              / total * 1000)))
+        self._update_estimate(len(self._run_durations), total)
 
     def _poll_sta(self):
-        """Live estimate of the running run's total wall-clock from its .sta
-        (wall time so far / fraction done), refined by finished-run durations.
-        Reuses the same parser as the Job tab."""
+        """Real-time progress of the running run from its .sta file.
+
+        The total-time estimate is built explicitly from the three
+        quantities the user reasons about:
+            per-run  ≈ (wall-clock per frame) × (frames per run)
+            total    ≈ per-run × (number of runs)
+        The per-frame time is measured live as wall_time / frames_done, so
+        an estimate appears after the very first output frame. Finished-run
+        durations, when available, take over as the more reliable per-run
+        baseline. The progress bar shows overall progress including the
+        fraction of the current run already done."""
         if self._running_index is None or self._run_workdir is None:
             return
-        import time
         sta = self._run_workdir / ("sens_run%03d.sta" % self._running_index)
-        run_est = None
+        cur_frac = 0.0
         try:
             snap = parse_sta(sta)
             if snap.is_ready():
-                frac = snap.fraction()
-                if frac is None and snap.step_time is not None:
-                    st = float(getattr(self.cfg.step, "sim_time", 0.0) or 0.0)
-                    frac = (snap.step_time / st) if st > 0 else None
                 wall = _hms_to_sec(snap.wall_time)
-                if frac and frac > 0.02 and wall:
-                    run_est = wall / frac
+                fcur = snap.frame_current
+                ftot = snap.frame_total or int(
+                    getattr(self.cfg.step, "n_frames", 0) or 0)
+                if fcur and ftot:
+                    self._cur_frame = (fcur, ftot)
+                    cur_frac = max(0.0, min(1.0, fcur / float(ftot)))
+                    if wall and fcur > 0:
+                        self._per_frame_sec = wall / float(fcur)
+                        # per-run from the explicit time-per-frame × n_frames
+                        if not self._run_durations:
+                            self._per_run_sec = self._per_frame_sec * float(ftot)
+                elif snap.step_time is not None:
+                    st = float(getattr(self.cfg.step, "sim_time", 0.0) or 0.0)
+                    if st > 0:
+                        cur_frac = max(0.0, min(1.0, snap.step_time / st))
         except Exception:
-            run_est = None
-        # Per-run baseline: measured runs if any, else the live .sta estimate.
+            log_swallowed("reading .sta for live progress", level=logging.DEBUG)
+        # Finished-run durations are the most reliable per-run baseline.
         if self._run_durations:
-            per = sum(self._run_durations) / len(self._run_durations)
-        else:
-            per = run_est
-        if per:
-            self._per_run_sec = per
-        self._update_estimate(self.progress.value(), self._run_total)
+            self._per_run_sec = sum(self._run_durations) / len(self._run_durations)
+        # Smooth overall progress: finished runs + fraction of the current one.
+        n_done = len(self._run_durations)
+        if self._run_total > 0:
+            overall = (n_done + cur_frac) / self._run_total
+            self.progress.setRange(0, 1000)
+            self.progress.setValue(int(round(overall * 1000)))
+        self._update_estimate(n_done, self._run_total)
 
     def _update_estimate(self, done, total):
         import time
         elapsed = time.monotonic() - getattr(self, "_run_clock0", time.monotonic())
-        msg = "Run %d/%d" % (min(done + (1 if self._running_index is not None
-                                          else 0), total), total)
+        n_done = len(self._run_durations)
+        cur = min(n_done + (1 if self._running_index is not None else 0), total)
+        msg = "Run %d/%d" % (cur, total)
+        if self._cur_frame is not None and self._running_index is not None:
+            msg += "   ·   frame %d/%d" % self._cur_frame
+        if self._per_frame_sec:
+            msg += "   ·   ~%s/frame" % _fmt_duration(self._per_frame_sec)
         if self._per_run_sec:
-            remaining = max(0, total - len(self._run_durations)) * self._per_run_sec
-            msg += "   ·   ~%s per run   ·   ~%s remaining   ·   est. total ~%s" % (
-                _fmt_duration(self._per_run_sec),
-                _fmt_duration(remaining),
-                _fmt_duration(total * self._per_run_sec))
+            remaining = max(0, total - n_done) * self._per_run_sec
+            # subtract the part of the current run already elapsed
+            if self._running_index is not None and self._cur_frame:
+                frac = self._cur_frame[0] / float(self._cur_frame[1])
+                remaining = max(0.0, remaining - frac * self._per_run_sec)
+            msg += ("   ·   ~%s/run   ·   ~%s remaining   ·   est. total ~%s"
+                    % (_fmt_duration(self._per_run_sec),
+                       _fmt_duration(remaining),
+                       _fmt_duration(total * self._per_run_sec)))
         msg += "   ·   elapsed %s" % _fmt_duration(elapsed)
         n_failed = len(getattr(self, "_failed_live", []))
         if n_failed:
@@ -780,7 +956,8 @@ class SensitivityTab(QWidget):
         head_cells = ["run"]
         if has_kind:
             head_cells.append("kind")
-        head_cells += ["%s [%s]" % (s.label, s.display_unit) for s in plan.specs]
+        head_cells += ["%s [%s]" % (s.label, s.unit_str(self._temp_unit()))
+                       for s in plan.specs]
         header = " | ".join(head_cells)
         lines = [header, "-" * len(header)]
         for d in rows:
@@ -814,6 +991,7 @@ def _hms_to_sec(hms):
             s = s * 60 + p
         return float(s)
     except Exception:
+        log_swallowed("parsing .sta wall-clock %r" % hms, level=logging.DEBUG)
         return None
 
 

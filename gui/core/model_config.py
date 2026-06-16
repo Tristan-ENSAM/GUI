@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, asdict
 from decimal import Decimal
 from pathlib import Path
 
+from gui.core.unit_system import UnitSystem
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -147,6 +149,20 @@ class StepCfg:
     mass_scaling_enabled:        bool  = False
     mass_scaling_factor_eulerian: float = 1.0
     mass_scaling_factor_tool:    float = 1.0
+
+    # Time scaling (Hammelmüller & Zehetner, COMPLAS XIII). A fictitious
+    # time τ = t / κ_t (κ_t > 1) speeds up the explicit solve linearly. To
+    # keep the machined length constant the kinematics are accelerated and
+    # the step shortened: cutting/initial velocities ×κ_t, sim_time ÷κ_t.
+    # To preserve the thermal time constant the specific heat is divided by
+    # κ_t as well (on top of any mass scaling). ρ and E are NOT changed by
+    # time scaling. Inertial-force effect equals mass scaling with κ_m=κ_t².
+    # VALIDITY: only when strain-rate dependence is negligible — with a
+    # rate-dependent Johnson-Cook law (C≠0) the rate terms are distorted.
+    # The velocity/time scaling is applied in ModelConfig.to_params_dict;
+    # run_simul.py applies κ_t to Cp only (velocities/time arrive scaled).
+    time_scaling_enabled:        bool  = False
+    time_scaling_factor:         float = 1.0
 
 
 @dataclass
@@ -398,11 +414,23 @@ class MeshElementCfg:
 # Top-level config
 # ---------------------------------------------------------------------------
 @dataclass
+class JobCfg:
+    """Portable job parameters saved with the profile. The working directory
+    is intentionally NOT stored here: it is machine-specific (an absolute
+    path) and defaults to the user-level Preferences, so it stays out of the
+    portable .acpf project file."""
+    job_name: str = "Cutting_job"
+    cpus:     int = 4
+
+
+@dataclass
 class ModelConfig:
     """Top-level model config. Materials are kept as raw dicts for now
     (filled by the Materials tab later — defaults below match test.py)."""
     analysis:       AnalysisCfg    = field(default_factory=AnalysisCfg)
     ui:             UICfg          = field(default_factory=UICfg)
+    units:          UnitSystem     = field(default_factory=UnitSystem)
+    job:            JobCfg         = field(default_factory=JobCfg)
     process:        ProcessCfg     = field(default_factory=ProcessCfg)
     step:           StepCfg        = field(default_factory=StepCfg)
     interaction:    InteractionCfg = field(default_factory=InteractionCfg)
@@ -447,63 +475,50 @@ class ModelConfig:
 
     # ----- Serialization -----
     def to_params_dict(self) -> dict:
-        """Build the `params` dict in the shape expected by the Abaqus
-        generator selected by `analysis.formulation`.
+        """Build the `params` dict sent to run_simul.py, organised as one
+        named sub-config per GUI tab (CEL-only build).
 
-        Both shapes share the `process`, `tool`, `bbox`, `analysis` keys.
-        The workpiece-side parameters live under:
-          - `euler`     in CEL mode (matches abq_odb_generator.py)
-          - `workpiece` in Lagrangian mode (matches abq_lagrangian_generator.py)
+        Layout (every value is a plain literal so repr()/literal_eval round
+        trips — see run_simul.py's contract):
+            analysis     : formulation + analysis options
+            geometry     : tool {position, geometry}, euler {position,
+                           workpiece_position, geometry}, bbox
+            materials    : euler (workpiece material), tool (tool material)
+            mesh         : elem_size, discretize, euler_element, tool_element
+            interaction  : contact/friction/heat
+            bcs          : cutting_speed, initial_velocity, ...
+            step         : sim_time, n_frames, mass scaling, output
+        `process` was removed: cutting_speed now comes from `bcs`, and
+        sim_time / n_frames from `step`.
         """
-        # `process.cutting_speed` is now driven from `bcs.cutting_speed`
-        # (the BC tab owns it). We override the value at serialisation so
-        # the downstream Abaqus generator keeps reading from a single key.
-        # `sim_time` and `n_frames` are now owned by the Step tab (cfg.step);
-        # we mirror them into `process` to stay backwards-compatible with the
-        # Abaqus generator's current expectations.
-        process_out = asdict(self.process)
-        process_out["cutting_speed"] = self.bcs.cutting_speed
-        process_out["sim_time"]      = self.step.sim_time
-        process_out["n_frames"]      = self.step.n_frames
-
-        common = {
-            "analysis":    asdict(self.analysis),
-            "process":     process_out,
-            "step":        asdict(self.step),
+        return {
+            "analysis": asdict(self.analysis),
+            "geometry": {
+                "tool": {
+                    "position": asdict(self.tool_position),
+                    "geometry": asdict(self.tool_geometry),
+                },
+                "euler": {
+                    "position":           asdict(self.euler_position),
+                    "workpiece_position": asdict(self.wp_position),
+                    "geometry":           asdict(self.euler_geometry),
+                },
+                "bbox": asdict(self.bbox),
+            },
+            "materials": {
+                "euler": dict(self.euler_material),
+                "tool":  dict(self.tool_material),
+            },
+            "mesh": {
+                "elem_size":     self.elem_size,
+                "discretize":    self.euler_geometry.discretize,
+                "euler_element": asdict(self.euler_element),
+                "tool_element":  asdict(self.tool_element),
+            },
             "interaction": asdict(self.interaction),
             "bcs":         asdict(self.bcs),
-            "tool": {
-                "position": asdict(self.tool_position),
-                "geometry": asdict(self.tool_geometry),
-                "material": dict(self.tool_material),
-            },
-            "bbox": asdict(self.bbox),
+            "step":        asdict(self.step),
         }
-
-        if self.analysis.formulation == "Lagrangian":
-            # In Lagrangian, only the workpiece block exists — no "void"
-            # region, no VolFraction. h_void / l_void are ignored, but we
-            # still pass them so the user's last values survive a round-trip.
-            common["workpiece"] = {
-                "elem_size": self.elem_size,
-                "position":  asdict(self.wp_position),
-                "geometry":  asdict(self.euler_geometry),   # reuses h_wp, l_wp
-                "material":  dict(self.euler_material),
-                "element":   asdict(self.wp_element),
-            }
-        else:  # "CEL"
-            common["euler"] = {
-                "elem_size": self.elem_size,
-                "position":           asdict(self.euler_position),
-                "workpiece_position": asdict(self.wp_position),
-                "geometry":           asdict(self.euler_geometry),
-                "material":           dict(self.euler_material),
-                "element":            asdict(self.euler_element),
-            }
-        # Tool element-type cfg is shared by both formulations (Tool is
-        # always present, always Lagrangian-family).
-        common["tool"]["element"] = asdict(self.tool_element)
-        return common
 
     # ----- Profile save/load (JSON) -----
     #
@@ -523,6 +538,8 @@ class ModelConfig:
             "saved_at":       datetime.now().isoformat(timespec="seconds"),
             "analysis":       asdict(self.analysis),
             "ui":             asdict(self.ui),
+            "units":          self.units.to_dict(),
+            "job":            asdict(self.job),
             "process":        asdict(self.process),
             "step":           asdict(self.step),
             "interaction":    asdict(self.interaction),
@@ -580,6 +597,17 @@ class ModelConfig:
 
         _apply(cfg.analysis,       data.get("analysis"))
         _apply(cfg.ui,             data.get("ui"))
+        # Unit system (newer format). Keep it consistent with ui.temp_unit:
+        #  - new profiles carry a "units" block -> it drives the temp base;
+        #  - legacy profiles only have ui.temp_unit -> seed the unit system
+        #    from it, so a saved Kelvin preference still flows through.
+        units_data = data.get("units")
+        if units_data is not None:
+            cfg.units = UnitSystem.from_dict(units_data)
+            cfg.ui.temp_unit = cfg.units.temp
+        else:
+            cfg.units = UnitSystem(temp=cfg.ui.temp_unit)
+        _apply(cfg.job, data.get("job"))
         _apply(cfg.process,        data.get("process"))
         # `step` block (newer format). If absent, fall back to the legacy
         # location where sim_time/n_frames lived under `process`.

@@ -34,7 +34,10 @@ from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
 from gui.tabs.sensitivity_tab import SensitivityTab
+from gui.tabs.experimental_data_tab import ExperimentalDataTab
 from gui.widgets.preferences_dialog import PreferencesDialog
+from gui.widgets.unit_system_dialog import UnitSystemDialog
+from gui.core import units
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,10 @@ class MainWindow(QMainWindow):
         # this in _rebind_cfg.
         if self.prefs.temp_unit_default == "K":
             self.cfg.ui.temp_unit = "K"
+        # Seed the unit system's temperature base from the preference and
+        # make the whole app convert through cfg.units from the start.
+        self.cfg.units.temp = self.cfg.ui.temp_unit
+        units.set_active_system(self.cfg.units)
         self._current_path: Path | None = None  # None == untitled
         self._dirty: bool = False               # unsaved changes?
 
@@ -104,10 +111,8 @@ class MainWindow(QMainWindow):
         self.model_tabs.addTab(self.results_tab,     "Results")
 
         # Experimental data (DIC, infrared thermography, force measurement).
-        # Empty for now — populated when the acquisition tabs are built.
-        self.exp_placeholder = _placeholder(
-            "Experimental data — DIC, IRT and force measurement.\n"
-            "Coming later.")
+        # Owns its own ExperimentSession (one .json file per test).
+        self.experimental_tab = ExperimentalDataTab()
 
         self.opt_tabs = QTabWidget()
         self.opt_tabs.addTab(self.sensitivity_tab,   "Sensitivity")
@@ -116,9 +121,17 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.addTab(self.model_tabs,        "Numerical Model")
-        tabs.addTab(self.exp_placeholder,   "Experimental Data")
+        tabs.addTab(self.experimental_tab,  "Experimental Data")
         tabs.addTab(self.opt_tabs,          "Optimization")
+        self.tabs = tabs
         self.setCentralWidget(tabs)
+
+        # Sensitivity's Ref column must mirror the current Numerical Model.
+        # showEvent is unreliable for a doubly-nested tab page, so refresh
+        # explicitly whenever Sensitivity becomes the visible page (top tab
+        # -> Optimization AND the Optimization sub-tab -> Sensitivity).
+        self.tabs.currentChanged.connect(self._refresh_sensitivity_if_visible)
+        self.opt_tabs.currentChanged.connect(self._refresh_sensitivity_if_visible)
 
         # ----- signal wiring -----
         # Analysis -> Geometry: preview must refresh when formulation changes
@@ -205,17 +218,34 @@ class MainWindow(QMainWindow):
 
         # --- Preferences menu ---
         m_pref = mb.addMenu("&Preferences")
-        # Quick toggle for the temperature unit (the most-used preference).
-        self.act_kelvin = QAction("Display temperatures in &Kelvin", self)
-        self.act_kelvin.setCheckable(True)
-        self.act_kelvin.setChecked(self.cfg.ui.temp_unit == "K")
-        self.act_kelvin.toggled.connect(self._on_temp_unit_toggled)
-        m_pref.addAction(self.act_kelvin)
+        # Unit system editor (replaces the old °C/K toggle): pick the four
+        # base units + a few named overrides; temperature lives in there.
+        act_units = QAction("&Unit system…", self)
+        act_units.triggered.connect(self._open_unit_system_dialog)
+        m_pref.addAction(act_units)
         m_pref.addSeparator()
         # Full preferences dialog (Abaqus paths, default workdir, ...)
         act_settings = QAction("&Settings…", self)
         act_settings.triggered.connect(self._open_preferences_dialog)
         m_pref.addAction(act_settings)
+
+    def _apply_unit_system(self, system):
+        """Make `system` the active display system and refresh the input
+        tabs. Keeps cfg.units, cfg.ui.temp_unit and units.active_system in
+        sync."""
+        self.cfg.units = system
+        self.cfg.ui.temp_unit = system.temp
+        units.set_active_system(system)
+        self.materials_tab.refresh_units()
+        self.bcs_tab.refresh_units()
+        if self.opt_tabs.currentWidget() is self.sensitivity_tab:
+            self.sensitivity_tab.refresh_from_model()
+
+    def _open_unit_system_dialog(self):
+        dlg = UnitSystemDialog(self, self.cfg.units)
+        if dlg.exec() == UnitSystemDialog.DialogCode.Accepted:
+            self._apply_unit_system(dlg.result_system())
+            self._mark_dirty()
 
     def _open_preferences_dialog(self):
         """Show the modal Preferences editor and persist on Accept."""
@@ -229,22 +259,6 @@ class MainWindow(QMainWindow):
                     self, "Save preferences",
                     f"Failed to save preferences:\n{type(e).__name__}: {e}",
                 )
-
-    def _on_temp_unit_toggled(self, checked: bool):
-        """User flipped the Kelvin / Celsius toggle. Update cfg + refresh
-        the Materials tab so the displayed values follow the new unit.
-        This is a UI preference, not a physics change, so we don't mark
-        the profile dirty unless the preference is saved with it (which
-        it is — see ModelConfig.to_json_dict). For consistency, we DO
-        mark dirty; the alternative would be 'persistent file change
-        without dirty flag' which is confusing."""
-        new_unit = "K" if checked else "C"
-        if self.cfg.ui.temp_unit == new_unit:
-            return
-        self.cfg.ui.temp_unit = new_unit
-        self.materials_tab.refresh_temp_unit()
-        self.bcs_tab.refresh_temp_unit()
-        self._mark_dirty()
 
     # =====================================================================
     # Dirty tracking
@@ -270,7 +284,7 @@ class MainWindow(QMainWindow):
             gt.f_tx, gt.f_ty,
             gt.f_h_wp, gt.f_l_wp, gt.f_wp_x, gt.f_wp_y,
             gt.f_h_void, gt.f_l_void, gt.f_ex, gt.f_ey,
-            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax, gt.f_zmin, gt.f_zmax,
+            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax,
         ]
         for f in all_fields:
             f.valueChanged.connect(self._mark_dirty)
@@ -286,7 +300,7 @@ class MainWindow(QMainWindow):
             gt.f_tx, gt.f_ty,
             gt.f_h_wp, gt.f_l_wp, gt.f_wp_x, gt.f_wp_y,
             gt.f_h_void, gt.f_l_void, gt.f_ex, gt.f_ey,
-            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax, gt.f_zmin, gt.f_zmax,
+            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax,
         ]
         for f in all_fields:
             f.valueChanged.connect(self.mesh_tab.on_external_change)
@@ -400,6 +414,14 @@ class MainWindow(QMainWindow):
     # =====================================================================
     # Cfg re-binding (after New or Open)
     # =====================================================================
+    def _refresh_sensitivity_if_visible(self, *_):
+        """Resync the Sensitivity Ref column with the current model, but
+        only when Sensitivity is actually the page on screen (so we don't
+        rebuild its table on every unrelated tab switch)."""
+        if (self.tabs.currentWidget() is self.opt_tabs
+                and self.opt_tabs.currentWidget() is self.sensitivity_tab):
+            self.sensitivity_tab.refresh_from_model()
+
     def _rebind_cfg(self):
         """When the cfg is replaced wholesale (New, Open), the existing tabs
         still hold references to the OLD cfg. We update their `.cfg`
@@ -413,12 +435,13 @@ class MainWindow(QMainWindow):
         self.mesh_tab.cfg        = self.cfg
         self.step_tab.cfg        = self.cfg
         self.job_tab.cfg         = self.cfg
-        # Sync the Kelvin/Celsius toggle from the loaded ui prefs (block
-        # signals so we don't double-fire materialsChanged here).
-        if hasattr(self, "act_kelvin"):
-            self.act_kelvin.blockSignals(True)
-            self.act_kelvin.setChecked(self.cfg.ui.temp_unit == "K")
-            self.act_kelvin.blockSignals(False)
+        # Sensitivity also holds a cfg reference (used for the Ref column).
+        # It has no apply_from_cfg(); refresh_from_model() rebuilds its Ref
+        # values, and is called whenever it becomes the visible page.
+        self.sensitivity_tab.cfg = self.cfg
+        # Activate the loaded profile's unit system so every tab converts
+        # through it (and the displayed values match the saved preference).
+        units.set_active_system(self.cfg.units)
         # AnalysisTab refreshes first because GeometryTab.on_analysis_changed
         # depends on cfg.analysis being already-applied. The emit in
         # AnalysisTab.apply_from_cfg will trigger GeometryTab.on_analysis_changed
@@ -431,6 +454,10 @@ class MainWindow(QMainWindow):
         self.bcs_tab.apply_from_cfg()
         self.mesh_tab.apply_from_cfg()
         self.step_tab.apply_from_cfg()
+        self.job_tab.apply_from_cfg()
+        # Ensure unit labels (not just values) reflect the loaded system.
+        self.materials_tab.refresh_units()
+        self.bcs_tab.refresh_units()
 
     # =====================================================================
     # Close handler — final dirty check

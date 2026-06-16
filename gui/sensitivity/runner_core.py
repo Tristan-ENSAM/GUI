@@ -21,6 +21,7 @@ kept bundles — see run_plan(keep_bundles=True).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional, List
 import numpy as np
@@ -28,6 +29,7 @@ import numpy as np
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import field_metrics as fm
+from gui.core.logging_util import log_swallowed
 
 
 def _instance_names(bundle):
@@ -55,6 +57,7 @@ def eulerian_instance(bundle):
                 return name
         return names[0] if names else None
     except Exception:
+        log_swallowed("resolving the Eulerian instance name")
         return None
 
 
@@ -63,8 +66,10 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
     """Per-parameter field sensitivity for a Jacobian plan, using the kept
     bundles. For each field var, J_i = field_metric(F(x0+delta_i), F(x0))
     over the ZOI (always >= 0 — a magnitude of how much the field moves).
-    Returns {var: {param_path: {"sensitivity": J}}}. The base run (run_kind
-    'base', index 0) is the reference."""
+    Returns {var: {param_path: {"sensitivity": J, "rel_pct": dV%}}}. The
+    base run (run_kind 'base', index 0) is the reference. `rel_pct` is the
+    relative field change in percent, weighted (averaged) over nodes and
+    frames, independent of the field metric / of delta."""
     if not bundles or bundles[0] is None:
         return {}
     ref = bundles[0]
@@ -74,6 +79,8 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
         try:
             base_field = ref.field(inst, var)
         except Exception:
+            log_swallowed("reading base field %r for field sensitivity" % var,
+                          level=logging.DEBUG)
             continue
         per_param = {}
         for i, spec in enumerate(plan.specs):
@@ -82,15 +89,22 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
                 idx = plan.idx_minus.get(i)
             b = bundles[idx] if (idx is not None and idx < len(bundles)) else None
             if b is None:
-                per_param[spec.path] = {"sensitivity": float("nan")}
+                per_param[spec.path] = {"sensitivity": float("nan"),
+                                        "rel_pct": float("nan")}
                 continue
             try:
+                pert_field = b.field(inst, var)
                 val = fm.jacobian_field_sensitivity(
-                    base_field, b.field(inst, var),
+                    base_field, pert_field,
                     delta=plan.deltas[i], metric=metric)
+                rel = fm.field_rel_change_pct(base_field, pert_field)
             except Exception:
+                log_swallowed("field sensitivity for %s @ %s"
+                              % (var, spec.path), level=logging.DEBUG)
                 val = float("nan")
-            per_param[spec.path] = {"sensitivity": float(val)}
+                rel = float("nan")
+            per_param[spec.path] = {"sensitivity": float(val),
+                                    "rel_pct": float(rel)}
         out[var] = per_param
     return out
 
@@ -114,6 +128,7 @@ def extract_qois(bundle, qoi_specs, warmup_frac: float = 0.0) -> dict:
         try:
             out[spec.id] = float(spec.fn(bundle, None, warmup_frac))
         except Exception:
+            log_swallowed("computing QoI %r" % spec.id, level=logging.DEBUG)
             out[spec.id] = float("nan")
     return out
 
@@ -195,6 +210,14 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                 key = "%s [field]" % var
                 analyses[key] = per
                 qoi_ids_all.append(key)
+                # Parallel, intuitive column: relative field change in %
+                # (weighted over nodes and frames). Stored under
+                # "sensitivity" so the table/CSV render it like any column.
+                rel_key = "%s \u0394%% (rel)" % var      # e.g. "V Δ% (rel)"
+                analyses[rel_key] = {
+                    p: {"sensitivity": d.get("rel_pct", float("nan"))}
+                    for p, d in per.items()}
+                qoi_ids_all.append(rel_key)
         except Exception as e:                          # pragma: no cover
             analyses["field [error]"] = {"error": str(e)}
 

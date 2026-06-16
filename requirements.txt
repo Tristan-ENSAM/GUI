@@ -1,3 +1,25 @@
-PySide6
-matplotlib
-numpy
+# GUI_Abaqus — pinned dependencies (host/GUI side, CPython 3.11+).
+#
+# The Abaqus side (abaqus_scripts/run_simul.py) runs under Abaqus' own
+# bundled Python 2.7 interpreter and is NOT covered here.
+#
+# Install with:
+#     pip install -r requirements.txt
+#
+# Versions are pinned to what the project is developed/tested against; bump
+# deliberately and re-run the test suite.
+
+# ---- Runtime (GUI) ----
+PySide6==6.11.1
+numpy==2.4.4
+matplotlib==3.10.8
+
+# ---- Tests / development ----
+pytest==9.0.3
+
+# ---- Optional ----
+# Required ONLY for the Morris global-screening method in the Sensitivity
+# tab. The Jacobian method and everything else work without it. Install if
+# you want Morris:
+#     pip install SALib
+# SALib>=1.4

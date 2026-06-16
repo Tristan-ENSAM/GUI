@@ -84,7 +84,8 @@ class FieldViewer(QWidget):
             try:
                 self._polys.remove()
             except Exception:
-                pass
+                log_swallowed("removing previous PolyCollection",
+                              level=logging.DEBUG)
             self._polys = None
 
         # Build (n_elements, 4, 2) vertices array for PolyCollection
@@ -108,7 +109,7 @@ class FieldViewer(QWidget):
             try:
                 self._cbar.update_normal(self._polys)
             except Exception:
-                pass
+                log_swallowed("updating colorbar", level=logging.DEBUG)
 
         # Fit the axes to the mesh extent (with a small margin). Do this
         # LAST and re-assert adjustable='box' so the colorbar layout can't

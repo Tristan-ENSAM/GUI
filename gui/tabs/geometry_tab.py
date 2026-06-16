@@ -164,15 +164,15 @@ class GeometryTab(QWidget):
         self.f_xmax = NumField("xmax", b.xmax, "mm", compact=True)
         self.f_ymin = NumField("ymin", b.ymin, "mm", compact=True)
         self.f_ymax = NumField("ymax", b.ymax, "mm", compact=True)
-        self.f_zmin = NumField("zmin", b.zmin, "mm", compact=True)
-        self.f_zmax = NumField("zmax", b.zmax, "mm", compact=True)
         x_row = PairRow(self.f_xmin, self.f_xmax)
         y_row = PairRow(self.f_ymin, self.f_ymax)
-        z_row = PairRow(self.f_zmin, self.f_zmax)
-        for row in (x_row, y_row, z_row):
+        for row in (x_row, y_row):
             lay.addWidget(row)
-        for f in (self.f_xmin, self.f_xmax, self.f_ymin, self.f_ymax,
-                  self.f_zmin, self.f_zmax):
+        note = QLabel("Extraction is taken on the z = 0 face (out-of-plane "
+                      "bounds are fixed).")
+        note.setStyleSheet("color: #888; font-style: italic;")
+        lay.addWidget(note)
+        for f in (self.f_xmin, self.f_xmax, self.f_ymin, self.f_ymax):
             f.valueChanged.connect(self._on_change)
         return g
 
@@ -233,7 +233,7 @@ class GeometryTab(QWidget):
 
         c.bbox.xmin = self.f_xmin.value(); c.bbox.xmax = self.f_xmax.value()
         c.bbox.ymin = self.f_ymin.value(); c.bbox.ymax = self.f_ymax.value()
-        c.bbox.zmin = self.f_zmin.value(); c.bbox.zmax = self.f_zmax.value()
+        # z bounds are fixed (z = 0 face); not edited from the UI.
 
     def apply_from_cfg(self):
         """Inverse of `_pull_from_widgets`: push cfg values back into the
@@ -267,7 +267,7 @@ class GeometryTab(QWidget):
 
         self.f_xmin.set_value(c.bbox.xmin); self.f_xmax.set_value(c.bbox.xmax)
         self.f_ymin.set_value(c.bbox.ymin); self.f_ymax.set_value(c.bbox.ymax)
-        self.f_zmin.set_value(c.bbox.zmin); self.f_zmax.set_value(c.bbox.zmax)
+        # z bounds are fixed (z = 0 face); no widget to update.
 
         # Also update visibility of the Eulerian-domain group (it depends on
         # analysis.formulation, which may have changed via the loaded file).

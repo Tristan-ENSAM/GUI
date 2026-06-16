@@ -12,7 +12,10 @@ directly in Excel or numpy (np.genfromtxt).
 """
 from __future__ import annotations
 import os
+import logging
 import numpy as np
+
+from gui.core.logging_util import log_swallowed
 
 
 def _write_matrix_txt(path, matrix, times, index_label="index"):
@@ -69,5 +72,6 @@ def export_bundle(bundle, outdir):
                            comments="")
                 written.append(p)
         except Exception:
-            pass
+            log_swallowed("writing element centroids for %s" % inst,
+                          level=logging.DEBUG)
     return written

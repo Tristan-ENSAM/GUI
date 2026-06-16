@@ -135,3 +135,35 @@ This means:
   plot the equivalent value.
 - Vector fields keep their natural components:
     - `RF1_RP`, `RF2_RP` (X- and Y- reaction force at the tool RP)
+
+---
+
+## Experimental field files (DIC / IRT)
+
+The Experimental Data tab produces (or imports) one `.npz` + one `.json` per
+modality per test, referenced from the `ExperimentSession`
+(`gui/core/experiment_session.py`). The layout is chosen so that
+`gui.sensitivity.field_metrics` can compare experimental and numerical fields
+after resampling onto a common grid.
+
+`<test>_dic.npz` (velocity, mm/s):
+- `x`, `y` : `(n_points,)` coordinates in **mm, in the MODEL frame**
+  (DIC node centres, mapped through the visible calibration + alignment).
+- `t`      : `(n_frames,)` time in s, relative to the trigger origin.
+  Velocity is instantaneous, computed between two images, so
+  `n_frames = n_images - 1`.
+- `V1`, `V2`, `Vmag` : `(n_frames, n_points)` velocity components + magnitude.
+- `valid` : `(n_frames, n_points)` boolean correlation-validity mask.
+
+`<test>_irt.npz` (temperature, °C): same `x`, `y`, `t`, plus
+- `T` : `(n_frames, n_points)` temperature.
+
+The paired `.json` carries the computation parameters and provenance:
+modality, source (`computed`/`imported`), units, the calibration reference
+used, the image→mm→model transform, and either the `q4dic` DIC settings
+(ROI, subset, Q4 element size, correlation criterion, fps, trigger offset) or
+the radiometric-model parameters (coefficients, emissivity, integration time,
+fps). The no-load ("a vide") noise estimate is stored here once computed.
+
+Grids differ between DIC/IRT and the FE mesh, so storing `x, y` is mandatory:
+the simu↔experiment comparison resamples onto a common grid downstream.

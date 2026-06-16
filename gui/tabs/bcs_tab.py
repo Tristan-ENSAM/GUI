@@ -152,21 +152,24 @@ class BCsTab(QWidget):
         v.setSpacing(4)
 
         v.addWidget(_section_header("Cutting velocity"))
-        v_mmin = self.cfg.bcs.cutting_speed / units.SPEED_MMIN_TO_MMS
+        _sf = units.speed_factor()
+        _su = units.speed_unit()
+        v_mmin = self.cfg.bcs.cutting_speed / _sf
         self.f_vcut = NumField(
-            "Cutting speed [m/min]", v_mmin, "",
+            f"Cutting speed [{_su}]", v_mmin, "",
             minimum=-1e5, maximum=1e5,
         )
         self.f_vcut.setToolTip(
-            "Cutting velocity in m/min. Click on Eulerian faces in the\n"
-            "preview to toggle them in the application set."
+            "Cutting velocity (display unit set in Preferences → Unit "
+            "system). Click on Eulerian faces in the preview to toggle them\n"
+            "in the application set."
         )
         v.addWidget(self.f_vcut)
 
         v.addWidget(_section_header("Initial Eulerian velocity (CEL only)"))
-        v_init_mmin = self.cfg.bcs.initial_velocity / units.SPEED_MMIN_TO_MMS
+        v_init_mmin = self.cfg.bcs.initial_velocity / _sf
         self.f_v_init = NumField(
-            "Initial velocity [m/min]", v_init_mmin, "",
+            f"Initial velocity [{_su}]", v_init_mmin, "",
             minimum=-1e5, maximum=1e5,
         )
         self.f_v_init.setToolTip(
@@ -306,11 +309,27 @@ class BCsTab(QWidget):
         self._refresh_preview()
 
     def refresh_temp_unit(self):
+        """Back-compat alias — a temp-base change is a unit-system change."""
+        self.refresh_units()
+
+    def refresh_units(self):
         tu = self.cfg.ui.temp_unit
         unit_str = "K" if tu == "K" else "°C"
         self.f_T._lbl.setText(f"Ambient temperature [{unit_str}]")
         gui_val = units.temp_from_abaqus(self.cfg.bcs.ambient_temperature, tu)
+        self.f_T.blockSignals(True)
         self.f_T.set_value(gui_val)
+        self.f_T.blockSignals(False)
+        # Velocity unit may have changed too.
+        _sf = units.speed_factor()
+        _su = units.speed_unit()
+        for w, internal in ((self.f_vcut, self.cfg.bcs.cutting_speed),
+                            (self.f_v_init, self.cfg.bcs.initial_velocity)):
+            w.blockSignals(True)
+            w.set_value(internal / _sf)
+            w.blockSignals(False)
+        self.f_vcut._lbl.setText(f"Cutting speed [{_su}]")
+        self.f_v_init._lbl.setText(f"Initial velocity [{_su}]")
         self._refresh_preview()
 
     def on_external_change(self):
@@ -358,8 +377,9 @@ class BCsTab(QWidget):
 
     def _pull_from_widgets(self):
         b = self.cfg.bcs
-        b.cutting_speed    = self.f_vcut.value()   * units.SPEED_MMIN_TO_MMS
-        b.initial_velocity = self.f_v_init.value() * units.SPEED_MMIN_TO_MMS
+        _sf = units.speed_factor()
+        b.cutting_speed    = self.f_vcut.value()   * _sf
+        b.initial_velocity = self.f_v_init.value() * _sf
         for face_key, w in self._face_widgets.items():
             setattr(b, f"face_enabled_{face_key}",       w["enable"].isChecked())
             setattr(b, f"eulerian_bc_mode_{face_key}",   w["mode"].currentData())
@@ -376,8 +396,12 @@ class BCsTab(QWidget):
             w.blockSignals(True)
         try:
             b = self.cfg.bcs
-            self.f_vcut.set_value(b.cutting_speed / units.SPEED_MMIN_TO_MMS)
-            self.f_v_init.set_value(b.initial_velocity / units.SPEED_MMIN_TO_MMS)
+            _sf = units.speed_factor()
+            _su = units.speed_unit()
+            self.f_vcut.set_value(b.cutting_speed / _sf)
+            self.f_v_init.set_value(b.initial_velocity / _sf)
+            self.f_vcut._lbl.setText(f"Cutting speed [{_su}]")
+            self.f_v_init._lbl.setText(f"Initial velocity [{_su}]")
             for face_key, w in self._face_widgets.items():
                 w["enable"].setChecked(
                     getattr(b, f"face_enabled_{face_key}", False))
