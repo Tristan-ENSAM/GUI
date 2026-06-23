@@ -16,6 +16,11 @@ matplotlib==3.10.8
 # Image reading for the Experimental Data tab (JPEG/TIFF/BMP folders).
 # matplotlib reads PNG natively, but other formats need Pillow (or imageio).
 Pillow>=10.0
+# Visible-camera calibration (full Zhang) and the local DIC engine.
+opencv-python>=4.8
+# SciPy: scattered-data interpolation for DIC profiles and the inverse
+# identification (Levenberg-Marquardt) downstream.
+scipy>=1.10
 
 # ---- Tests / development ----
 pytest==9.0.3

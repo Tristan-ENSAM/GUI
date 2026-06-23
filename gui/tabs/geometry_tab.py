@@ -8,7 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QSplitter, QGridLayout,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QCheckBox,
 )
 
 from gui.core.model_config import ModelConfig
@@ -50,6 +50,13 @@ class GeometryTab(QWidget):
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
+        self.chk_ref = QCheckBox("Show reference image (watermark)")
+        self.chk_ref.setEnabled(False)
+        self.chk_ref.setToolTip("Overlay the alignment reference image behind "
+                                "the sketch (set it from the Alignment tab's "
+                                "'Write to Numerical Model').")
+        self.chk_ref.toggled.connect(self._on_toggle_reference)
+        right_lay.addWidget(self.chk_ref)
         self.preview = GeometryPreview()
         right_lay.addWidget(self.preview, stretch=1)
         right_lay.addWidget(self._build_info_panel())
@@ -273,6 +280,18 @@ class GeometryTab(QWidget):
         # analysis.formulation, which may have changed via the loaded file).
         self._euler_group.setVisible(c.analysis.formulation != "Lagrangian")
         self._refresh()
+
+    def set_reference_overlay(self, image, mm_per_px):
+        """Receive the alignment reference image + scale and show it as a
+        watermark behind the sketch (enables the toggle)."""
+        self.preview.set_reference_overlay(image, mm_per_px, show=True)
+        self.chk_ref.setEnabled(True)
+        self.chk_ref.blockSignals(True)
+        self.chk_ref.setChecked(True)
+        self.chk_ref.blockSignals(False)
+
+    def _on_toggle_reference(self, on: bool):
+        self.preview.set_reference_visible(on)
 
     def _refresh(self):
         # Geometry tab shows the pure geometry only: no mesh overlay (Mesh

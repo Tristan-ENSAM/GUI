@@ -112,7 +112,8 @@ class MainWindow(QMainWindow):
 
         # Experimental data (DIC, infrared thermography, force measurement).
         # Owns its own ExperimentSession (one .json file per test).
-        self.experimental_tab = ExperimentalDataTab()
+        self.experimental_tab = ExperimentalDataTab(
+            write_geometry=self._write_reference_geometry)
 
         self.opt_tabs = QTabWidget()
         self.opt_tabs.addTab(self.sensitivity_tab,   "Sensitivity")
@@ -263,6 +264,27 @@ class MainWindow(QMainWindow):
     # =====================================================================
     # Dirty tracking
     # =====================================================================
+    def _write_reference_geometry(self, vals: dict):
+        """Write the measured reference geometry (from the Alignment tab) into
+        the numerical model's Geometry, refresh that tab and mark dirty."""
+        c = self.cfg
+        c.tool_geometry.rake_angle = float(vals["rake_angle"])
+        c.tool_geometry.clear_angle = float(vals["clear_angle"])
+        c.tool_position.x0 = float(vals["tool_x0"])
+        c.tool_position.y0 = float(vals["tool_y0"])
+        c.wp_position.x0 = float(vals["wp_x0"])
+        c.wp_position.y0 = float(vals["wp_y0"])
+        self.geometry_tab.apply_from_cfg()
+        # Forward the reference image + scale so the Geometry preview can show
+        # it as a watermark for a qualitative alignment check.
+        try:
+            al = self.experimental_tab.alignment_tab
+            if getattr(al, "_image", None) is not None:
+                self.geometry_tab.set_reference_overlay(al._image, al._mm_per_px())
+        except Exception:
+            pass
+        self._mark_dirty()
+
     def _mark_dirty(self, *_):
         if not self._dirty:
             self._dirty = True

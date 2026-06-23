@@ -287,6 +287,13 @@ class GeometryPreview(QWidget):
         super().__init__(parent)
         self._cfg = None  # last config received, kept for external redraws
         self.picking_enabled: bool = False
+        # Reference-image watermark (set from the Alignment tab). Drawn behind
+        # the sketch, centred on the model origin at the alignment scale, so
+        # the experimental tool/workpiece can be compared with the model.
+        self._ref_image = None
+        self._ref_mm_per_px = None
+        self._ref_show = False
+        self._ref_alpha = 0.45
         # Toggle for the BCs/ICs tab preview: which class of overlay to show.
         # "BC": cutting velocity + Eulerian inflow/outflow + encastrement
         # "IC": initial Eulerian velocity field + initial temperature label
@@ -487,6 +494,48 @@ class GeometryPreview(QWidget):
         return ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
 
     # ----- public API -----
+    def set_reference_overlay(self, image, mm_per_px, show=True):
+        """Set the reference image (numpy array) and its scale (mm/px) to be
+        drawn as a watermark, centred on the model origin. Redraws if a config
+        is already loaded."""
+        self._ref_image = None if image is None else np.asarray(image)
+        self._ref_mm_per_px = float(mm_per_px) if mm_per_px else None
+        self._ref_show = bool(show)
+        if self._cfg is not None:
+            self.update_from_config(self._cfg)
+
+    def set_reference_visible(self, on: bool):
+        self._ref_show = bool(on)
+        if self._cfg is not None:
+            self.update_from_config(self._cfg)
+
+    def has_reference_overlay(self) -> bool:
+        return self._ref_image is not None and bool(self._ref_mm_per_px)
+
+    def _draw_reference_overlay(self):
+        """imshow the reference image behind the sketch. The image is centred
+        on the model origin (matching the Alignment convention: origin at
+        image centre, x right, y up) and scaled by mm/px, so the tool tip in
+        the image lands at the model tool position."""
+        if not self._ref_show or self._ref_image is None or not self._ref_mm_per_px:
+            return
+        img = self._ref_image
+        h, w = img.shape[0], img.shape[1]
+        s = self._ref_mm_per_px
+        if not np.isfinite(s) or s <= 0:
+            return
+        extent = (-w / 2.0 * s, w / 2.0 * s, -h / 2.0 * s, h / 2.0 * s)
+        is_rgb = (img.ndim == 3 and img.shape[-1] in (3, 4))
+        try:
+            self._ax.imshow(img, extent=extent, origin="upper",
+                            cmap=None if is_rgb else "gray",
+                            alpha=self._ref_alpha, zorder=-10)
+            # imshow would otherwise switch the axes to its own aspect; keep
+            # the equal x/y scaling so the geometry is not distorted.
+            self._ax.set_aspect("equal", adjustable="datalim")
+        except Exception:
+            pass
+
     def update_from_config(self, cfg: ModelConfig,
                             show_mesh: bool = False,
                             show_bcs: bool = False) -> None:
@@ -498,6 +547,9 @@ class GeometryPreview(QWidget):
         self._ax.grid(True, linestyle=":", alpha=0.4)
         self._ax.set_xlabel("x [mm]")
         self._ax.set_ylabel("y [mm]")
+
+        # Reference-image watermark first, so it sits behind everything.
+        self._draw_reference_overlay()
 
         is_lagrangian = (cfg.analysis.formulation == "Lagrangian")
         # In CEL mode we draw the Eulerian background domain; in Lagrangian

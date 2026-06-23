@@ -145,6 +145,12 @@ class ImageSequence:
     def time(self, i: int) -> float:
         return self.t0 + int(i) / self.fps
 
+    def __len__(self) -> int:
+        return self.n_frames
+
+    def __getitem__(self, i: int) -> np.ndarray:
+        return self.frame(i)
+
 
 def load_forces(path, fps: float = 1.0, col_t: int = -1,
                 col_fc: int = 0, col_ff: int = 1):

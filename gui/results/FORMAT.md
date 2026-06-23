@@ -167,3 +167,22 @@ fps). The no-load ("a vide") noise estimate is stored here once computed.
 
 Grids differ between DIC/IRT and the FE mesh, so storing `x, y` is mandatory:
 the simu↔experiment comparison resamples onto a common grid downstream.
+
+### Visible calibration block (`session.visible_calibration`)
+
+Written by the Calibration — visible tab (full Zhang via OpenCV):
+`target` (`pattern`, `cols`, `rows`, `spacing_mm`), `images` (paths used),
+`camera_matrix` (3x3), `dist_coeffs` (`[k1,k2,p1,p2,k3]`),
+`scale_mm_per_px`, `homography` (3x3, pixels->mm in the reference plane),
+`reproj_rms_px`, `image_size` (`[w,h]`), `reference_index` (the cutting-plane
+view), `n_views_used`, `units`. Orientation/position in the model frame is
+added later by the Alignment tab.
+
+### Reference geometry block (`session.reference_geometry`)
+
+Written by the Alignment tab and (optionally) pushed into the numerical model:
+`rake_angle`, `clear_angle` (deg, tilt of the rake / flank face from the
+vertical), `tool_x0`, `tool_y0`, `wp_x0`, `wp_y0` (mm). Frame convention:
+origin at the image centre, x horizontal (cutting direction, tool tip towards
++x), y vertical (up). The scale mm/px comes from the visible calibration or a
+manual override.

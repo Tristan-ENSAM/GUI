@@ -348,3 +348,276 @@ Tests : 28 verts (les 2 tests time-scaling retirés).
   `from_path` lit un dossier (tri naturel) ou un `.npz/.npy` ; un fichier
   image isolé reste lu comme séquence 1-frame.
 - 40 tests verts.
+
+## Experimental Data — incrément 2 (Calibration visible)
+
+- **`gui/core/calibration.py`** : `TargetSpec` (mire sélectionnable —
+  checkerboard / circles / circles_asym, cols/rows/spacing_mm, `object_points`),
+  `CalibrationResult` (K, distorsion, mm/px, homographie px->mm, RMS reproj,
+  taille image, vue de référence), interface `VisibleCalibrationBackend` et
+  implémentation `OpenCVCalibrator` (Zhang complet via cv2.calibrateCamera ;
+  homographie + mm/px sur la vue de référence undistordue). q4dic branchable
+  plus tard derrière la même interface.
+- **`gui/tabs/calibration_visible_tab.py`** : import multi-poses, liste +
+  preview, sélection de la mire, choix de l'image de référence (plan de
+  coupe), bouton Calibrate, panneau résultats, Save -> `visible_calibration`.
+  Restauration depuis une session chargée (sans recalcul).
+- **`opencv-python`** ajouté à `requirements.txt` et `run_gui_debug.bat`.
+- Rafraîchissements de preview rendus **non-modaux** (calib + acquisition) :
+  plus de `QMessageBox` sur auto-refresh (évite blocage si chemins restaurés
+  absents) ; les dialogues ne subsistent que sur actions explicites.
+- Contrat `visible_calibration` documenté dans `gui/results/FORMAT.md`.
+- Tests : pipeline OpenCV bout-en-bout sur damiers synthétiques déformés
+  (8/8 vues, RMS ~0.83 px, mm/px=0.0507 ≈ 2mm/40px), object_points, mm/px
+  pur, instanciation + save/restore du tab. **44 verts**.
+
+### Reste (calibration)
+- Calib. thermique (radiométrie + recalage IR↔visible).
+- Brancher éventuellement q4dic comme moteur de calibration alternatif.
+
+## Experimental Data — incrément 3 (Alignment)
+
+- **`gui/core/alignment.py`** : fonctions pures `pixel_to_model` (origine
+  centre image, x droite, y haut) et `line_tilt_from_vertical_deg` (rake/clear
+  = inclinaison d'une droite vs verticale, indépendant du mm/px). Convention
+  d'angle calée sur le sketch outil d'`run_simul.py` (rake/clear = écart à 90°).
+- **`gui/tabs/alignment_tab.py`** : choix d'image (explorateur), affichage,
+  échelle mm/px (préremplie depuis la calibration visible + override manuel),
+  pointé manuel sur canvas (tool tip, wp ref, face de coupe 2 pts, face de
+  dépouille 2 pts), champs résultats éditables, bouton **« Écrire dans
+  Numerical Model »**.
+- **Câblage** : `ExperimentalDataTab(write_geometry=...)` → `AlignmentTab` ;
+  `MainWindow._write_reference_geometry` écrit dans
+  `cfg.tool_geometry.rake_angle/clear_angle`, `cfg.tool_position.x0/y0`,
+  `cfg.wp_position.x0/y0`, rafraîchit le Geometry tab et marque *dirty*.
+- **Détection auto : à discuter** (le pointé manuel est la v1 et la couche
+  d'override). Signes exacts des angles à confirmer le moment venu.
+- `reference_geometry` documenté dans `gui/results/FORMAT.md`.
+- **conftest** : fixture autouse de nettoyage Qt (`deleteLater` des widgets
+  top-level après chaque test) — corrige un abort/segfault de téardown dû à
+  l'accumulation de canvases matplotlib. **47 verts**.
+
+### Reste (Experimental Data)
+- Calib. thermique (radiométrie + recalage IR↔visible).
+- DIC (2 moteurs : local + global q4dic), IRT, Forces, Noise.
+- Détection auto de la géométrie d'alignement.
+
+## Experimental Data — incrément 3b (Alignment : détection auto outil)
+
+- **`gui/core/tool_detect.py`** (pur, OpenCV, testé) : `threshold_image`
+  (Otsu ou seuil fixe + invert), `detect_tool_quad` (crop ROI → seuil →
+  contour externe le plus grand → fit quadrilatère via approxPolyDP, repli
+  minAreaRect ; coins en coordonnées image pleine, ordonnés),
+  `segment_intersection`, `nearest_corner`, `nearest_edge`.
+- **`gui/tabs/alignment_tab.py`** réécrit :
+  - ROI de recherche dessinée à la souris (drag), seuil (slider + Otsu auto)
+    et invert, bouton **Detect tool** ;
+  - override des coins par **drag**, avec **loupe (zoom autour du curseur)** en
+    inset pendant le déplacement ;
+  - sélection de l'**arête face de coupe** et de l'**arête face de dépouille**
+    (clic sur l'arête la plus proche) ; **tool tip = intersection** des deux
+    segments ; rake/clear = inclinaison des deux arêtes vs verticale ;
+  - point de référence **pièce** toujours en pointé manuel ;
+  - champs résultats éditables + bouton Écrire dans Numerical Model (inchangé).
+- API testable : `set_quad`, `set_roi`, `set_rake_edge`, `set_flank_edge`,
+  `set_wp_point`, `move_corner`.
+- Tests : `detect_tool_quad` sur outil synthétique (erreur coin < 3 px),
+  intersection/nearest helpers, compute du tab via quad+segments. **48 verts**.
+
+### À confirmer (sur vraies images)
+- Signe exact de rake/clear selon l'orientation des arêtes choisies.
+- Robustesse de la détection (seuil/invert) sur le vrai contraste outil/fond.
+
+## Experimental Data — incrément 3c (Alignment : ergonomie)
+
+- **Clear selections** : bouton qui retire ROI, quad, arêtes et point pièce
+  (conserve l'image et l'échelle).
+- **Aperçu seuil live dans la ROI** : case « Show threshold in ROI (live) » ;
+  l'overlay binaire se met à jour quand seuil / Otsu / invert changent.
+- **Résolution** : unité sortie de la valeur (plus de suffixe), via un combo
+  d'unité **mm/px ↔ px/mm** ; `_mm_per_px()` convertit en canonique.
+- **Zoom de la loupe** réglable (spin « Magnifier zoom », demi-fenêtre px).
+- Tests : conversion px/mm et clear. **49 verts**.
+
+## Experimental Data — incrément 3d (Alignment : ergonomie + détection à revoir)
+
+- Reference geometry resserré en **2 colonnes**, champs **read-only** (plus
+  d'override par saisie ; l'override se fait par le pointé).
+- Zoom de la loupe par **curseur** (slider) au lieu d'un spinbox.
+- **Détection auto de l'outil : à refondre.** Le seuil global échoue (outil
+  sombre + texturé + en contact). Investigation sur la zone image de la
+  capture : l'outil = grande région **sombre + lisse**, la matière = **claire
+  + texturée (stries)**. Pistes testées : flou+Otsu (capte la face de coupe,
+  pollué en bas-gauche), texture (std local), Canny+Hough (capte bien la face
+  de dépouille, moins la face de coupe serratée). Méthode proposée : ROI
+  autour de la pointe → flou → segmentation sombre/lisse → ajustement de deux
+  droites (rake/flank) → intersection = pointe. À valider sur le frame brut.
+
+## Experimental Data — incrément 3e (Alignment : détection SEMI-AUTOMATIQUE)
+
+Refonte de la détection outil suite au constat que le 100 % auto est fragile
+(outil = région grise texturée bordée d'un vide bruité et de matière striée).
+
+- **`gui/core/tool_detect.py`** : ajout de `gradient_magnitude` (Sobel sur gris
+  lissé), `snap_line_to_edge(image, p1, p2, search, n, blur)` — échantillonne
+  la droite grossière, cherche le gradient max en perpendiculaire (±search),
+  ajuste une droite robuste (`fitLine` Huber) ; la serration se moyenne.
+  Validé sur marche synthétique (snap à <1,5 px) et sur l'image réelle (crop).
+- **`gui/tabs/alignment_tab.py`** réécrit en workflow **rough + fit** :
+  - « Draw rake line » / « Draw flank line » (2 clics chacun) = tracé grossier ;
+  - sliders « Edge search » (±px perpendiculaire) et « Smoothing » (flou) ;
+  - **« Fit edges »** cale les deux droites sur les bords ; **intersection =
+    pointe** ; rake/clear = inclinaison des droites ajustées ;
+  - override : « Move endpoint » (drag des extrémités, avec loupe) puis re-fit ;
+  - « Clear selections », point pièce manuel, géométrie read-only, Write.
+  - `detect_tool_quad` conservé dans le module (tests) mais retiré du workflow.
+- Tests : snap synthétique + fit via le tab (pointe retrouvée). **51 verts**.
+
+### À valider sur le frame brut
+- Réglages par défaut (search/flou) sur les vraies images.
+- Signe de rake/clear selon l'orientation tracée.
+
+## Experimental Data — incrément 3f (Alignment : convention d'angles corrigée)
+
+Bug : la dépouille était mesurée depuis la verticale (78° au lieu d'~12°).
+Convention du modèle confirmée (`run_simul.py:426-427`) :
+- `rake_angle` = écart de la face de coupe à la **verticale** (sens horaire) ;
+- `clear_angle` = écart de la face de dépouille à l'**horizontale** (positif).
+Correctifs : `alignment.line_tilt_from_horizontal_deg` ajouté ; `_recompute`
+utilise verticale pour rake, horizontale pour clear. Test mis à jour. 51 verts.
+
+## Geometry tab — filigrane image de référence (vérification alignement)
+
+- `GeometryPreview.set_reference_overlay(image, mm_per_px)` /
+  `set_reference_visible(on)` / `has_reference_overlay()` : l'image de
+  référence est dessinée derrière le croquis, **centrée sur l'origine modèle**
+  et à l'échelle mm/px (convention alignement : origine au centre, x droite,
+  y haut), zorder -10, alpha 0.45 ; aspect "equal" ré-affirmé après imshow (sinon distorsion y). La pointe de l'image coïncide donc avec la
+  pointe du modèle (tool_position) → comparaison qualitative directe.
+- `GeometryTab` : case **« Show reference image (watermark) »** (activée après
+  réception de l'image), forward vers le preview.
+- `MainWindow._write_reference_geometry` transmet `alignment_tab._image` +
+  `_mm_per_px()` au Geometry tab lors de l'écriture. **52 verts.**
+
+## Experimental Data — DIC (incrément 1 : moteur local + IO)
+
+- **`gui/core/dic.py`** (pur, testé) : `DicParams` (engine, subset, step,
+  search, zncc_min, subpixel) ; `make_grid` ; `correlate_local` (ZNCC via
+  `cv2.matchTemplate` TM_CCOEFF_NORMED + subpixel parabolique) ;
+  `velocity_fields` (incrémental image i→i+1, vitesse mm/s en repère modèle,
+  y inversé, temps au milieu de chaque paire, grille fixe eulérienne).
+  Validé : translation (3.4,-2.1) px retrouvée à ~0.01-0.03 px ; V1/V2 corrects.
+- **`gui/core/exp_field_io.py`** : `save_dic_field` / `load_dic_field`
+  (.npz + .json appairés selon FORMAT.md ; meta = source/units/params/dic).
+- Tests `tests/test_dic.py` (grille, corrélation, vitesses+signes, round-trip).
+
+### Décisions prises (à valider)
+- DIC **eulérienne grille fixe** (vitesse à points spatiaux fixes, cohérent CEL).
+- **Incrémental** (n_frames = n_images - 1), vitesse instantanée.
+- Critère **ZNCC**, subpixel parabolique. Moteur **global q4dic** : à venir.
+
+### Reste DIC
+- Onglet UI : ROI, sélection moteur, paramètres, run, viewer de champ, save +
+  `session.dic_field_path` ; import de champs externes.
+- Moteur global Q4 (q4dic).
+- Masquage (matière seule), gestion des grandes séquences (perf).
+
+## Experimental Data — DIC (incrément 2 : onglet UI + viewer)
+
+- **`gui/widgets/dic_field_viewer.py`** : heatmap (pcolormesh sur grille
+  régulière, sinon scatter), colorbar à échelle stable (perc. 2-98), slider
+  temporel, sélecteur de composante (V1/V2/Vmag), et **extraction de profil**
+  le long d'une ligne (valeur vs distance) — interpolation bilinéaire numpy
+  sur grille (repli scipy pour données dispersées).
+- **`gui/tabs/dic_tab.py`** : chargement séquence (session / dossier), échelle
+  mm/px (+ From visible calibration) et fps, **ROI** par glisser sur la frame
+  de référence (RectangleSelector), moteur (local ; global q4dic désactivé),
+  paramètres (subset/step/search/zncc/subpixel), **Run** → viewer, **Save**
+  (.npz/.json + `session.dic_field_path`), **Import** de champ externe.
+  API testable : `set_frames`, `set_roi`, `run`, `save_field`.
+- `ImageSequence` : `__len__`/`__getitem__` ajoutés (compat `velocity_fields`).
+- `scipy>=1.10` ajouté aux requirements (interp dispersée + identif inverse).
+- Branché dans le conteneur Experimental Data. **58 verts.**
+
+### Reste DIC
+- Moteur global Q4 (q4dic). Masquage matière. Perf grandes séquences.
+- Comparaison simu↔essai (rééchantillonnage + field_metrics).
+
+## DIC — ajustements UI
+
+- **Résolution** comme Alignment : valeur + combo d'unité **mm/px ↔ px/mm**
+  (unité hors de la cellule), `_mm_per_px()` canonique utilisé dans run().
+- **`gui/widgets/num_input.py`** : `DecimalSpinBox` accepte **virgule et point**
+  (locale C) ; utilisé pour résolution, fps, ZNCC.
+- **Mise en page** : moteur + run/save déplacés **sous les plots** (à droite) ;
+  la **ROI** occupe désormais toute la hauteur du panneau gauche (figure
+  agrandie) pour faciliter la sélection. 58 verts.
+
+## DIC — incrément 3 (viewer enrichi + dérivées + corrections)
+
+- **Preview des points** : la grille de mesure (make_grid) est superposée sur
+  la frame de référence (cyan), recalculée quand ROI/subset/step/search changent.
+- **Validation** : bouton « Validate ROI » fige la ROI (désactive le sélecteur)
+  et passe points + cadre en **vert** ; décocher réédite.
+- **Bug zoom corrigé** : le viewer sépare build/update — le scroll de frame ne
+  fait plus que `set_data` (zoom conservé) ; la colorbar est créée une fois.
+- **Home** réinitialise la vue des champs (connecté à `reset_view`).
+- **Interpolation** d'affichage : combo nearest/bilinear/bicubic/spline16/36
+  (imshow sur grille régulière).
+- **Champs dérivés** (`compute_dic_fields`) : déplacement (Ux,Uy,Umag),
+  vitesse (Vx,Vy,Vmag), taux de déformation (Exx_dot,Eyy_dot,Exy_dot,Eeq_dot),
+  déformation cumulée (Exx,Eyy,Exy,Eeq). Gradients sur grille ; déformation =
+  gradient sym. du déplacement accumulé (petites déf., eulérien — approx
+  documentée) ; équivalent von Mises 2D (e_zz=-(exx+eyy)) documenté.
+- IO étendu (`save_dic_field` extra+units) ; import alimente tous les champs.
+- Validé : cisaillement Exy≈-a/2 ; zoom conservé ; 9 tests DIC. Total verts.
+
+### Suite : schéma GLOBAL — maillage DIC + éléments Q4 (q4dic)
+
+## DIC — incrément 4 (ROI nudge, gate validation, progress, fond image)
+
+- **Flèches ROI** (← ↑ ↓ →) dans Search ROI : déplacent la ROI de 1 px
+  (mettent à jour le sélecteur) ; désactivées une fois la ROI validée.
+- **Run DIC conditionné** : désactivé tant que la ROI n'est pas validée.
+- **Validate verrouillé pendant le calcul** : `_set_busy` désactive Validate
+  (et Import) durant le run, réactivés à la fin.
+- **Barre de progression** : worker `_DicWorker(QThread)` ; `compute_dic_fields`
+  prend un callback `progress(i, n)` (par paire). `run()` reste synchrone (tests).
+- **Image visible en fond** du champ (case « Show image ») : `set_background`
+  dessine la frame correspondante (spatiale + temporelle) centrée à mm/px,
+  zorder -10, champ en alpha 0.65 ; suit le scroll, zoom conservé.
+- 62 tests verts.
+
+## DIC — incrément 5 (layout, bugs, masque)
+
+- **Engine parameters** réagencé : Subset|Step sur une ligne, Search|ZNCC min
+  sur une ligne ; case Sub-pixel supprimée (subpixel=True forcé, désactiver
+  dégradait les résultats).
+- **Dérive « Show image » corrigée** : colorbar dans un axe dédié (gridspec
+  width_ratios [30,1]) + constrained_layout → l'axe principal ne rétrécit plus
+  à chaque rebuild (test de non-dérive de position).
+- **Affichage calé sur la ROI** : limites de l'axe fixées sur l'étendue du champ
+  (≈ dimensions de la search ROI), heatmap agrandie (height_ratios [3,2]).
+- **Flèches ROI clampées** dans les bornes de l'image (`_image_size`).
+- **Masque fond/outil** (`dic.point_mask`, intensité + texture locales) :
+  groupe Mask (enable + Min intensity + Min texture), preview gardés (cyan/vert)
+  vs exclus (croix rouge) ; les points masqués deviennent **invalides**
+  (grille régulière conservée → déformation toujours calculable). `point_keep`
+  ajouté à `compute_dic_fields` ; réglages dans la meta. 64 tests verts.
+
+## DIC — incrément 6 (score, lock paramètres, scroll masque, fenêtre profil)
+
+- **Score/qualité ZNCC** : `correlate_local` renvoyait déjà le pic ZNCC ;
+  exposé comme champ **ZNCC** (∈ [-1,1], 1 = corrélation parfaite), sauvegardé
+  dans le .npz. Affiché même hors `valid` (zones rejetées/faibles visibles) via
+  `_QUALITY_FIELDS` dans le viewer. C'est l'indicateur de fiabilité par point ;
+  une incertitude en unités physiques (déplacement) reste à définir si besoin.
+- **Verrouillage à la validation** : Engine parameters (engine/subset/step/
+  search/zncc) et masque (enable/min intensity/min texture) sont désactivés tant
+  que la ROI est validée (`_lock_params`).
+- **Scroll masque ±1** : `WheelStepSlider` (override `wheelEvent`) → un cran =
+  un singleStep (au lieu de ×3 lignes système) ; utilisé pour les 2 curseurs.
+- **Profil en fenêtre séparée** : l'axe profil est retiré du graphe principal
+  (heatmap pleine hauteur) ; bouton « Profile window » ouvre `_ProfileWindow`
+  (redimensionnable, barre d'outils), mise à jour live ligne/frame/composante.
+- 67 tests verts.

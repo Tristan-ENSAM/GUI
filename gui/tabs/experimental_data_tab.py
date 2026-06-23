@@ -27,6 +27,9 @@ from gui.core.sequence_io import ImageSequence, load_forces
 from gui.core.logging_util import log_swallowed
 from gui.widgets.image_sequence_viewer import ImageSequenceViewer
 from gui.widgets.force_viewer import ForceViewer
+from gui.tabs.calibration_visible_tab import CalibrationVisibleTab
+from gui.tabs.alignment_tab import AlignmentTab
+from gui.tabs.dic_tab import DICTab
 
 
 def _placeholder(text: str) -> QWidget:
@@ -43,21 +46,22 @@ def _placeholder(text: str) -> QWidget:
 class ExperimentalDataTab(QWidget):
     """Top 'Experimental Data' tab: owns the session, hosts the sub-tabs."""
 
-    def __init__(self, parent=None):
+    def __init__(self, write_geometry=None, parent=None):
         super().__init__(parent)
         self.session = ExperimentSession()
 
         self.acquisition_tab = AcquisitionTab(self.session)
+        self.calib_visible_tab = CalibrationVisibleTab(self.session)
+        self.alignment_tab = AlignmentTab(self.session, write_geometry=write_geometry)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.acquisition_tab, "Acquisition / Import")
-        self.tabs.addTab(_placeholder("Calibration — visible camera (later)"),
-                         "Calib. visible")
+        self.tabs.addTab(self.calib_visible_tab, "Calib. visible")
         self.tabs.addTab(_placeholder("Calibration — thermal camera (later)"),
                          "Calib. thermal")
-        self.tabs.addTab(_placeholder("Reference geometry / alignment (later)"),
-                         "Alignment")
-        self.tabs.addTab(_placeholder("DIC velocity fields (later)"), "DIC")
+        self.tabs.addTab(self.alignment_tab, "Alignment")
+        self.dic_tab = DICTab(self.session)
+        self.tabs.addTab(self.dic_tab, "DIC")
         self.tabs.addTab(_placeholder("IRT temperature fields (later)"), "IRT")
         self.tabs.addTab(_placeholder("Forces (later)"), "Forces")
         self.tabs.addTab(_placeholder("Noise / baseline (a vide) (later)"),
@@ -361,11 +365,10 @@ class AcquisitionTab(QWidget):
             seq = ImageSequence.from_path(
                 cfg.path, fps=cfg.fps, t0=self.session.trigger_offset_s)
             viewer.set_sequence(seq)
-        except Exception as e:
+        except Exception:
+            # Auto-refresh (incl. on session load) must not block on a modal.
             log_swallowed("loading %s stream" % key)
             viewer.set_sequence(None)
-            QMessageBox.warning(self, "Preview",
-                                "Could not load %s stream:\n%s" % (key, e))
 
     def _refresh_forces(self):
         cfg = self.session.forces
@@ -377,11 +380,9 @@ class AcquisitionTab(QWidget):
                                     col_fc=cfg.col_fc, col_ff=cfg.col_ff)
             self.view_forces.set_signal(t + self.session.trigger_offset_s,
                                         fc, ff)
-        except Exception as e:
+        except Exception:
             log_swallowed("loading force signal")
             self.view_forces.clear()
-            QMessageBox.warning(self, "Preview",
-                                "Could not load force file:\n%s" % e)
 
     # =====================================================================
     # Load / save the session file
