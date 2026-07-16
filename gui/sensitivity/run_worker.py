@@ -62,7 +62,8 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
             try:
                 proc.terminate()
             except Exception:
-                pass
+                log_swallowed("terminating the run process (Windows fallback)",
+                              level=logging.DEBUG)
         return
     # POSIX
     try:
@@ -71,7 +72,8 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
         try:
             proc.terminate()
         except Exception:
-            pass
+            log_swallowed("terminating the run process (no process group)",
+                          level=logging.DEBUG)
         return
     try:
         os.killpg(pgid, signal.SIGTERM)
@@ -91,7 +93,8 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
         try:
             proc.kill()
         except Exception:
-            pass
+            log_swallowed("killing the run process (fallback)",
+                          level=logging.DEBUG)
 
 
 class SensitivityRunWorker(QObject):

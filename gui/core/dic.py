@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Optional, Tuple
+import time
 import numpy as np
 
 from gui.core.alignment import pixel_to_model
@@ -167,7 +168,8 @@ def _equiv(exx, eyy, exy):
 def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
                        fps: float, mm_per_px: float, img_w: int, img_h: int,
                        trigger_offset_s: float = 0.0, progress=None,
-                       point_keep=None):
+                       point_keep=None, on_frame=None,
+                       mask_per_frame: bool = False, mask_params: dict = None):
     """Incremental local DIC + derived fields on the (regular) measurement grid.
 
     Returns a dict:
@@ -187,6 +189,32 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     material flows through the grid; strain rate is that increment over dt.
     Gradients need a regular grid; if the points are not a grid, only the
     displacement/velocity fields are returned (strain fields are NaN).
+
+    ``progress(i_done, n_pairs)`` is the simple progress callback. ``on_frame``
+    is an optional detailed callback invoked once per pair with a dict::
+
+        {'index': i, 'n_pairs': N, 'n_valid': k, 'n_total': m,
+         'mean_zncc': float | None, 'elapsed_s': float, 'frame_s': float}
+
+    meant to drive a status log and an ETA in the UI; it does not affect the
+    computation.
+
+    Masking
+    -------
+    ``point_keep`` is a static (n_pts,) keep-mask applied to every frame (the
+    legacy behaviour). When ``mask_per_frame`` is True the keep-mask is instead
+    recomputed on EACH reference frame with ``point_mask`` using ``mask_params``
+    (``min_intensity`` and an optional ``win``; intensity-only, the same
+    criterion shown in the Search-ROI preview). A point is then valid only on
+    the frames where it sits on bright-enough material; on the frames where it
+    is masked out its displacement/velocity are NaN (a temporal hole) and it
+    does not count as valid.
+
+    Because the measurement grid is Eulerian (fixed points, material flows
+    through), the time-CUMULATED strain has no physical meaning once material
+    leaves the field of view, so this engine reports only the INSTANTANEOUS
+    strain rates (``Exx_dot``/``Eyy_dot``/``Exy_dot``/``Eeq_dot``); it does not
+    output cumulated ``Exx``/``Eyy``/``Exy``/``Eeq`` fields.
     """
     n_img = len(frames)
     pts = np.asarray(points, float).reshape(-1, 2)
@@ -201,22 +229,32 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     grid = grid_from_points(x_mm, y_mm)
 
     names = ["Ux", "Uy", "Umag", "Vx", "Vy", "Vmag",
-             "Exx_dot", "Eyy_dot", "Exy_dot", "Eeq_dot",
-             "Exx", "Eyy", "Exy", "Eeq", "ZNCC"]
+             "Exx_dot", "Eyy_dot", "Exy_dot", "Eeq_dot", "ZNCC"]
     fields = {k: np.full((n_pairs, n_pts), np.nan) for k in names}
     valid = np.zeros((n_pairs, n_pts), bool)
     t = np.zeros(n_pairs)
 
-    cxx = np.zeros(n_pts); cyy = np.zeros(n_pts); cxy = np.zeros(n_pts)
-    keep = (np.ones(n_pts, bool) if point_keep is None
-            else np.asarray(point_keep, bool))
+    keep_static = (np.ones(n_pts, bool) if point_keep is None
+                   else np.asarray(point_keep, bool))
+    mp = mask_params or {}
+    mask_win = int(mp.get("win", max(5, int(params.subset) // 2)))
+    mask_min_int = float(mp.get("min_intensity", 0.0))
 
     if grid is not None:
         ux, uy, ix, iy = grid
         gx_mm = float(np.mean(np.diff(ux))) if ux.size > 1 else 1.0
         gy_mm = float(np.mean(np.diff(uy))) if uy.size > 1 else 1.0
 
+    t_start = time.perf_counter()
     for i in range(n_pairs):
+        t_frame0 = time.perf_counter()
+        # Keep-mask for this pair: recomputed on the reference frame i when
+        # mask_per_frame is on, otherwise the static keep-mask.
+        if mask_per_frame and n_pts:
+            keep = point_mask(frames[i], pts, win=mask_win,
+                              min_intensity=mask_min_int)
+        else:
+            keep = keep_static
         disp, ok, score = correlate_local(
             frames[i], frames[i + 1], pts,
             subset=params.subset, search=params.search,
@@ -248,36 +286,46 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
             dUy_dy, dUy_dx = np.gradient(uy_g, gy_mm, gx_mm)
             dexx = dUx_dx; deyy = dUy_dy
             dexy = 0.5 * (dUx_dy + dUy_dx)
+            # Instantaneous strain rates only; cumulated strain is omitted (no
+            # physical meaning on an Eulerian grid as material leaves the FOV).
             fields["Exx_dot"][i] = (dexx / dt)[iy, ix]
             fields["Eyy_dot"][i] = (deyy / dt)[iy, ix]
             fields["Exy_dot"][i] = (dexy / dt)[iy, ix]
             fields["Eeq_dot"][i] = (_equiv(dexx, deyy, dexy) / dt)[iy, ix]
-            cxx = cxx + np.nan_to_num(dexx[iy, ix])
-            cyy = cyy + np.nan_to_num(deyy[iy, ix])
-            cxy = cxy + np.nan_to_num(dexy[iy, ix])
-            fields["Exx"][i] = cxx
-            fields["Eyy"][i] = cyy
-            fields["Exy"][i] = cxy
-            fields["Eeq"][i] = _equiv(cxx, cyy, cxy)
 
         if progress is not None:
             progress(i + 1, n_pairs)
+        if on_frame is not None:
+            now = time.perf_counter()
+            n_total = int(keep.sum())
+            n_valid = int(ok.sum())
+            zncc_valid = score[ok]
+            mean_zncc = float(np.mean(zncc_valid)) if zncc_valid.size else None
+            on_frame({"index": i, "n_pairs": n_pairs,
+                      "n_valid": n_valid, "n_total": n_total,
+                      "mean_zncc": mean_zncc,
+                      "elapsed_s": now - t_start,
+                      "frame_s": now - t_frame0})
 
     units = {"Ux": "mm", "Uy": "mm", "Umag": "mm",
              "Vx": "mm/s", "Vy": "mm/s", "Vmag": "mm/s",
              "Exx_dot": "1/s", "Eyy_dot": "1/s", "Exy_dot": "1/s", "Eeq_dot": "1/s",
-             "Exx": "-", "Eyy": "-", "Exy": "-", "Eeq": "-", "ZNCC": "-"}
+             "ZNCC": "-"}
     return {"x": x_mm, "y": y_mm, "t": t, "valid": valid,
             "grid": (None if grid is None else (grid[0].size, grid[1].size)),
             "fields": fields, "units": units}
 
 
 def point_mask(image: np.ndarray, points: np.ndarray, win: int = 15,
-               min_intensity: float = 0.0, min_texture: float = 0.0):
+               min_intensity: float = 0.0):
     """Keep-mask for measurement points based on the reference frame: a point
     is kept if its local window has mean intensity >= `min_intensity` (drops
-    the dark scene background) AND local std >= `min_texture` (drops the smooth
-    tool). Returns a (n_points,) bool array."""
+    the dark scene background / out-of-material regions). Returns a
+    (n_points,) bool array.
+
+    The texture (local std) criterion was removed: masking is intensity-only,
+    consistent across the local and global engines.
+    """
     g = _to_gray_f32(image)
     H, W = g.shape
     half = max(1, int(win) // 2)
@@ -288,7 +336,7 @@ def point_mask(image: np.ndarray, points: np.ndarray, win: int = 15,
         x0, x1 = max(0, ix - half), min(W, ix + half + 1)
         y0, y1 = max(0, iy - half), min(H, iy + half + 1)
         patch = g[y0:y1, x0:x1]
-        if patch.size == 0 or patch.mean() < min_intensity or patch.std() < min_texture:
+        if patch.size == 0 or patch.mean() < min_intensity:
             keep[k] = False
     return keep
 

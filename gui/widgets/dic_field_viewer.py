@@ -11,6 +11,7 @@ scrubbing is smooth (clearing the axes every frame used to reset the view).
 The toolbar Home button resets to the full field extent.
 """
 from __future__ import annotations
+import logging
 import numpy as np
 
 from PySide6.QtCore import Qt
@@ -23,8 +24,13 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
+from gui.core.logging_util import log_swallowed
+
 _INTERP = ["nearest", "bilinear", "bicubic", "spline16", "spline36"]
-_QUALITY_FIELDS = {"ZNCC"}
+# Quality/score fields are shown everywhere they were computed (they bypass the
+# `valid` mask) so low-quality or rejected zones stay visible: ZNCC for the
+# local engine, the correlation residual for the global Q4 engine.
+_QUALITY_FIELDS = {"ZNCC", "residual"}
 
 
 def _bilinear_grid(ux, uy, Z, qx, qy):
@@ -255,7 +261,8 @@ class DicFieldViewer(QWidget):
         try:
             self._toolbar.update()
         except Exception:
-            pass
+            log_swallowed("updating the field-viewer toolbar home view",
+                          level=logging.DEBUG)
 
     def set_background(self, provider, mm_per_px, img_w, img_h):
         """Provide the visible image behind the field. `provider(frame_index)`
@@ -319,7 +326,8 @@ class DicFieldViewer(QWidget):
             try:
                 self._bg_im.set_data(np.asarray(self._bg_provider(self._frame)))
             except Exception:
-                pass
+                log_swallowed("updating the field-viewer background image",
+                              level=logging.DEBUG)
         self._draw_profile()
         self._canvas.draw_idle()
 
@@ -369,7 +377,8 @@ class DicFieldViewer(QWidget):
             try:
                 self._line_artist.remove()
             except Exception:
-                pass
+                log_swallowed("removing the profile line artist",
+                              level=logging.DEBUG)
             self._line_artist = None
         if len(self._line) >= 1:
             xs = [p[0] for p in self._line]; ys = [p[1] for p in self._line]

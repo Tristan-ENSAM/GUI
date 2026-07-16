@@ -109,3 +109,59 @@ def jacobian_field_sensitivity(base_field, pert_field, delta=None,
     else:
         raise ValueError("metric must be 'ssd', 'l2' or 'rmse'")
     return float(val)
+
+
+def elementwise_signed_sensitivity(base_field, plus_field, minus_field,
+                                   delta, scheme="central"):
+    """Per-element, per-frame SIGNED finite-difference sensitivity dF/dparam.
+
+    Unlike jacobian_field_sensitivity (which reduces the whole field to one
+    scalar over the ZOI), this keeps the element axis: it returns an array
+    S of shape (n_frames, n_elements) where
+
+        central  : S = (plus  - minus) / (2*delta)
+        forward  : S = (plus  - base ) /    delta
+        backward : S = (base  - minus) /    delta
+
+    base/plus/minus are (n_frames, n_elements) field arrays for the base run,
+    the +delta run and the -delta run respectively; only the ones required by
+    `scheme` need to be provided (the others may be None). `delta` is the FD
+    step in displayed units (must be non-zero). The result is NaN-safe: where
+    a required input is NaN (e.g. a folded/empty element), S is NaN; if a
+    required array is missing entirely, an all-NaN array is returned (shaped
+    from whatever input is available).
+
+    The sign is meaningful: S > 0 means the field increases with the
+    parameter at that element, S < 0 means it decreases. For a magnitude map
+    take abs(S); to reduce over time use the mean of S (signed) or the RMS of
+    S (magnitude)."""
+    d = float(delta)
+    if d == 0.0:
+        raise ValueError("delta must be non-zero")
+
+    def _arr(x):
+        return None if x is None else np.asarray(x, dtype=float)
+
+    base = _arr(base_field)
+    plus = _arr(plus_field)
+    minus = _arr(minus_field)
+
+    if scheme == "central":
+        a, b, denom = plus, minus, 2.0 * d
+    elif scheme == "forward":
+        a, b, denom = plus, base, d
+    elif scheme == "backward":
+        a, b, denom = base, minus, d
+    else:
+        raise ValueError("scheme must be 'central', 'forward' or 'backward'")
+
+    # If a required operand is missing, return an all-NaN field shaped from
+    # any array we do have.
+    if a is None or b is None:
+        ref = next((x for x in (base, plus, minus) if x is not None), None)
+        if ref is None:
+            return np.empty((0, 0), dtype=float)
+        return np.full(ref.shape, np.nan, dtype=float)
+
+    a, b = _align(a, b)
+    return (a - b) / denom

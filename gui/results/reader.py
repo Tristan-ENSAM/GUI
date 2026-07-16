@@ -118,9 +118,15 @@ class ResultsBundle:
             json_path = p
             npz_path  = p.with_suffix(".npz")
         else:
-            # Treat as a basename and append both extensions
-            json_path = p.with_suffix(".json")
-            npz_path  = p.with_suffix(".npz")
+            # Treat as a basename and APPEND both extensions. We use string
+            # concatenation rather than Path.with_suffix(...) on purpose: the
+            # canonical stem is "<name>.results", whose pathlib suffix is
+            # ".results", so with_suffix(".json") would REPLACE it and yield
+            # "<name>.json" instead of the intended "<name>.results.json".
+            # Concatenation handles both the canonical ".results" stem and a
+            # bare "<name>" stem correctly.
+            json_path = Path(str(p) + ".json")
+            npz_path  = Path(str(p) + ".npz")
 
         if not json_path.exists():
             raise ResultsLoadError(

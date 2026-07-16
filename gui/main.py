@@ -34,10 +34,12 @@ from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
 from gui.tabs.sensitivity_tab import SensitivityTab
+from gui.tabs.optimization_tab import OptimizationTab
 from gui.tabs.experimental_data_tab import ExperimentalDataTab
 from gui.widgets.preferences_dialog import PreferencesDialog
 from gui.widgets.unit_system_dialog import UnitSystemDialog
 from gui.core import units
+from gui.core.logging_util import log_swallowed
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,9 @@ class MainWindow(QMainWindow):
         self.sensitivity_tab = SensitivityTab(
             self.cfg, lambda: self.prefs,
             cpus_getter=lambda: self.job_tab.cpus())
+        self.optimization_tab = OptimizationTab(
+            self.cfg, lambda: self.prefs,
+            cpus_getter=lambda: self.job_tab.cpus())
 
         # Two-level tabs: a top row of theme categories, each holding its
         # own row of sub-tabs (so the window shows several tab rows).
@@ -117,6 +122,7 @@ class MainWindow(QMainWindow):
 
         self.opt_tabs = QTabWidget()
         self.opt_tabs.addTab(self.sensitivity_tab,   "Sensitivity")
+        self.opt_tabs.addTab(self.optimization_tab,  "Model")
         self.opt_tabs.addTab(_placeholder("Inverse identification — coming later"),
                              "Inverse identification")
 
@@ -282,7 +288,8 @@ class MainWindow(QMainWindow):
             if getattr(al, "_image", None) is not None:
                 self.geometry_tab.set_reference_overlay(al._image, al._mm_per_px())
         except Exception:
-            pass
+            log_swallowed("propagating the reference image overlay to the "
+                          "geometry tab")
         self._mark_dirty()
 
     def _mark_dirty(self, *_):
@@ -461,6 +468,13 @@ class MainWindow(QMainWindow):
         # It has no apply_from_cfg(); refresh_from_model() rebuilds its Ref
         # values, and is called whenever it becomes the visible page.
         self.sensitivity_tab.cfg = self.cfg
+        # Optimization reads t1/rake/mu/ROI/elem straight from the cfg; rebind
+        # and refresh its displayed inputs.
+        self.optimization_tab.cfg = self.cfg
+        try:
+            self.optimization_tab.refresh_inputs()
+        except Exception:
+            pass
         # Activate the loaded profile's unit system so every tab converts
         # through it (and the displayed values match the saved preference).
         units.set_active_system(self.cfg.units)

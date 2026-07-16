@@ -16,6 +16,7 @@ Element-to-2D-polygon projection:
     Abaqus C3D8 ordering.
 """
 from __future__ import annotations
+import logging
 import numpy as np
 
 from PySide6.QtCore import Qt
@@ -27,6 +28,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.collections import PolyCollection
+
+from gui.core.logging_util import log_swallowed
 
 
 class FieldViewer(QWidget):

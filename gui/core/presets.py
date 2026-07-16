@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+from gui.core.logging_util import log_swallowed
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -41,7 +43,7 @@ def profiles_dir() -> Path:
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:
-        pass
+        log_swallowed("creating the material_profiles directory")
     return d
 
 

@@ -146,17 +146,32 @@ def _bilinear(im: np.ndarray, x: float, y: float) -> float:
 
 
 def snap_line_to_edge(image: np.ndarray, p1: Point, p2: Point,
-                      search: int = 25, n: int = 40, blur: float = 2.0):
+                      search: int = 25, n: int = 40, blur: float = 2.0,
+                      binary_threshold: Optional[float] = None):
     """Refine a rough line p1->p2 by snapping it onto the strongest image
     edge: at `n` samples along the line, search +/- `search` px perpendicular
     for the maximum gradient, then robustly fit a line to those points.
+
+    When ``binary_threshold`` is given, the gradient is computed on the
+    BINARISED image (``gray >= threshold``) rather than the smoothed grey
+    image, so the fit locks onto the sharp tool/background boundary instead of
+    internal speckle texture.
 
     Returns (q1, q2, snapped_pts): the refined endpoints (p1, p2 projected on
     the fitted line) and the (m, 2) snapped edge points. Falls back to the
     input line if too few points are found. Averages out serration because a
     whole line is fitted."""
     import cv2
-    gmag = gradient_magnitude(image, blur)
+    if binary_threshold is not None:
+        g = _to_gray(image).astype(np.float64)
+        # Smooth BEFORE thresholding, then take the gradient of the binary mask.
+        if blur > 0:
+            import scipy.ndimage as _ndi
+            g = _ndi.gaussian_filter(g, blur)
+        binimg = (g >= float(binary_threshold)).astype(np.float64) * 255.0
+        gmag = gradient_magnitude(binimg, 0.0)
+    else:
+        gmag = gradient_magnitude(image, blur)
     a = np.array(p1, float); b = np.array(p2, float)
     d = b - a
     L = float(np.hypot(*d))
@@ -168,14 +183,21 @@ def snap_line_to_edge(image: np.ndarray, p1: Point, p2: Point,
     pts = []
     for i in range(n):
         c = a + d * (L * i / (n - 1))
-        best, bestv = None, -1.0
-        for t in ts:
-            x, y = c + nrm * t
-            v = _bilinear(gmag, x, y)
-            if v > bestv:
-                bestv, best = v, (x, y)
-        if best is not None and bestv > 0:
-            pts.append(best)
+        # Sample the gradient along the perpendicular search line.
+        vals = np.array([_bilinear(gmag, *(c + nrm * t)) for t in ts])
+        vmax = float(vals.max())
+        if vmax <= 0:
+            continue
+        # Use the gradient-weighted centroid of the strong-response region so
+        # the snapped point sits ON the edge (the centre of the gradient band),
+        # not at the first maximum nor at the border of the search window.
+        thr = 0.5 * vmax
+        w = np.where(vals >= thr, vals, 0.0)
+        if w.sum() <= 0:
+            continue
+        t_star = float((ts * w).sum() / w.sum())
+        x, y = c + nrm * t_star
+        pts.append((x, y))
     pts = np.asarray(pts, np.float32)
     if len(pts) < 2:
         return tuple(a), tuple(b), pts

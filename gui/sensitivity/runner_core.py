@@ -109,6 +109,62 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
     return out
 
 
+def jacobian_field_maps(plan, bundles, field_vars, instance=None):
+    """Per-element, per-frame SIGNED sensitivity MAPS for a Jacobian plan.
+
+    The map counterpart of jacobian_field_analysis: instead of reducing each
+    (field var, parameter) to a scalar over the ZOI, it keeps the element
+    axis, returning a field dF/dparam per element and per frame. The display
+    layer reduces it (per-frame slice or time aggregate) and chooses signed
+    vs magnitude.
+
+    Returns {var: {param_path: S}} where S is a (n_frames, n_elements) array
+    (np.ndarray), or NaN-filled where a run is missing. Uses the plan's FD
+    scheme (central uses the +delta and -delta runs, forward/backward use the
+    base run). `bundles` are the kept run bundles (bundles[0] = base run)."""
+    if not bundles or bundles[0] is None:
+        return {}
+    ref = bundles[0]
+    inst = instance or eulerian_instance(ref)
+    scheme = getattr(plan, "scheme", "central")
+    out = {}
+    for var in field_vars:
+        try:
+            base_field = ref.field(inst, var)
+        except Exception:
+            log_swallowed("reading base field %r for field maps" % var,
+                          level=logging.DEBUG)
+            continue
+        per_param = {}
+        for i, spec in enumerate(plan.specs):
+            ip = plan.idx_plus.get(i)
+            im = plan.idx_minus.get(i)
+
+            def _field(idx):
+                if idx is None or idx >= len(bundles) or bundles[idx] is None:
+                    return None
+                try:
+                    return bundles[idx].field(inst, var)
+                except Exception:
+                    log_swallowed("reading field %r for map @ %s"
+                                  % (var, spec.path), level=logging.DEBUG)
+                    return None
+
+            plus_field = _field(ip)
+            minus_field = _field(im)
+            try:
+                S = fm.elementwise_signed_sensitivity(
+                    base_field, plus_field, minus_field,
+                    delta=plan.deltas[i], scheme=scheme)
+            except Exception:
+                log_swallowed("field map for %s @ %s" % (var, spec.path),
+                              level=logging.DEBUG)
+                S = np.full(np.asarray(base_field, float).shape, np.nan)
+            per_param[spec.path] = S
+        out[var] = per_param
+    return out
+
+
 @dataclass
 class RunResult:
     plan_kind: str                 # "morris" | "jacobian"

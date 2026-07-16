@@ -8,6 +8,7 @@ The label shows 'frame i/N   t = ... s' using the sequence fps / t0.
 """
 from __future__ import annotations
 
+import logging
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider
 import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
+from gui.core.logging_util import log_swallowed
 
 
 class ImageSequenceViewer(QWidget):
@@ -58,7 +61,7 @@ class ImageSequenceViewer(QWidget):
             try:
                 self._cbar.remove()
             except Exception:
-                pass
+                log_swallowed("removing the colorbar", level=logging.DEBUG)
             self._cbar = None
         n = seq.n_frames if seq is not None else 0
         self._slider.blockSignals(True)

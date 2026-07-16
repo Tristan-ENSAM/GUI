@@ -105,7 +105,8 @@ class OutputCfg:
     fo_RF:      bool = True
     fo_NT:      bool = True
     # --- history output ---
-    ho_preselect:   bool = True   # PRESELECT
+    ho_preselect:   bool = True   # PRESELECT (also provides ALLKE/ALLIE for
+    #                               the mass-scaling guard-rail)
     ho_rf_on_rp:    bool = True   # RF1/RF2 on the tool RP
     # Number of history-output intervals. By design we keep it equal to
     # the number of field-output frames (StepCfg.n_frames): each field
@@ -442,6 +443,9 @@ class ModelConfig:
     wp_position:    EulerPosition  = field(default_factory=EulerPosition)
     bbox:           BBox           = field(default_factory=BBox)
     elem_size:      float          = 0.005
+    # Tool-nose seed size (was hard-coded to 0.001 in run_simul); exposed so
+    # the mesh-convergence study can identify it. Backward-compatible default.
+    tool_elem_size: float          = 0.001
 
     # Per-body element configuration
     tool_element:    MeshElementCfg = field(default_factory=MeshElementCfg)
@@ -510,10 +514,11 @@ class ModelConfig:
                 "tool":  dict(self.tool_material),
             },
             "mesh": {
-                "elem_size":     self.elem_size,
-                "discretize":    self.euler_geometry.discretize,
-                "euler_element": asdict(self.euler_element),
-                "tool_element":  asdict(self.tool_element),
+                "elem_size":      self.elem_size,
+                "tool_elem_size": self.tool_elem_size,
+                "discretize":     self.euler_geometry.discretize,
+                "euler_element":  asdict(self.euler_element),
+                "tool_element":   asdict(self.tool_element),
             },
             "interaction": asdict(self.interaction),
             "bcs":         asdict(self.bcs),

@@ -31,9 +31,11 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
     expose `instance_names` en *property* (liste). Sur un vrai bundle le
     `try/except` avalait le `TypeError` et renvoyait `None`, ce qui
     faisait disparaître **silencieusement** les Field QoI SSD. Corrigé
-    (helper tolérant property/méthode) et couvert par un test sur un vrai
-    bundle. Le mock historique masquait le bug (méthode au lieu de
-    property).
+    (helper `_instance_names` tolérant property/méthode). Couverture de
+    non-régression dans `tests/test_sensitivity_runner.py`
+    (`TestInstanceHelpers` : forme property sur un vrai `ResultsBundle`
+    via `fake_builder`, forme méthode via un doublon, objet inconnu →
+    `None`).
   - **Cancel** durci : le sous-processus est lancé dans son propre
     groupe (POSIX `start_new_session` / Windows
     `CREATE_NEW_PROCESS_GROUP`) et l'annulation tue **tout l'arbre**

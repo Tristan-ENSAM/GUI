@@ -299,7 +299,8 @@ class ResultsTab(QWidget):
                 y = bundle.history(var)
                 self.ts_viewer.add_series(var, hist_t, y)
             except KeyError:
-                pass
+                log_swallowed("adding history series %r" % var,
+                              level=logging.DEBUG)
 
         # ----- Reset the slider for the new bundle -----
         nf = bundle.n_frames
@@ -472,7 +473,8 @@ class ResultsTab(QWidget):
                     values = values.copy()
                     values[evf <= _EVF_MIN] = np.nan
             except (KeyError, IndexError):
-                pass
+                log_swallowed("masking field values by EVF",
+                              level=logging.DEBUG)
 
         cmap = self.cb_cmap.currentText() or "viridis"
         title = f"{var}   frame {idx}/{field.shape[0]-1}   t = {t:.3e} s"

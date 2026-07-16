@@ -58,6 +58,7 @@ class BCsTab(QWidget):
         ("NONREFLECTING — absorb outgoing waves",        "NONREFLECTING"),
         ("EQUILIBRIUM — far-field equilibrium pressure", "EQUILIBRIUM"),
         ("ZERO_PRESSURE — outflow at p = 0",             "ZERO_PRESSURE"),
+        ("NONE — face is treated as a wall out",         "NONE"),
     ]
     EUL_FACES = (
         ("left",   "Left face"),

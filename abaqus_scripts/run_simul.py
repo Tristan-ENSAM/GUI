@@ -296,6 +296,7 @@ _OUTFLOW_MAP = {
     "NONREFLECTING": NON_REFLECTING,
     "EQUILIBRIUM":   EQUILIBRIUM,
     "ZERO_PRESSURE": ZERO_PRESSURE,
+    "NONE":          NONE,
 }
 # EulerianBC `definition` argument (which fluxes are specified)
 _BC_DEFINITION_MAP = {
@@ -509,7 +510,11 @@ assembly.setElementType(regions=eul_set, elemTypes=(eul_elemType, eul_elemType, 
 assembly.setMeshControls(regions=eul_instance.cells, elemShape=HEX, technique=STRUCTURED)
 
 nose_mesh_edges = [13, 14]
-assembly.seedEdgeBySize(edges=[tool_instance.edges[i] for i in nose_mesh_edges], size=0.001)
+# Tool-nose seed size, now configurable (was hard-coded 0.001) so the
+# mesh-convergence study can drive it; falls back to 0.001 for old configs.
+tool_elem_size = float(cfg_get(MODEL_CFG, "mesh.tool_elem_size", 0.005))
+assembly.seedEdgeBySize(edges=[tool_instance.edges[i] for i in nose_mesh_edges],
+                        size=tool_elem_size)
 width_mesh_edge = [1]
 assembly.seedEdgeByNumber(edges=[tool_instance.edges[i] for i in width_mesh_edge], number=1)
 
@@ -524,7 +529,7 @@ assembly.seedEdgeByBias(
     biasMethod=SINGLE,
     end1Edges=[tool_instance.edges[0],tool_instance.edges[2]],
     end2Edges=[tool_instance.edges[10],tool_instance.edges[12]],
-    minSize=0.001,
+    minSize=0.005,
     maxSize=0.02)
 
 tool_elem_kwargs = _build_elem_type_kwargs(tool_cfg, family="lagrangian")
@@ -645,6 +650,9 @@ if ho_preselect:
         variables=PRESELECT,
         numIntervals=ho_n_intervals,
     )
+# ALLKE/ALLIE are already produced by the PRESELECT whole-model history
+# (ho_preselect); no dedicated energy request is needed. The mass-scaling guard
+# extracts them from the PRESELECT history region.
 #%%% Boundary conditions
 
 #%%%% Eulerian face Sets (4 faces of the Eulerian box)
@@ -743,7 +751,7 @@ if _vcut_face_array is not None and len(_vcut_face_array) > 0:
     )
     cut_BC = myModel.VelocityBC(
         name='Cutting_speed', createStepName='Initial',
-        region=work_sides, v1=SET, v2=SET,
+        region=work_sides, v1=SET,
     )
     cut_BC.setValuesInStep(stepName='Cut', v1=bcs_cutting_speed)
 else:
@@ -1260,6 +1268,22 @@ def _extract_history_rf(step):
     return None, None, None
 
 
+def _extract_history_energy(step):
+    """Return (time, allke, allie) for the whole-model energies, or
+    (None, None, None). ALLKE/ALLIE live in the whole-model / assembly history
+    region (no element/RP region)."""
+    for region_key, region in step.historyRegions.items():
+        outputs = region.historyOutputs
+        if "ALLKE" in outputs and "ALLIE" in outputs:
+            ke_pairs = outputs["ALLKE"].data
+            ie_pairs = outputs["ALLIE"].data
+            t = _np.asarray([p[0] for p in ke_pairs], dtype=_np.float64)
+            allke = _np.asarray([p[1] for p in ke_pairs], dtype=_np.float32)
+            allie = _np.asarray([p[1] for p in ie_pairs], dtype=_np.float32)
+            return t, allke, allie
+    return None, None, None
+
+
 # --- The extraction itself ---
 _roi = _resolve_roi()
 if _roi is None:
@@ -1403,6 +1427,17 @@ try:
         _vprint("  history: %d samples, RF1/RF2 stored" % len(_h_t))
     else:
         _vprint("  no RP history found.")
+
+    _he_t, _allke, _allie = _extract_history_energy(_step)
+    if _he_t is not None:
+        if "history__time" not in _npz_payload:
+            _npz_payload["history__time"] = _he_t
+        _npz_payload["history__ALLKE"] = _allke
+        _npz_payload["history__ALLIE"] = _allie
+        _history_vars = _history_vars + ["ALLKE", "ALLIE"]
+        _vprint("  history: %d samples, ALLKE/ALLIE stored" % len(_he_t))
+    else:
+        _vprint("  no energy history found.")
 
     # Metadata
     from datetime import datetime as _datetime
