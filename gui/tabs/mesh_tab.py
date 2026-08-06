@@ -122,7 +122,35 @@ class MeshTab(QWidget):
         note.setStyleSheet("color: #888; font-style: italic;")
         lay.addWidget(note)
 
-        for w in (self.f_es, self.f_disc):
+        # ---- Tool mesh (nose seed + bias seeding) --------------------------
+        lay.addWidget(_section_header("Tool mesh"))
+
+        self.f_tool_es = NumField("min_elem_size (nose)",
+                                  self.cfg.tool_elem_size, "mm", minimum=1e-9)
+        self.f_tool_es.setToolTip(
+            "Finest tool seed: the nose, and the fine end of the rake/clearance\n"
+            "bias. The tool is a rigid body, so it does NOT constrain the\n"
+            "mechanical stable increment — but its temperature dofs stay active,\n"
+            "so this size drives the tool's CONDUCTION limit, which goes as L^2\n"
+            "(halving it divides the tool's stable dt by 4)."
+        )
+        lay.addWidget(self.f_tool_es)
+
+        self.f_inter = NumField("inter_elem_size (face end)",
+                                self.cfg.inter_elem_size, "mm", minimum=1e-9)
+        self.f_inter.setToolTip(
+            "Coarse end of the rake + clearance face bias, AND fine end of the\n"
+            "border bias (shared junction -> continuous size there).")
+        lay.addWidget(self.f_inter)
+
+        self.f_max = NumField("max_elem_size (border end)",
+                              self.cfg.max_elem_size, "mm", minimum=1e-9)
+        self.f_max.setToolTip(
+            "Coarsest tool seed: the outer end of the two border edges.")
+        lay.addWidget(self.f_max)
+
+        for w in (self.f_es, self.f_disc, self.f_tool_es,
+                  self.f_inter, self.f_max):
             w.valueChanged.connect(self._on_change)
         return g
 
@@ -134,7 +162,9 @@ class MeshTab(QWidget):
         self.lbl_eff_es   = QLabel("-")
         self.lbl_nel      = QLabel("-")
         self.lbl_dt       = QLabel("-")
-        for lbl in (self.lbl_eff_dims, self.lbl_eff_es, self.lbl_nel, self.lbl_dt):
+        self.lbl_dt_tool  = QLabel("-")
+        for lbl in (self.lbl_eff_dims, self.lbl_eff_es, self.lbl_nel,
+                    self.lbl_dt, self.lbl_dt_tool):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         grid.addWidget(QLabel("Effective (h_wp, h_void, l_wp, l_void):"), 0, 0)
@@ -143,8 +173,10 @@ class MeshTab(QWidget):
         grid.addWidget(self.lbl_eff_es,                1, 1)
         grid.addWidget(QLabel("Eulerian element count (~):"), 2, 0)
         grid.addWidget(self.lbl_nel,                   2, 1)
-        grid.addWidget(QLabel("Stable dt estimate:"),  3, 0)
+        grid.addWidget(QLabel("Stable dt estimate (Eulerian, mechanical):"), 3, 0)
         grid.addWidget(self.lbl_dt,                    3, 1)
+        grid.addWidget(QLabel("Tool conduction dt estimate:"), 4, 0)
+        grid.addWidget(self.lbl_dt_tool,               4, 1)
         grid.setColumnStretch(1, 1)
         return g
 
@@ -159,6 +191,9 @@ class MeshTab(QWidget):
     def _pull_from_widgets(self):
         self.cfg.elem_size                 = self.f_es.value()
         self.cfg.euler_geometry.discretize = self.f_disc.value()
+        self.cfg.tool_elem_size            = self.f_tool_es.value()
+        self.cfg.inter_elem_size           = self.f_inter.value()
+        self.cfg.max_elem_size             = self.f_max.value()
 
     def _refresh(self):
         # Preview always shows the mesh on this tab.
@@ -186,6 +221,18 @@ class MeshTab(QWidget):
         else:
             self.lbl_dt.setText("-  (need E, rho, elem_size > 0)")
 
+        # Tool conduction limit: the tool is rigid (no mechanical contribution)
+        # but its temperature dofs stay active, so this can govern the global
+        # increment. It is NOT relaxed by mass scaling (rho*Cp invariant).
+        dt_t = self.cfg.tool_thermal_dt_estimate()
+        if dt_t > 0:
+            txt = "%.3e s  (from nose seed; real mesh is usually finer)" % dt_t
+            if dt > 0 and dt_t < dt:
+                txt += "  — GOVERNS"
+            self.lbl_dt_tool.setText(txt)
+        else:
+            self.lbl_dt_tool.setText("-  (need tool k, rho, Cp, seed > 0)")
+
     # =====================================================================
     # External hooks
     # =====================================================================
@@ -199,4 +246,7 @@ class MeshTab(QWidget):
         """Push cfg values into the widgets (used after Open / New)."""
         self.f_es.set_value(self.cfg.elem_size)
         self.f_disc.set_value(self.cfg.euler_geometry.discretize)
+        self.f_tool_es.set_value(self.cfg.tool_elem_size)
+        self.f_inter.set_value(self.cfg.inter_elem_size)
+        self.f_max.set_value(self.cfg.max_elem_size)
         self._refresh()

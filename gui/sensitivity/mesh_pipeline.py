@@ -139,11 +139,13 @@ def run_mesh_domain_pipeline(
         ms_factor = ms_result.identified
         emit("ms_done", identified=ms_factor,
              guard=ms_result.guard_at_identified,
-             converged=ms_result.velocity_converged)
-        # hold the identified factor for every later step
+             converged=ms_result.velocity_converged,
+             limited_by=ms_result.limited_by)
+        # hold the identified factor for every later step (workpiece AND tool)
         base_cfg = _apply(base_cfg)
         base_cfg.step.mass_scaling_enabled = True
         base_cfg.step.mass_scaling_factor_eulerian = float(ms_factor)
+        base_cfg.step.mass_scaling_factor_tool = float(ms_factor)
 
     # -- Step 1: workpiece element size (optional) ---------------------------
     wp = float(base_cfg.elem_size)

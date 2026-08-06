@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 import ast
+import math
 from decimal import Decimal, getcontext
 
 from abaqus import *
@@ -61,19 +62,131 @@ def discretize(dim, element_size):
         )
     return float(n * es)
 
+
+def _resolve_tool_translation(h_tool, l_tool, r_tool, rake_deg, clear_deg,
+                              x0_tool, y0_tool, y0_wp):
+    """Compute the world-space (dx, dy) translation of the tool sketch's
+    local frame (BL = (0,0), the theoretical zero-radius corner) so that:
+      1. the fillet's DEPTH reference (its horizontal-tangent / lowest point,
+         when that direction of tangency is exposed by the corner; otherwise
+         the deeper of its two visible-arc endpoints) sits at y = y0_tool;
+      2. the LEADING-EDGE reference — the point of the tool that material
+         first touches sliding in from -x — sits at x = x0_tool. This is the
+         fillet's vertical-tangent (leftmost) point ONLY WHEN (a) that
+         direction of tangency is exposed by the corner AND (b) that point,
+         once positioned per (1), is not floating above the workpiece
+         surface (requires r_tool <= y0_wp - y0_tool, i.e. r_tool no larger
+         than the uncut chip thickness). Otherwise constraint 2 falls back
+         to wherever the tool's outer boundary (fillet arc or rake face)
+         crosses y = y0_wp.
+
+    KEPT IN SYNC MANUALLY with gui.core.tool_geometry_calc.
+    resolve_tool_translation — this script runs standalone under Abaqus
+    Python 2.7 and cannot import the GUI package. Any change to the geometry
+    convention must be mirrored in both places.
+
+    Returns (dx, dy, engages, reason). If engages is False, dx is None and
+    reason explains why (the tool does not reach the workpiece surface)."""
+    rake = math.radians(rake_deg)
+    clear = math.radians(clear_deg)
+    det = 1.0 - math.tan(rake) * math.tan(clear)
+    if det <= 1e-6:
+        raise ValueError(
+            "Invalid tool geometry: rake={:.2f} deg and clear={:.2f} deg "
+            "give tan(rake)*tan(clear) >= 1 -- the rake and clearance faces "
+            "cannot close the tool outline.".format(rake_deg, clear_deg))
+    h = (h_tool + math.tan(clear) * l_tool) / det
+    l = (math.tan(rake) * h_tool + l_tool) / det
+
+    BLx, BLy = 0.0, 0.0
+    TLx, TLy = BLx + h * math.tan(rake), BLy + h
+    BRx, BRy = BLx + l, BLy + l * math.tan(clear)
+
+    ur_x, ur_y = TLx - BLx, TLy - BLy
+    ur_n = math.hypot(ur_x, ur_y); ur_x /= ur_n; ur_y /= ur_n
+    ub_x, ub_y = BRx - BLx, BRy - BLy
+    ub_n = math.hypot(ub_x, ub_y); ub_x /= ub_n; ub_y /= ub_n
+
+    cos_a = max(-1.0, min(1.0, ur_x * ub_x + ur_y * ub_y))
+    alpha = math.acos(cos_a)
+    t = r_tool / math.tan(alpha / 2.0) if r_tool > 0 else 0.0
+    Prx, Pry = BLx + t * ur_x, BLy + t * ur_y   # P_on_rake (local)
+    Pbx, Pby = BLx + t * ub_x, BLy + t * ub_y   # P_on_bot  (local)
+
+    def _in_arc(angle, a_lo, a_hi):
+        while angle < a_lo - 1e-9:
+            angle += 2.0 * math.pi
+        while angle > a_hi + 1e-9:
+            angle -= 2.0 * math.pi
+        return (a_lo - 1e-9) <= angle <= (a_hi + 1e-9)
+
+    if r_tool > 0:
+        bis_x, bis_y = ur_x + ub_x, ur_y + ub_y
+        bis_n = math.hypot(bis_x, bis_y); bis_x /= bis_n; bis_y /= bis_n
+        Cx = BLx + (r_tool / math.sin(alpha / 2.0)) * bis_x
+        Cy = BLy + (r_tool / math.sin(alpha / 2.0)) * bis_y
+
+        a_bot = math.atan2(Pby - Cy, Pbx - Cx)
+        a_rake = math.atan2(Pry - Cy, Prx - Cx)
+        delta = a_rake - a_bot
+        while delta <= -math.pi:
+            delta += 2.0 * math.pi
+        while delta > math.pi:
+            delta -= 2.0 * math.pi
+        a_lo, a_hi = (a_bot, a_bot + delta) if a_bot <= a_bot + delta \
+            else (a_bot + delta, a_bot)
+
+        down_visible = _in_arc(-math.pi / 2.0, a_lo, a_hi)
+        left_visible = _in_arc(math.pi, a_lo, a_hi)
+
+        if down_visible:
+            bottom_local_y = Cy - r_tool
+        else:
+            bottom_local_y = min(Pby, Pry)
+    else:
+        Cx = Cy = 0.0
+        left_visible = down_visible = False
+        bottom_local_y = BLy
+
+    dy = y0_tool - bottom_local_y
+    y_local = y0_wp - dy
+
+    if y_local <= bottom_local_y - 1e-12:
+        return None, dy, False, ("the tool's deepest point does not reach "
+                                 "the workpiece surface: no cutting "
+                                 "engagement")
+
+    reachable = r_tool <= (y0_wp - y0_tool) + 1e-12
+    if r_tool > 0 and left_visible and reachable:
+        x_local = Cx - r_tool
+        source = "fillet-tangent-x"
+    elif r_tool > 0 and (bottom_local_y - 1e-9) <= y_local <= (Pry + 1e-9):
+        dyc = y_local - Cy
+        disc = r_tool * r_tool - dyc * dyc
+        if disc < 0:
+            return None, dy, False, "y0(wp) not reached by the fillet arc"
+        x_local = Cx - math.sqrt(disc)
+        source = "fillet"
+    else:
+        if y_local > TLy + 1e-9:
+            return None, dy, False, ("y0(wp) is above the tool's rake face "
+                                     "(top TL) — geometry out of range")
+        x_local = y_local * math.tan(rake)
+        source = "rake face"
+
+    dx = x0_tool - x_local
+    return dx, dy, True, source
+
+
 # =============================================================================
 # %% PARAMETERS EXTRACTION
 # =============================================================================
 elem_size = float(cfg_get(MODEL_CFG, "mesh.elem_size", 0.01))
 
 cutting_speed = float(cfg_get(MODEL_CFG, "bcs.cutting_speed", 1000.0))
-# `sim_time` and `n_frames` are now owned by the Step tab. They are
-# mirrored into `process` for backwards compatibility, but the preferred
-# read path is `step`. Try step first, fall back to process.
-sim_time      = float(cfg_get(MODEL_CFG, "step.sim_time",
-                              cfg_get(MODEL_CFG, "step.sim_time",  0.0001)))
-n_frames      = int(  cfg_get(MODEL_CFG, "step.n_frames",
-                              cfg_get(MODEL_CFG, "step.n_frames",  1)))
+# `sim_time` and `n_frames` are owned by the Step tab.
+sim_time      = float(cfg_get(MODEL_CFG, "step.sim_time", 0.0001))
+n_frames      = int(  cfg_get(MODEL_CFG, "step.n_frames", 1))
 
 # -----------------------------------------------------------------------------
 # Output selection (Step tab > Field output / History output)
@@ -134,17 +247,13 @@ if not ms_enabled:
     ms_eul  = 1.0
     ms_tool = 1.0
 
-# Time scaling was removed from the GUI. Keep kt = 1.0 (no effect) so any
-# legacy profile that still carries the flag has no influence on Cp.
-kt = 1.0
-
 h_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.h_tool",      0.3))
 l_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.l_tool",      0.5))
 r_tool      = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.r_tool",      0.01))
 rake_angle  = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.rake_angle",  40.0))
 clear_angle = float(cfg_get(MODEL_CFG, "geometry.tool.geometry.clear_angle", 10.0))
-tool_tx     = float(cfg_get(MODEL_CFG, "geometry.tool.position.x0", 0.0))
-tool_ty     = float(cfg_get(MODEL_CFG, "geometry.tool.position.y0", -0.05))
+tool_x0     = float(cfg_get(MODEL_CFG, "geometry.tool.position.x0", 0.0))
+tool_y0     = float(cfg_get(MODEL_CFG, "geometry.tool.position.y0", -0.05))
 
 egeom  = cfg_get(MODEL_CFG, "geometry.euler.geometry", {})
 h_wp   = float(egeom.get("h_wp",   0.3))
@@ -161,6 +270,16 @@ mesh_tx = float(cfg_get(MODEL_CFG, "geometry.euler.position.x0",            0.0)
 mesh_ty = float(cfg_get(MODEL_CFG, "geometry.euler.position.y0",            0.0))
 wp_tx   = float(cfg_get(MODEL_CFG, "geometry.euler.workpiece_position.x0",  0.0))
 wp_ty   = float(cfg_get(MODEL_CFG, "geometry.euler.workpiece_position.y0",  0.0))
+
+tool_tx, tool_ty, _tool_engages, _tool_reason = _resolve_tool_translation(
+    h_tool, l_tool, r_tool, rake_angle, clear_angle, tool_x0, tool_y0, wp_ty)
+if not _tool_engages:
+    raise ValueError(
+        "Invalid tool/workpiece configuration: {} (tool_x0={}, tool_y0={}, "
+        "workpiece y0={}). The tool does not cut — check the tool position, "
+        "depth, and angles before running.".format(
+            _tool_reason, tool_x0, tool_y0, wp_ty))
+
 
 margin = elem_size / 2
 xmin = float(cfg_get(MODEL_CFG, "geometry.bbox.xmin", -0.5))
@@ -227,35 +346,9 @@ for _f in EUL_FACES:
         "outflow":  str( bcs.get("eulerian_outflow_"  + _f, "FREE")),
     }
 
-# -----------------------------------------------------------------------------
-# Element-type configurations (per body)
-# -----------------------------------------------------------------------------
-def _elem_cfg(path):
-    """Return the dict for a body's element config, with sensible defaults."""
-    d = cfg_get(MODEL_CFG, path, {}) or {}
-    return {
-        # common
-        "thermally_coupled":     bool( d.get("thermally_coupled", True)),
-        "second_order_accuracy": bool( d.get("second_order_accuracy", False)),
-        "hourglass_control":     str(  d.get("hourglass_control", "default")),   # default | relax_stiffness | stiffness | viscous | combined
-        "disp_scale":            float(d.get("displacement_hourglass_scale_factor",  1.0)),
-        "linbv_scale":           float(d.get("linear_bulk_viscosity_scale_factor",   1.0)),
-        "qbv_scale":             float(d.get("quadratic_bulk_viscosity_scale_factor", 1.0)),
-        "svw_scale":             float(d.get("stiffness_viscous_weight_factor",       0.5)),
-        # lagrangian only
-        "reduced_integration":   bool( d.get("reduced_integration",   True)),
-        "kinematic_split":       str(  d.get("kinematic_split",       "average_strain")),  # average_strain | orthogonal | centroid
-        "distortion_control":    str(  d.get("distortion_control_mode", "use_default")),    # use_default | yes | no
-        "length_ratio":          float(d.get("length_ratio", 0.1)),
-        "element_deletion":      str(  d.get("element_deletion_mode", "use_default")),       # use_default | yes | no
-        "max_deg_mode":          str(  d.get("max_degradation_mode", "use_default")),        # use_default | specify
-        "max_deg_value":         float(d.get("max_degradation_value", 0.0)),
-        "lkc_mode":              str(  d.get("linear_kinematic_conversion_mode", "use_default")),
-        "lkc_value":             float(d.get("linear_kinematic_conversion_value", 0.0)),
-    }
-
-eul_cfg  = _elem_cfg("mesh.euler_element")
-tool_cfg = _elem_cfg("mesh.tool_element")
+# Element types are FROZEN (EC3D8RT for the workpiece, C3D8RT for the tool) and
+# no longer read from the config — see the ElemType() calls in the meshing
+# section. The per-body element config and its mapping tables were removed.
 
 job_name = cfg_get(RUN_CFG, "job_name", "default_name")
 cpus     = int(cfg_get(RUN_CFG, "cpus",    4))
@@ -304,92 +397,25 @@ _BC_DEFINITION_MAP = {
     "outflow": OUTFLOW,
     "both":    BOTH,
 }
-# Hourglass-control formulations
-_HOURGLASS_MAP = {
-    "default":         DEFAULT,
-    "relax_stiffness": RELAX_STIFFNESS,
-    "stiffness":       STIFFNESS,
-    "viscous":         VISCOUS,
-    "combined":        COMBINED,
-}
-# Lagrangian kinematic splits (C3D8* solids)
-_KINEMATIC_SPLIT_MAP = {
-    "average_strain": AVERAGE_STRAIN,
-    "orthogonal":     ORTHOGONAL,
-    "centroid":       CENTROID,
-}
-# Three-state radio (Use default / Yes / No)
-_USE_DEFAULT_YES_NO_MAP = {
-    "use_default": DEFAULT,
-    "yes":         ON,
-    "no":          OFF,
-}
 
+def _resolve_mapping(mapping, value, parameter_name):
+    """Translate a GUI string value into its Abaqus constant, STRICTLY.
 
-def _build_elem_type_kwargs(cfg, family):
-    """Build the kwargs dict for ElemType() based on a GUI element config.
-
-    `family` is "eulerian" or "lagrangian". Returns a kwargs dict ready to
-    be splatted into ElemType(...). The elemCode is set here too so the
-    caller doesn't need to recompute it.
-
-    Notes:
-      - Eulerian family always uses EC3D8R or EC3D8RT (reduced integration
-        is implicit in the Eulerian element catalog).
-      - Lagrangian family uses C3D8T (full integration) or C3D8RT (reduced),
-        ALWAYS thermally coupled (we never expose C3D8 / C3D8R).
-    """
-    if family == "eulerian":
-        # EC3D8R / EC3D8RT depending on thermal toggle
-        elem_code = EC3D8RT if cfg["thermally_coupled"] else EC3D8R
-    else:
-        # Lagrangian explicit family — always thermal
-        elem_code = C3D8RT if cfg["reduced_integration"] else C3D8T
-
-    kwargs = {
-        "elemCode":           elem_code,
-        "elemLibrary":        EXPLICIT,
-        "secondOrderAccuracy": ON if cfg["second_order_accuracy"] else OFF,
-        "hourglassControl":   _HOURGLASS_MAP.get(cfg["hourglass_control"], DEFAULT),
-        # Scaling factors. Abaqus accepts these unconditionally; the active
-        # ones depend on the hourglass formulation (the inactive ones are
-        # ignored by the solver). Passing them always keeps the code simple.
-        "displacementHourglassScaleFactor": cfg["disp_scale"],
-        "linearBulkViscosityScaleFactor":   cfg["linbv_scale"],
-        "quadBulkViscosityScaleFactor":     cfg["qbv_scale"],
-        "stiffnessViscousWeightFactor":     cfg["svw_scale"],
-    }
-
-    if family == "lagrangian" and cfg["reduced_integration"]:
-        # Kinematic split is only meaningful for reduced-integration elements.
-        kwargs["kinematicSplit"] = _KINEMATIC_SPLIT_MAP.get(
-            cfg["kinematic_split"], AVERAGE_STRAIN)
-
-    if family == "lagrangian":
-        # Distortion control (use_default / yes / no)
-        kwargs["distortionControl"] = _USE_DEFAULT_YES_NO_MAP.get(
-            cfg["distortion_control"], DEFAULT)
-        if cfg["distortion_control"] == "yes":
-            kwargs["lengthRatio"] = cfg["length_ratio"]
-        # Element deletion (use_default / yes / no)
-        kwargs["elemDeletion"] = _USE_DEFAULT_YES_NO_MAP.get(
-            cfg["element_deletion"], DEFAULT)
-        # Max degradation
-        if cfg["max_deg_mode"] == "specify":
-            kwargs["maxDegradation"] = cfg["max_deg_value"]
-        # Linear kinematic conversion is exposed in the dialog as
-        # `linearKinematicCtrl` in Abaqus's API in some versions; older
-        # versions don't accept it. Wrap in try/except at call site rather
-        # than here, so the rest of the kwargs apply even on old Abaqus.
-
-    return kwargs
+    A typo in a hand-edited profile (e.g. "penality" instead of "penalty")
+    must NOT be silently replaced by a default and change the physics: it
+    raises here, before the model is built, with the list of valid values.
+    (Replaces the previous `mapping.get(value, DEFAULT)` calls.)"""
+    if value not in mapping:
+        raise ValueError(
+            "%s=%r is not a valid value. Expected one of: %s"
+            % (parameter_name, value, sorted(mapping.keys())))
+    return mapping[value]
 
 
 # =============================================================================
 #%% MODEL CONSTRUCTION
 # =============================================================================
-# Temperature unit: °C. absoluteZero is set to -273.15 so the GUI's °C
-# values map directly to Abaqus magnitudes without conversion.
+# Temperature unit: °C. absoluteZero is set to -273.15
 myModel = mdb.Model(name=job_name, absoluteZero=-273.15)
 
 #%%% Euler part
@@ -430,20 +456,11 @@ toolPart = myModel.Part(name="Tool", dimensionality=THREE_D, type=DEFORMABLE_BOD
 toolPart.BaseSolidExtrude(sketch=tool_sketch, depth=elem_size)
 
 #%%% Materials
-# Mass scaling for CEL is applied by scaling the Eulerian material density
-# (Abaqus' native mass scaling does not apply to Eulerian EC3D8R elements).
-# rho_eff = factor * rho ; Cp_eff = Cp / factor, so the volumetric heat
-# capacity rho*Cp is preserved and the temperature stays physical. This
-# matches the manual reference workflow, where BOTH rho and Cp are scaled
-# by the same factor by hand.
-# IMPORTANT: pass PHYSICAL rho/Cp in the config and let the factor below do
-# the scaling ONCE. Do not pre-scale by hand AND set the factor, or the
-# material would be scaled twice (rho*f^2) and the solve would diverge.
 EulerMat = myModel.Material(name='Euler')
 EulerMat.Density(table=((float(emat["rho"]) * ms_eul,),))
 EulerMat.Elastic(table=((float(emat["E"]), float(emat["nu"])),))
 EulerMat.Conductivity(table=((float(emat["k"]),),))
-EulerMat.SpecificHeat(table=((float(emat["Cp"]) / (ms_eul * kt),),), law=CONSTANTPRESSURE)
+EulerMat.SpecificHeat(table=((float(emat["Cp"]) / ms_eul,),), law=CONSTANTPRESSURE)
 EulerMat.Expansion(table=((float(emat["alpha"]),),))
 EulerMat.InelasticHeatFraction(fraction=float(emat["beta"]))
 
@@ -466,7 +483,7 @@ ToolMat = myModel.Material(name='Tool')
 ToolMat.Density(table=((float(tmat["rho"]) * ms_tool,),))
 ToolMat.Elastic(table=((float(tmat["E"]), float(tmat["nu"])),))
 ToolMat.Conductivity(table=((float(tmat["k"]),),))
-ToolMat.SpecificHeat(table=((float(tmat["Cp"]) / (ms_tool * kt),),))
+ToolMat.SpecificHeat(table=((float(tmat["Cp"]) / ms_tool,),))
 ToolMat.Expansion(table=((float(tmat["alpha"]),),))
 
 #%%% Sections
@@ -476,103 +493,95 @@ eulPart.SectionAssignment(region=Region(cells=eulPart.cells), sectionName='Euler
 toolPart.SectionAssignment(region=Region(cells=toolPart.cells), sectionName='Tool')
 
 #%%% Assembly
-assembly = myModel.rootAssembly
-eul_instance  = assembly.Instance(name='Euler',     part=eulPart,  dependent=OFF)
-wp_instance   = assembly.Instance(name='Workpiece', part=wpPart,   dependent=OFF)
-tool_instance = assembly.Instance(name='Tool',      part=toolPart, dependent=OFF)
+myAssembly = myModel.rootAssembly
+eul_instance  = myAssembly.Instance(name='Euler',     part=eulPart,  dependent=OFF)
+wp_instance   = myAssembly.Instance(name='Workpiece', part=wpPart,   dependent=OFF)
+tool_instance = myAssembly.Instance(name='Tool',      part=toolPart, dependent=OFF)
 
-assembly.translate(instanceList=('Tool',),      vector=(tool_tx, tool_ty, 0.0))
-assembly.translate(instanceList=('Workpiece',), vector=(wp_tx,   wp_ty,   0.0))
-assembly.translate(instanceList=('Euler',),     vector=(mesh_tx, mesh_ty, 0.0))
+myAssembly.translate(instanceList=('Tool',),      vector=(tool_tx, tool_ty, 0.0))
+myAssembly.translate(instanceList=('Workpiece',), vector=(wp_tx,   wp_ty,   0.0))
+myAssembly.translate(instanceList=('Euler',),     vector=(mesh_tx, mesh_ty, 0.0))
 
-# wp_instance.translateTo(movableList=(wp_instance.faces[2], ),
-#                         fixedList=(tool_instance.faces[6], ),
-#                         direction=(1.0, 0.0, 0.0),
-#                         clearance=0.0)
-    
-assembly.excludeFromSimulation(instances=(wp_instance,), exclude=True)
+wp_instance.translateTo(movableList=(wp_instance.faces[2], ),
+                        fixedList=(tool_instance.faces[6], ),
+                        direction=(1.0, 0.0, 0.0),
+                        clearance=0.0)
+myAssembly.excludeFromSimulation(instances=(wp_instance,), exclude=True)
 
 #%%% Mesh
-assembly.seedPartInstance(regions=(eul_instance,), size=elem_size)
-# Eulerian element type, fully driven by the GUI's Mesh > Element Type tab.
-# Falls back gracefully if a particular kwarg isn't accepted by the running
-# Abaqus version (e.g. older versions may not honour every scaling factor
-# name) — we retry with a reduced kwargs dict in that case.
-_eul_elem_kwargs = _build_elem_type_kwargs(eul_cfg, family="eulerian")
-try:
-    eul_elemType = ElemType(**_eul_elem_kwargs)
-except TypeError:
-    # Strip any kwarg the running Abaqus doesn't recognise.
-    eul_elemType = ElemType(
-        elemCode=_eul_elem_kwargs["elemCode"], elemLibrary=EXPLICIT)
-eul_set = assembly.Set(name='Euler', cells=eul_instance.cells)
-assembly.setElementType(regions=eul_set, elemTypes=(eul_elemType, eul_elemType, eul_elemType))
-assembly.setMeshControls(regions=eul_instance.cells, elemShape=HEX, technique=STRUCTURED)
+myAssembly.seedPartInstance(regions=(eul_instance,), size=elem_size)
+
+eul_elemType = ElemType(elemCode=EC3D8RT, elemLibrary=EXPLICIT,
+    secondOrderAccuracy=ON, hourglassControl=DEFAULT)
+
+eul_set = myAssembly.Set(name='Euler', cells=eul_instance.cells)
+myAssembly.setElementType(regions=eul_set, elemTypes=(eul_elemType, eul_elemType, eul_elemType))
+myAssembly.setMeshControls(regions=eul_instance.cells, elemShape=HEX, technique=STRUCTURED)
 
 nose_mesh_edges = [13, 14]
-# Tool-nose seed size, now configurable (was hard-coded 0.001) so the
-# mesh-convergence study can drive it; falls back to 0.001 for old configs.
 tool_elem_size = float(cfg_get(MODEL_CFG, "mesh.tool_elem_size", 0.005))
-assembly.seedEdgeBySize(edges=[tool_instance.edges[i] for i in nose_mesh_edges],
+myAssembly.seedEdgeBySize(edges=[tool_instance.edges[i] for i in nose_mesh_edges],
                         size=tool_elem_size)
 width_mesh_edge = [1]
-assembly.seedEdgeByNumber(edges=[tool_instance.edges[i] for i in width_mesh_edge], number=1)
+myAssembly.seedEdgeByNumber(edges=[tool_instance.edges[i] for i in width_mesh_edge], number=1)
 
-assembly.seedEdgeByBias(
+inter_elem_size = float(cfg_get(MODEL_CFG, "mesh.inter_elem_size", 0.02))
+max_elem_size   = float(cfg_get(MODEL_CFG, "mesh.max_elem_size", 0.05))
+
+# Border edges (bias 1): from inter_elem_size (junction) out to max_elem_size.
+myAssembly.seedEdgeByBias(
     biasMethod=SINGLE,
     end1Edges=[tool_instance.edges[4],tool_instance.edges[6]],
     end2Edges=[tool_instance.edges[7],tool_instance.edges[9]],
-    minSize=0.02,
-    maxSize=0.05)
+    minSize=inter_elem_size,
+    maxSize=max_elem_size)
 
-assembly.seedEdgeByBias(
+# Rake + clearance faces (bias 2): from the nose seed out to inter_elem_size.
+myAssembly.seedEdgeByBias(
     biasMethod=SINGLE,
     end1Edges=[tool_instance.edges[0],tool_instance.edges[2]],
     end2Edges=[tool_instance.edges[10],tool_instance.edges[12]],
-    minSize=0.005,
-    maxSize=0.02)
+    minSize=tool_elem_size,
+    maxSize=inter_elem_size)
 
-tool_elem_kwargs = _build_elem_type_kwargs(tool_cfg, family="lagrangian")
-try:
-    tool_elemType = ElemType(**tool_elem_kwargs)
-except TypeError:
-    tool_elemType = ElemType(
-        elemCode=tool_elem_kwargs["elemCode"], elemLibrary=EXPLICIT)
-tool_set = assembly.Set(name='Tool', cells=tool_instance.cells)
-assembly.setElementType(regions=tool_set, elemTypes=(tool_elemType,))
-assembly.setMeshControls(regions=tool_instance.cells, elemShape=HEX, technique=SWEEP)
+tool_elemType = ElemType(elemCode=C3D8RT, elemLibrary=EXPLICIT,
+    secondOrderAccuracy=ON, hourglassControl=DEFAULT)
 
-assembly.generateMesh(regions=(eul_instance, tool_instance))
+tool_set = myAssembly.Set(name='Tool', cells=tool_instance.cells)
+myAssembly.setElementType(regions=tool_set, elemTypes=(tool_elemType, tool_elemType, tool_elemType))
+myAssembly.setMeshControls(regions=tool_instance.cells, elemShape=HEX, technique=SWEEP)
+
+myAssembly.generateMesh(regions=(eul_instance, tool_instance))
 
 #%%% Sets + fields
-ref_point  = assembly.ReferencePoint(point=tool_instance.vertices[4])
-RP         = assembly.Set(name='RP', referencePoints=(assembly.referencePoints[ref_point.id],))
-tool_nodes = assembly.Set(name='tool_nodes', nodes=tool_instance.nodes)
-tool_elem  = assembly.Set(name='tool_elem',  elements=tool_instance.elements)
+ref_point  = myAssembly.ReferencePoint(point=tool_instance.vertices[4])
+RP         = myAssembly.Set(name='RP', referencePoints=(myAssembly.referencePoints[ref_point.id],))
+tool_nodes = myAssembly.Set(name='tool_nodes', nodes=tool_instance.nodes)
+tool_elem  = myAssembly.Set(name='tool_elem',  elements=tool_instance.elements)
 
-assembly.DiscreteFieldByVolumeFraction(name='VolFraction', description='',
+myAssembly.DiscreteFieldByVolumeFraction(name='VolFraction', description='',
                                        eulerianInstance=eul_instance, referenceInstance=wp_instance)
 
-eul_nodes = assembly.Set(name='eul_nodes', nodes=eul_instance.nodes)
+eul_nodes = myAssembly.Set(name='eul_nodes', nodes=eul_instance.nodes)
 
 roi_nodes = eul_instance.nodes.getByBoundingBox(
     xMin=xmin - margin, xMax=xmax + margin,
     yMin=ymin - margin, yMax=ymax + margin,
     zMin=zmin - margin, zMax=zmax + margin
 )
-assembly.Set(name='ROI', nodes=roi_nodes)
-
-# ZOI (zone of interest) sets used by extraction: one element set and one
-# node set covering the user's ROI on the z = 0 face. They are also created
+# ROI (region of interest) sets used by extraction: one node set and one
+# element set covering the user's ROI on the z = 0 face. They are created
 # here so they appear in the model/.inp; extraction re-derives the labels
 # from the ODB and stops with an error if either is empty.
+# (There is a single region of interest; 'ROI_node' and 'ROI_elem' are its
+# two declinations, not two different zones.)
 roi_elems = eul_instance.elements.getByBoundingBox(
     xMin=xmin - margin, xMax=xmax + margin,
     yMin=ymin - margin, yMax=ymax + margin,
     zMin=zmin - margin, zMax=zmax + margin
 )
-assembly.Set(name='ZOI_nodes', nodes=roi_nodes)
-assembly.Set(name='ZOI_elems', elements=roi_elems)
+myAssembly.Set(name='ROI_node', nodes=roi_nodes)
+myAssembly.Set(name='ROI_elem', elements=roi_elems)
 
 #%%% Contact
 # All knobs (tangential formulation, friction coefficient, slip tolerance,
@@ -581,7 +590,7 @@ assembly.Set(name='ZOI_elems', elements=roi_elems)
 IntProp = myModel.ContactProperty(name='IntProp')
 
 # Tangential behavior
-_tang_kind = _TANGENTIAL_MAP.get(inter_tangential, PENALTY)
+_tang_kind = _resolve_mapping(_TANGENTIAL_MAP, inter_tangential, "tangential_formulation")
 if _tang_kind == PENALTY:
     IntProp.TangentialBehavior(
         formulation=PENALTY,
@@ -597,7 +606,7 @@ else:
 
 # Normal behavior (pressure-overclosure law)
 IntProp.NormalBehavior(
-    pressureOverclosure=_PRESSURE_OVERCLOSURE_MAP.get(inter_pressure, HARD),
+    pressureOverclosure=_resolve_mapping(_PRESSURE_OVERCLOSURE_MAP, inter_pressure, "pressure_overclosure"),
 )
 
 # Optional heat-generation interaction property
@@ -687,15 +696,8 @@ eul_face_surfaces = {}  # face_key -> Surface
 for _f in EUL_FACES:
     _faces_obj = eul_instance.faces.getByBoundingBox(**_eul_face_bbox[_f])
     if len(_faces_obj) > 0:
-        eul_face_surfaces[_f] = assembly.Surface(
+        eul_face_surfaces[_f] = myAssembly.Surface(
             name='eul_' + _f, side1Faces=_faces_obj)
-    # ============================================================ #
-    # !!! VERIFY ON FIRST RUN !!!                                   #
-    # If `eul_face_surfaces[_f]` is missing or contains the wrong   #
-    # face for one of left/right/top/bottom, check the bbox above.  #
-    # The tolerance `_eps` may need adjusting, or Abaqus may have   #
-    # split/merged the face during meshing.                         #
-    # ============================================================ #
 
 #%%%% Eulerian inflow / outflow BCs
 # One BC per enabled face. The `definition` argument controls which fluxes
@@ -710,9 +712,9 @@ for _f in EUL_FACES:
         name='eulbc_' + _f,
         createStepName='Cut',
         region=eul_face_surfaces[_f],
-        definition=_BC_DEFINITION_MAP.get(_c["mode"], BOTH),
-        inflowType=_INFLOW_MAP.get(_c["inflow"],   FREE),
-        outflowType=_OUTFLOW_MAP.get(_c["outflow"], FREE),
+        definition=_resolve_mapping(_BC_DEFINITION_MAP, _c["mode"], "eulerian_boundary.mode"),
+        inflowType=_resolve_mapping(_INFLOW_MAP, _c["inflow"], "inflow"),
+        outflowType=_resolve_mapping(_OUTFLOW_MAP, _c["outflow"], "outflow"),
     )
 
 #%%%% Cutting-velocity BC
@@ -744,8 +746,14 @@ for _fid in bcs_cutting_faces:
     else:
         _vcut_face_array = _vcut_face_array + _faces_obj
 
+myModel.SmoothStepAmplitude(
+    name='Smooth-Step', 
+    timeSpan=STEP, 
+    data=((0.0, 0.0), (6e-06, 1.0))
+    )
+
 if _vcut_face_array is not None and len(_vcut_face_array) > 0:
-    work_sides = assembly.Set(
+    work_sides = myAssembly.Set(
         name='work_sides',
         faces=_vcut_face_array,
     )
@@ -753,7 +761,7 @@ if _vcut_face_array is not None and len(_vcut_face_array) > 0:
         name='Cutting_speed', createStepName='Initial',
         region=work_sides, v1=SET,
     )
-    cut_BC.setValuesInStep(stepName='Cut', v1=bcs_cutting_speed)
+    cut_BC.setValuesInStep(stepName='Cut', v1=bcs_cutting_speed, amplitude='Smooth-Step')
 else:
     # No cutting face selected — create no velocity BC. The user will see
     # this in the .msg log; it's a valid (if unusual) configuration.
@@ -767,15 +775,12 @@ myModel.VelocityBC(name='Plane_strain', createStepName='Initial',
 
 #%%%% Initial Eulerian velocity (predefined field)
 # Independent from the cutting-velocity BC — set by `bcs.initial_velocity`.
-myModel.Velocity(
-    name='Init_speed',
-    region=eul_set, field='',
-    distributionType=MAGNITUDE,
-    velocity1=bcs_initial_velocity,
-)
-
-# myModel.Stress(name='Init_stress', region=eul_set, distributionType=UNIFORM,
-#                sigma11=0.0, sigma22=0.0, sigma33=0.0, sigma12=0.0, sigma13=0.0, sigma23=0.0)
+# myModel.Velocity(
+#     name='Init_speed',
+#     region=eul_set, field='',
+#     distributionType=MAGNITUDE,
+#     velocity1=bcs_initial_velocity,
+# )
 
 rgn = regionToolset.Region(cells=eul_instance.cells)
 myModel.MaterialAssignment(name='Material', instanceList=(eul_instance,),
@@ -829,6 +834,17 @@ print("[STAGE] SOLVE_START")
 sys.stdout.flush()
 myJob.submit(consistencyChecking=OFF)
 myJob.waitForCompletion()
+# waitForCompletion() returns as soon as the solver process ends — success OR
+# failure. Verify the job actually COMPLETED before extracting, so we don't run
+# the extractor on an aborted / errored / partial .odb (which would silently
+# yield truncated or missing results).
+if myJob.status != COMPLETED:
+    print("[STAGE] SOLVE_FAILED")
+    sys.stdout.flush()
+    raise RuntimeError(
+        "Abaqus job '%s' did not complete successfully (status: %s). "
+        "Check the .sta / .msg / .log files. Results extraction skipped."
+        % (job_name, myJob.status))
 print("[STAGE] SOLVE_DONE")
 sys.stdout.flush()
 
@@ -836,7 +852,8 @@ sys.stdout.flush()
 # =============================================================================
 #%% RESULTS EXTRACTION
 # =============================================================================
-# Open the .odb just produced by myJob.submit() and dump a (.json + .npz)
+# Open the .odb just produced by myJob.submit() and dump a (.meta.json +
+# .results.npz)
 # bundle following gui/results/FORMAT.md. By running this step *inside*
 # the same Abaqus python invocation we get two guarantees that the
 # previous standalone extract_odb.py couldn't offer:
@@ -873,7 +890,7 @@ def _bbox_of_array(arr):
 
 def _resolve_roi():
     """Read bbox from MODEL_CFG. Return a dict {xmin,xmax,...} or None
-    if degenerate (the ZOI/ROI is the bbox of the user's region of
+    if degenerate (the ROI is the bbox of the user's region of
     interest, used to crop the extracted fields)."""
     bb = cfg_get(MODEL_CFG, "geometry.bbox", {}) or {}
     try:
@@ -1019,7 +1036,9 @@ def _reduce_identity(vals, comp_labels):
 
 _TENSOR_REDUCERS = {
     "MISES": ("S", _reduce_VM),
-    "S_VM":  ("S", _reduce_VM),   # backward-compatible alias
+    "S_VM":  ("S", _reduce_VM),   # S_VM is the canonical field name used by
+                                   # the results format (see FORMAT.md) —
+                                   # NOT a legacy alias, kept intentionally.
 }
 
 # Native stress invariants (preferred over recombining components).
@@ -1098,7 +1117,9 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly):
         elem_id_to_pos[lbl] = pos
     n_elems = len(kept_elem_ids)
     n_frames = len(step.frames)
-    out = _np.zeros((n_frames, n_elems), dtype=_np.float32)
+    # NaN so cells never written by the ODB (frame missing the variable,
+    # element absent) stay distinguishable from a genuine physical zero.
+    out = _np.full((n_frames, n_elems), _np.nan, dtype=_np.float32)
 
     invariant = None
     if inv_name is not None:
@@ -1178,7 +1199,7 @@ def _extract_displacements(step, inst_name, kept_node_ids, root_assembly):
         node_id_to_pos[lbl] = pos
     n_nodes = len(kept_node_ids)
     n_frames = len(step.frames)
-    out = _np.zeros((n_frames, n_nodes, 3), dtype=_np.float32)
+    out = _np.full((n_frames, n_nodes, 3), _np.nan, dtype=_np.float32)
     for fi in range(n_frames):
         try:
             fo = step.frames[fi].fieldOutputs["U"]
@@ -1223,8 +1244,8 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     elements = _np.asarray(elements)
     n_elem = elements.shape[0]
     n_frames = len(step.frames)
-    v1_out = _np.zeros((n_frames, n_elem), dtype=_np.float32)
-    v2_out = _np.zeros((n_frames, n_elem), dtype=_np.float32)
+    v1_out = _np.full((n_frames, n_elem), _np.nan, dtype=_np.float32)
+    v2_out = _np.full((n_frames, n_elem), _np.nan, dtype=_np.float32)
     for fi in range(n_frames):
         try:
             fo = step.frames[fi].fieldOutputs[key]
@@ -1240,8 +1261,8 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
                 sub = sub.getSubset(position=NODAL)
             except Exception:
                 pass
-        nodal_v1 = _np.zeros(n_nodes, dtype=_np.float32)
-        nodal_v2 = _np.zeros(n_nodes, dtype=_np.float32)
+        nodal_v1 = _np.full(n_nodes, _np.nan, dtype=_np.float32)
+        nodal_v2 = _np.full(n_nodes, _np.nan, dtype=_np.float32)
         for v in sub.values:
             j = label_to_local.get(int(v.nodeLabel))
             if j is not None:
@@ -1322,7 +1343,7 @@ try:
         _elem_type = _inst.elements[0].type
         _kind = "eulerian" if _elem_type.startswith("EC") else "lagrangian"
 
-        # The ROI/ZOI applies ONLY to the Eulerian instance (cutting zone).
+        # The ROI applies ONLY to the Eulerian instance (cutting zone).
         # Lagrangian instances (e.g. the TOOL) are always kept whole.
         _inst_roi = _roi if _kind == "eulerian" else None
         (_nodes_init, _elements, _centroids,
@@ -1338,17 +1359,18 @@ try:
                    _full_bbox[0][2], _full_bbox[1][2]))
         _n_kept_elem = _elements.shape[0]
         _n_kept_node = _nodes_init.shape[0]
-        _vprint("  ZOI after ROI (%s): ZOI_nodes=%d, ZOI_elems=%d"
+        _vprint("  kept in ROI (%s): ROI_node=%d, ROI_elem=%d"
                 % (_kind, _n_kept_node, _n_kept_elem))
 
-        # The ROI defines the ZOI sets on the Eulerian (cutting) instance.
-        # If the ROI selects nothing there, extraction cannot proceed: tell
-        # the user to size a larger ROI and stop with a non-zero exit code.
+        # The ROI defines the ROI_node / ROI_elem sets on the Eulerian
+        # (cutting) instance. If the ROI selects nothing there, extraction
+        # cannot proceed: tell the user to size a larger ROI and stop with a
+        # non-zero exit code.
         if _kind == "eulerian" and (_n_kept_elem == 0 or _n_kept_node == 0):
             _vprint("")
-            _vprint("[ERROR] The ROI selects an empty zone of interest on the "
-                    "Eulerian instance")
-            _vprint("        (ZOI_nodes=%d, ZOI_elems=%d)."
+            _vprint("[ERROR] The ROI selects nothing on the Eulerian "
+                    "instance")
+            _vprint("        (ROI_node=%d, ROI_elem=%d)."
                     % (_n_kept_node, _n_kept_elem))
             _vprint("        Mesh bbox is x[%g,%g] y[%g,%g]; your ROI is "
                     "x[%g,%g] y[%g,%g]."
@@ -1465,8 +1487,8 @@ try:
         },
     }
 
-    _out_npz = job_name + ".results.npz"
-    _out_json = job_name + ".results.json"
+    _out_npz  = job_name + ".results.npz"
+    _out_json = job_name + ".meta.json"
     _vprint("\nWriting %s ..." % _out_npz)
     _np.savez_compressed(_out_npz, **_npz_payload)
     _vprint("Writing %s ..." % _out_json)

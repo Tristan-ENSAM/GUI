@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from gui.core.model_config import ModelConfig
 from gui.core.preferences import Preferences, load_preferences, save_preferences
-from gui.tabs.analysis_tab import AnalysisTab
 from gui.tabs.geometry_tab import GeometryTab
 from gui.tabs.materials_tab import MaterialsTab
 from gui.tabs.interaction_tab import InteractionTab
@@ -82,7 +81,6 @@ class MainWindow(QMainWindow):
         self._dirty: bool = False               # unsaved changes?
 
         # ----- tabs -----
-        self.analysis_tab    = AnalysisTab(self.cfg)
         self.geometry_tab    = GeometryTab(self.cfg)
         self.materials_tab   = MaterialsTab(self.cfg)
         self.interaction_tab = InteractionTab(self.cfg)
@@ -103,7 +101,6 @@ class MainWindow(QMainWindow):
         # Two-level tabs: a top row of theme categories, each holding its
         # own row of sub-tabs (so the window shows several tab rows).
         self.model_tabs = QTabWidget()
-        self.model_tabs.addTab(self.analysis_tab,    "Analysis")
         self.model_tabs.addTab(self.geometry_tab,    "Geometry")
         self.model_tabs.addTab(self.materials_tab,   "Materials")
         self.model_tabs.addTab(self.interaction_tab, "Interaction")
@@ -142,13 +139,10 @@ class MainWindow(QMainWindow):
 
         # ----- signal wiring -----
         # Analysis -> Geometry: preview must refresh when formulation changes
-        self.analysis_tab.analysisChanged.connect(self.geometry_tab.on_analysis_changed)
         # Analysis -> BCs: the Eulerian inflow/outflow group is irrelevant in
         # Lagrangian mode and must hide accordingly.
-        self.analysis_tab.analysisChanged.connect(self.bcs_tab.on_analysis_changed)
         # Analysis -> Mesh: same as Geometry — formulation affects what's
         # drawn (Eulerian box vs workpiece) and the derived-quantities labels.
-        self.analysis_tab.analysisChanged.connect(self.mesh_tab.on_external_change)
 
         # Materials -> Geometry & Mesh: stable_dt_estimate depends on E and ρ
         # of the workpiece material.
@@ -167,7 +161,6 @@ class MainWindow(QMainWindow):
         self.materials_tab.materialsChanged.connect(self.bcs_tab.on_external_change)
 
         # All tabs -> dirty flag: any change marks the profile dirty
-        self.analysis_tab.analysisChanged.connect(self._mark_dirty)
         self.materials_tab.materialsChanged.connect(self._mark_dirty)
         self.interaction_tab.interactionChanged.connect(self._mark_dirty)
         self.bcs_tab.bcsChanged.connect(self._mark_dirty)
@@ -456,7 +449,6 @@ class MainWindow(QMainWindow):
         still hold references to the OLD cfg. We update their `.cfg`
         attribute, then call `apply_from_cfg()` on each so the widgets
         reflect the new values."""
-        self.analysis_tab.cfg    = self.cfg
         self.geometry_tab.cfg    = self.cfg
         self.materials_tab.cfg   = self.cfg
         self.interaction_tab.cfg = self.cfg
@@ -478,13 +470,12 @@ class MainWindow(QMainWindow):
         # Activate the loaded profile's unit system so every tab converts
         # through it (and the displayed values match the saved preference).
         units.set_active_system(self.cfg.units)
-        # AnalysisTab refreshes first because GeometryTab.on_analysis_changed
-        # depends on cfg.analysis being already-applied. The emit in
-        # AnalysisTab.apply_from_cfg will trigger GeometryTab.on_analysis_changed
-        # AND BCsTab.on_analysis_changed, so we don't need to manually refresh
-        # those group visibilities.
-        self.analysis_tab.apply_from_cfg()
+        # The Analysis tab was removed (the build is CEL-only). The
+        # formulation-dependent group visibilities that AnalysisTab used to
+        # trigger are now refreshed explicitly here.
         self.geometry_tab.apply_from_cfg()
+        self.geometry_tab.on_analysis_changed()
+        self.bcs_tab.on_analysis_changed()
         self.materials_tab.apply_from_cfg()
         self.interaction_tab.apply_from_cfg()
         self.bcs_tab.apply_from_cfg()
@@ -526,6 +517,20 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # Crash diagnostics (faulthandler + hooks + Qt/log capture) are armed when
+    # the GUI_DEBUG environment variable is set (run_gui_debug.bat sets it).
+    # This is what makes a native crash such as the Windows heap-corruption
+    # abort (exit code 0xC0000374 / -1073740940) leave a usable trace; a normal
+    # launch is unaffected.
+    import os
+    if os.environ.get("GUI_DEBUG"):
+        try:
+            from gui._debug import install_crash_diagnostics
+            install_crash_diagnostics(os.environ.get("GUI_DEBUG_DIR"))
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()

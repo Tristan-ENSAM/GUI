@@ -65,7 +65,7 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
                             instance=None):
     """Per-parameter field sensitivity for a Jacobian plan, using the kept
     bundles. For each field var, J_i = field_metric(F(x0+delta_i), F(x0))
-    over the ZOI (always >= 0 — a magnitude of how much the field moves).
+    over the ROI (always >= 0 — a magnitude of how much the field moves).
     Returns {var: {param_path: {"sensitivity": J, "rel_pct": dV%}}}. The
     base run (run_kind 'base', index 0) is the reference. `rel_pct` is the
     relative field change in percent, weighted (averaged) over nodes and
@@ -113,7 +113,7 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None):
     """Per-element, per-frame SIGNED sensitivity MAPS for a Jacobian plan.
 
     The map counterpart of jacobian_field_analysis: instead of reducing each
-    (field var, parameter) to a scalar over the ZOI, it keeps the element
+    (field var, parameter) to a scalar over the ROI, it keeps the element
     axis, returning a field dF/dparam per element and per frame. The display
     layer reduces it (per-frame slice or time aggregate) and chooses signed
     vs magnitude.

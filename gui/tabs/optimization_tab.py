@@ -36,13 +36,12 @@ from PySide6.QtCore import QUrl
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 
 from gui.core.domain_sizing import DomainDims, initial_domain_dimensions, \
     merchant_shear_angle, chip_thickness, shear_band_bracket
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
-from gui.sensitivity.domain_opt import make_sample_fn
-from gui.sensitivity.domain_opt_worker import DomainOptWorker
 from gui.sensitivity.mesh_pipeline_worker import MeshPipelineWorker
 from gui.results.reader import ResultsBundle
 from gui.widgets.geometry_preview import GeometryPreview
@@ -71,9 +70,8 @@ class OptimizationTab(QWidget):
         self._prefs_getter = prefs_getter
         self._cpus_getter = cpus_getter
         self._initial = None            # DomainDims from Merchant
-        self._worker = None
         self._cancel_evt = threading.Event()
-        self._hist = {}                 # dim name -> list of (value, {q: E_q})
+        self._hist = {}                 # param key -> list of (value, {q: E_q})
         self._current_sta = None        # current job's .sta path (for progress)
         self._sim_timer = QTimer(self)
         self._sim_timer.setInterval(500)
@@ -231,14 +229,10 @@ class OptimizationTab(QWidget):
             "\u00b1resolution)")
         self.cb_do_verify.setChecked(True)
         mg.addWidget(self.cb_do_verify, 6, 0, 1, 5)
-        self.btn_pipe = QPushButton("Run full pipeline")
-        self.btn_pipe.clicked.connect(self._on_run_pipeline)
-        mg.addWidget(self.btn_pipe, 7, 0, 1, 3)
-        self.btn_pipe_cancel = QPushButton("Cancel")
-        self.btn_pipe_cancel.setEnabled(False)
-        self.btn_pipe_cancel.clicked.connect(self._on_cancel_pipeline)
-        mg.addWidget(self.btn_pipe_cancel, 7, 3, 1, 2)
-
+        # NOTE: the single launcher is the "Run optimization" button in the
+        # bottom run-controls bar (wired to the checkbox-driven pipeline). The
+        # former in-group "Run full pipeline" button was removed to avoid two
+        # launchers with different semantics.
 
         # ---- Preview (reuses the Geometry tab's preview widget) --------
         gprev = QGroupBox("Preview")
@@ -265,10 +259,15 @@ class OptimizationTab(QWidget):
         # ---- Run controls ----------------------------------------------
         rc = QHBoxLayout()
         self.btn_run = QPushButton("Run optimization")
-        self.btn_run.clicked.connect(self._on_run)
+        self.btn_run.setToolTip(
+            "Run the pipeline steps selected by the checkboxes above "
+            "(mass scaling, wp/tool element size, Eulerian domain, "
+            "verification). Only the checked steps are executed.")
+        # Single launcher: drives the checkbox-driven pipeline worker.
+        self.btn_run.clicked.connect(self._on_run_pipeline)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self._on_cancel)
+        self.btn_cancel.clicked.connect(self._on_cancel_pipeline)
         rc.addWidget(self.btn_run)
         self.btn_open_wd = QPushButton("Open working dir")
         self.btn_open_wd.setToolTip("Open the Preferences working directory in "
@@ -293,13 +292,32 @@ class OptimizationTab(QWidget):
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
         self.tabs.addTab(self.log, "Log")
         conv = QWidget(); cv = QVBoxLayout(conv)
-        self.fig = Figure(figsize=(5, 3))
+        self.fig = Figure(figsize=(6, 4.5))
         self.canvas = FigureCanvas(self.fig)
-        self.ax = self.fig.add_subplot(111)
+        # Matplotlib navigation toolbar: interactive zoom / pan / home / save.
+        self._nav = NavigationToolbar2QT(self.canvas, conv)
+        cv.addWidget(self._nav)
+        # One axis per identified parameter: mass scaling, wp element size and
+        # tool element size get their own axis (incompatible value scales); the
+        # four Eulerian domain dimensions share a single axis (same mm scale).
+        (self._ax_ms, self._ax_wp), (self._ax_tool, self._ax_domain) = \
+            self.fig.subplots(2, 2)
+        # Route a single-parameter history key to its dedicated axis.
+        self._param_axes = {
+            "mass_scaling": self._ax_ms,
+            "wp_elem": self._ax_wp,
+            "tool_elem": self._ax_tool,
+        }
+        self._ax_titles = {
+            id(self._ax_ms): "mass scaling",
+            id(self._ax_wp): "wp element size",
+            id(self._ax_tool): "tool element size",
+            id(self._ax_domain): "Eulerian domain",
+        }
         cv.addWidget(self.canvas, 1)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ["dimension", "initial", "final", "d_large"])
+            ["parameter", "initial", "intermediate", "final"])
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch)
         cv.addWidget(self.table)
@@ -504,11 +522,15 @@ class OptimizationTab(QWidget):
                     "noGUI=%s" % prefs.abaqus_script, "--",
                     "--model_cfg", repr(cfg.to_params_dict()),
                     "--run_cfg", repr({"cpus": cpus, "job_name": job})]
-            self._log_ui("\n%s\n[%s] h_wp=%.4g h_void=%.4g l_wp=%.4g "
-                         "l_void=%.4g\n%s\n" % ("-" * 60, job,
-                         cfg.euler_geometry.h_wp, cfg.euler_geometry.h_void,
-                         cfg.euler_geometry.l_wp, cfg.euler_geometry.l_void,
-                         "-" * 60))
+            _ms = (float(getattr(cfg.step, "mass_scaling_factor_eulerian", 1.0))
+                   if getattr(cfg.step, "mass_scaling_enabled", False) else 1.0)
+            self._log_ui("\n%s\n[%s] ms=%.4g wp=%.4g tool=%.4g | "
+                         "h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g\n%s\n"
+                         % ("-" * 60, job, _ms,
+                            float(cfg.elem_size), float(cfg.tool_elem_size),
+                            cfg.euler_geometry.h_wp, cfg.euler_geometry.h_void,
+                            cfg.euler_geometry.l_wp, cfg.euler_geometry.l_void,
+                            "-" * 60))
             try:
                 proc = subprocess.Popen(
                     args, cwd=str(workdir),
@@ -540,82 +562,6 @@ class OptimizationTab(QWidget):
                 return None
 
         return run_bundle
-
-    def _on_run(self):
-        d0 = self.compute_initial_dims()
-        if min(d0.h_wp, d0.h_void, d0.l_wp, d0.l_void) <= 0:
-            QMessageBox.warning(self, "Initial domain",
-                                "The measurement ROI (BBox) is degenerate — the "
-                                "initial Eulerian domain has a zero dimension.")
-            return
-        if self._initial is None:
-            self.compute_initial()
-        if self._initial is None:
-            return
-        thr = self.thresholds()
-        if not self.thresholds_complete():
-            QMessageBox.warning(self, "Thresholds",
-                                "A threshold ε_q is required for every field "
-                                "(physical units).")
-            return
-        prefs = self._prefs_getter() if self._prefs_getter else None
-        if prefs is None:
-            QMessageBox.warning(self, "Preferences",
-                                "No preferences (Abaqus command/script).")
-            return
-        problems = []
-        if not Path(prefs.abaqus_cmd).exists():
-            problems.append("Abaqus command not found: %s" % prefs.abaqus_cmd)
-        if not Path(prefs.abaqus_script).exists():
-            problems.append("Script not found: %s" % prefs.abaqus_script)
-        wd = Path(prefs.default_workdir)
-        try:
-            wd.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            problems.append("Cannot create workdir '%s': %s" % (wd, e))
-        if problems:
-            QMessageBox.warning(self, "Cannot launch",
-                                "• " + "\n• ".join(problems))
-            return
-
-        cpus = int(self._cpus_getter()) if self._cpus_getter else 1
-        inp = self.config_inputs()
-        self._cancel_evt.clear()
-        run_bundle = self._make_run_bundle(prefs, wd, cpus)
-        # Optimization ROI = the user measurement ROI (BBox).
-        opt_roi = inp["roi"]
-        sample_fn = make_sample_fn(
-            self.cfg, run_bundle, roi=opt_roi, elem_size=inp["elem"],
-            quantity_field_map=self.quantity_field_map(),
-            force_channels=self.force_channels(),
-            grid_step=self.grid_step())
-
-        self._hist = {}
-        self.table.setRowCount(0)
-        self.log.clear()
-        self.tabs.setCurrentIndex(0)
-        self.btn_run.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.lbl_status.setStyleSheet("color: #1d4ed8;")
-        self.lbl_status.setText("Optimizing… (each step is one Abaqus run)")
-
-        self._worker = DomainOptWorker(
-            sample_fn=sample_fn, initial=self._initial, thresholds=thr,
-            elem_size=inp["elem"], caps=self.caps() or None, order=_DIM_ORDER,
-            quantities=tuple(thr.keys()),
-            bisect_resolution=self._float_or(self.le_domain_bisect, 0.0),
-            grow_factor=self._float_or(self.le_domain_factor, 2.0))
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished_ok.connect(self._on_finished)
-        self._worker.failed.connect(self._on_failed)
-        self._start_progress()
-        self._worker.start()
-
-    def _on_cancel(self):
-        self._cancel_evt.set()
-        if self._worker is not None:
-            self._worker.cancel()
-        self.lbl_status.setText("Cancelling…")
 
     # -- worker callbacks --------------------------------------------------
     def _poll_sta(self):
@@ -656,94 +602,65 @@ class OptimizationTab(QWidget):
                 if q in errors and errors[q] == errors[q] and thr[q] > 0]
         return max(vals) if vals else float("nan")
 
-    def _on_progress(self, ev):
-        phase = ev.get("phase")
-        if phase == "compare":
-            # live: append this comparison's (value, E_q) point and redraw
-            name = ev["name"]
-            self._hist.setdefault(name, []).append((ev["value"], ev["errors"]))
-            emax = self._e_max(ev["errors"])
-            self.lbl_status.setText(
-                "Optimizing %s… value=%.4g | E_max=%.3g | runs=%d"
-                % (name, ev["value"], emax, ev.get("n_runs", 0)))
-            self._log_ui("  %s=%.4g → E_max=%.3g%s"
-                         % (name, ev["value"], emax,
-                            " (admissible)" if emax < 1 else ""))
-            self._plot()
-            return
-        if phase != "dimension":
-            return
-        res = ev["result"]
-        # consolidate to the doubling-phase points once the dimension is done
-        pts = [(v, e) for (v, e) in res.history if e]
-        self._hist[res.name] = pts
-        self._update_table(ev["dims"])
-        self._plot()
-
-    def _update_table(self, dims):
-        self.table.setRowCount(0)
-        for name in _DIM_ORDER:
-            r = self.table.rowCount(); self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem(name))
-            self.table.setItem(r, 3, QTableWidgetItem(""))
-            self.table.setItem(r, 2, QTableWidgetItem("%.4g" % getattr(dims, name)))
-
     def _plot(self):
-        self.ax.clear()
+        """Redraw the four per-parameter convergence axes from `self._hist`.
+
+        Each axis shows, versus the parameter value, the per-quantity
+        normalized errors E_q/eps_q (thin) and E_max (bold), with the
+        admissibility line E_max = 1. Mass scaling, wp and tool element sizes
+        each get their own axis (incompatible value scales); the four Eulerian
+        domain dimensions share the fourth axis (same mm scale)."""
         thr = self.thresholds()
-        for name, pts in self._hist.items():
+        axes = [self._ax_ms, self._ax_wp, self._ax_tool, self._ax_domain]
+        drawn = set()
+        for ax in axes:
+            ax.clear()
+
+        def _series(ax, pts, prefix=""):
+            """Plot one (value, errors) history on `ax`. Returns True if drawn."""
             if not pts:
-                continue
+                return False
             xs = [v for (v, _e) in pts]
-            # per-quantity normalized errors E_q/eps_q (thin)
             for q in pts[0][1].keys():
                 if q not in thr or thr[q] <= 0:
                     continue
                 ys = [e.get(q, float("nan")) / thr[q] for (_v, e) in pts]
-                self.ax.plot(xs, ys, marker="o", lw=0.8, alpha=0.5,
-                             label="%s·%s" % (name, q))
-            # E_max = max of the normalized errors (bold)
+                ax.plot(xs, ys, marker="o", lw=0.8, alpha=0.5,
+                        label="%s%s" % (prefix, q))
             ymax = [self._e_max(e) for (_v, e) in pts]
-            self.ax.plot(xs, ymax, marker="s", lw=2.0, color="k",
-                         label="%s·E_max" % name)
-        # admissibility line E_max = 1 (admissible below)
-        self.ax.axhline(1.0, ls="--", lw=1.1, color="#b91c1c", alpha=0.85)
-        self.ax.annotate("E_max = 1 (admissible below)",
-                         xy=(0.01, 1.0), xycoords=("axes fraction", "data"),
-                         fontsize=6, color="#b91c1c", va="bottom")
-        self.ax.set_xlabel("parameter value")
-        self.ax.set_ylabel("normalized error E_q/ε_q  (E_max bold)")
-        self.ax.set_yscale("log")
-        if self._hist:
-            self.ax.legend(fontsize=6, ncol=2)
+            ax.plot(xs, ymax, marker="s", lw=1.8,
+                    label="%sE_max" % prefix)
+            return True
+
+        # single-parameter axes
+        for key, ax in self._param_axes.items():
+            if _series(ax, self._hist.get(key, [])):
+                drawn.add(id(ax))
+        # domain axis: the four dimensions share one axis
+        for name in _DIM_ORDER:
+            if _series(self._ax_domain, self._hist.get(name, []),
+                       prefix="%s·" % name):
+                drawn.add(id(self._ax_domain))
+
+        for ax in axes:
+            ax.axhline(1.0, ls="--", lw=1.0, color="#b91c1c", alpha=0.85)
+            ax.set_title(self._ax_titles[id(ax)], fontsize=8)
+            ax.set_yscale("log")
+            ax.tick_params(labelsize=6)
+            if id(ax) in drawn:
+                ax.legend(fontsize=5, ncol=2)
+        # Mass scaling, wp and tool span decades on their value axis -> log x.
+        for ax in (self._ax_ms, self._ax_wp, self._ax_tool):
+            ax.set_xscale("log")
+        for ax in (self._ax_tool, self._ax_domain):
+            ax.set_xlabel("parameter value", fontsize=7)
+        for ax in (self._ax_ms, self._ax_tool):
+            ax.set_ylabel("E_q/ε_q", fontsize=7)
+        try:
+            self.fig.tight_layout()
+        except Exception:
+            pass
         self.canvas.draw_idle()
-
-    def _on_finished(self, result):
-        self._stop_progress()
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        d = result.dims
-        ok = "converged" if result.converged else "NOT converged (cap/cancel)"
-        self.lbl_status.setStyleSheet(
-            "color: %s;" % ("#15803d" if result.converged else "#b45309"))
-        self.lbl_status.setText(
-            "Done — h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g | "
-            "%d runs | %s" % (d.h_wp, d.h_void, d.l_wp, d.l_void,
-                              result.n_runs, ok))
-        # fill final/d_large columns
-        for r, name in enumerate(_DIM_ORDER):
-            dr = result.per_dim.get(name)
-            if dr is not None:
-                self.table.setItem(r, 1, QTableWidgetItem("%.4g" % dr.initial))
-                self.table.setItem(r, 2, QTableWidgetItem("%.4g" % dr.final))
-                self.table.setItem(r, 3, QTableWidgetItem("%.4g" % dr.d_large))
-
-    def _on_failed(self, msg):
-        self._stop_progress()
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self.lbl_status.setStyleSheet("color: #b91c1c;")
-        self.lbl_status.setText("Failed: %s" % msg)
 
     # ===================================================================
     # Mesh + domain full pipeline
@@ -856,9 +773,12 @@ class OptimizationTab(QWidget):
         run_bundle = self._make_run_bundle(prefs, wd, cpus)
 
         self.log.clear()
+        self._hist = {}
+        self.table.setRowCount(0)
+        self._plot()
         self.tabs.setCurrentIndex(0)
-        self.btn_pipe.setEnabled(False)
-        self.btn_pipe_cancel.setEnabled(True)
+        self.btn_run.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.lbl_status.setStyleSheet("color: #1d4ed8;")
         self.lbl_status.setText("Running pipeline… (many Abaqus runs)")
 
@@ -904,13 +824,51 @@ class OptimizationTab(QWidget):
 
     def _on_pipeline_progress(self, ev):
         phase = ev.get("phase", "")
+        sub = ev.get("sub") or {}
+        # ---- live convergence points: append to the matching axis history ----
+        # Each sub-optimizer emits a (value, errors) pair per Abaqus comparison;
+        # we route it to its parameter history key and redraw the subplots.
+        if phase == "ms" and "errors" in sub and "factor" in sub:
+            self._hist.setdefault("mass_scaling", []).append(
+                (sub["factor"], sub["errors"]))
+            g = sub.get("guard")
+            self._log_ui("    factor=%.4g → ⟨ALLKE/ALLIE⟩=%s | E_max=%.3g"
+                         % (sub["factor"],
+                            ("%.4g" % g) if g is not None else "n/a",
+                            self._e_max(sub["errors"])))
+            self._live_status("mass scaling", sub["factor"], sub["errors"],
+                              sub.get("n_runs"))
+            self._plot()
+            return
+        if phase == "wp" and "errors" in sub and "size" in sub:
+            self._hist.setdefault("wp_elem", []).append(
+                (sub["size"], sub["errors"]))
+            self._live_status("wp element", sub["size"], sub["errors"],
+                              sub.get("n_runs"))
+            self._plot()
+            return
+        if phase == "tool" and "errors" in sub and "size" in sub:
+            self._hist.setdefault("tool_elem", []).append(
+                (sub["size"], sub["errors"]))
+            self._live_status("tool element", sub["size"], sub["errors"],
+                              sub.get("n_runs"))
+            self._plot()
+            return
+        if phase == "domain" and sub.get("phase") == "compare":
+            self._hist.setdefault(sub["name"], []).append(
+                (sub["value"], sub["errors"]))
+            self._live_status(sub["name"], sub["value"], sub["errors"],
+                              sub.get("n_runs"))
+            self._plot()
+            return
+        # ---- textual step milestones ----
         if phase == "ms_done":
             self._log_ui("  → mass-scaling factor = %.4g "
-                         "(⟨ALLKE/ALLIE⟩=%.4g, velocity %s)"
+                         "(⟨ALLKE/ALLIE⟩=%.4g) — %s"
                          % (ev.get("identified", float("nan")),
                             ev.get("guard", float("nan")),
-                            "converged" if ev.get("converged") else
-                            "NOT converged (guard-limited)"))
+                            self._ms_verdict(ev.get("limited_by", ""),
+                                             ev.get("converged"))))
         elif phase in ("wp_done", "tool_done"):
             self._log_ui("  → identified %s = %.4g (runs so far: %d)"
                          % (phase.split("_")[0], ev.get("identified", float("nan")),
@@ -924,10 +882,42 @@ class OptimizationTab(QWidget):
         elif phase.startswith("verify_") and phase.endswith("_done"):
             self._log_ui("  → %s stable=%s" % (phase, ev.get("stable")))
 
+    @staticmethod
+    def _ms_verdict(limited_by, converged):
+        """Human-readable mass-scaling verdict from the `limited_by` reason.
+
+        The search minimizes the velocity sensitivity E(f) = E(f, f*factor)
+        under the energy guard-rail; `converged` reports whether E < 1 at the
+        retained point (informational, not an admissibility condition)."""
+        txt = {
+            "minimum": "sensitivity minimum bracketed and refined",
+            "start": "minimum at the start factor — E already rises at the "
+                     "first ladder step (lower the start factor to explore "
+                     "below it)",
+            "guard": "guard-limited — the energy guard-rail stopped the search "
+                     "before the sensitivity minimum",
+            "cap": "cap reached — the sensitivity was still decreasing at the "
+                   "max factor (raise the cap to keep exploring)",
+            "cancelled": "cancelled before any evaluation",
+        }.get(limited_by, "converged" if converged else "NOT converged")
+        return txt + (" | E < 1" if converged else " | E >= 1")
+
+    def _live_status(self, name, value, errors, n_runs):
+        """Update the status label with the current parameter value and E_max."""
+        emax = self._e_max(errors)
+        try:
+            vtxt = "%.4g" % float(value)
+        except (TypeError, ValueError):
+            vtxt = str(value)
+        self.lbl_status.setStyleSheet("color: #1d4ed8;")
+        self.lbl_status.setText(
+            "Optimizing %s… value=%s | E_max=%.3g | runs=%s"
+            % (name, vtxt, emax, "?" if n_runs is None else n_runs))
+
     def _on_pipeline_finished(self, result):
         self._stop_progress()
-        self.btn_pipe.setEnabled(True)
-        self.btn_pipe_cancel.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         d = result.domain
 
         def _vtxt(v):
@@ -941,13 +931,11 @@ class OptimizationTab(QWidget):
         ms_line = ""
         if result.ms_factor is not None:
             r = result.ms_result
-            ms_line = ("mass-scaling factor: %.4g  (⟨ALLKE/ALLIE⟩=%.4g, "
-                       "velocity %s, guard %s)\n"
+            ms_line = ("mass-scaling factor: %.4g  (⟨ALLKE/ALLIE⟩=%.4g) — %s\n"
                        % (result.ms_factor,
                           (r.guard_at_identified if r else float("nan")),
-                          "converged" if (r and r.velocity_converged)
-                          else "NOT converged",
-                          "OK" if (r and r.guard_ok) else "exceeded"))
+                          self._ms_verdict(getattr(r, "limited_by", ""),
+                                           r.velocity_converged if r else None)))
         self._log_ui(
             "\n=== PIPELINE RESULT ===\n"
             + ms_line +
@@ -960,11 +948,52 @@ class OptimizationTab(QWidget):
                result.tool_elem, _vtxt(result.tool_verify),
                d.h_wp, d.h_void, d.l_wp, d.l_void, _vtxt(result.domain_verify),
                result.grid_step, result.n_runs))
+        self._fill_pipeline_table(result)
+
+    def _fill_pipeline_table(self, result):
+        """Populate the results table with one row per identified parameter,
+        in pipeline order (mass scaling, wp element, tool element, then the four
+        Eulerian domain dimensions). Columns: parameter | initial |
+        intermediate (end of bracketing) | final (end of dichotomy). Steps that
+        were skipped (unchecked) contribute no row."""
+        def _fmt(v):
+            try:
+                return "%.4g" % float(v)
+            except (TypeError, ValueError):
+                return ""
+
+        rows = []
+        if getattr(result, "ms_result", None) is not None:
+            r = result.ms_result
+            rows.append(("mass_scaling", r.initial, r.intermediate,
+                         r.identified))
+        if getattr(result, "wp_conv", None) is not None:
+            r = result.wp_conv
+            rows.append(("wp_elem", r.initial, r.intermediate, r.identified))
+        if getattr(result, "tool_conv", None) is not None:
+            r = result.tool_conv
+            rows.append(("tool_elem", r.initial, r.intermediate, r.identified))
+        if getattr(result, "domain_result", None) is not None:
+            for name in _DIM_ORDER:
+                dr = result.domain_result.per_dim.get(name)
+                if dr is not None:
+                    # DimResult: d_large is the end-of-bracketing (intermediate)
+                    # reference; final is the end-of-dichotomy retained value.
+                    rows.append((name, dr.initial, dr.d_large, dr.final))
+
+        self.table.setRowCount(0)
+        for (name, ini, inter, fin) in rows:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(str(name)))
+            self.table.setItem(r, 1, QTableWidgetItem(_fmt(ini)))
+            self.table.setItem(r, 2, QTableWidgetItem(_fmt(inter)))
+            self.table.setItem(r, 3, QTableWidgetItem(_fmt(fin)))
 
     def _on_pipeline_failed(self, msg):
         self._stop_progress()
-        self.btn_pipe.setEnabled(True)
-        self.btn_pipe_cancel.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         self.lbl_status.setStyleSheet("color: #b91c1c;")
         self.lbl_status.setText("Pipeline failed: %s" % msg)
         self._log_ui("PIPELINE ERROR: %s" % msg)

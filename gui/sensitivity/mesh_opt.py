@@ -82,10 +82,14 @@ def nearest_samples(bundle, var, inst, points, frames=None) -> np.ndarray:
 # ---------------------------------------------------------------------------
 @dataclass
 class MeshConvResult:
-    identified: float                 # coarsest stable element size
+    identified: float                 # coarsest stable element size (= final)
     history: List[tuple] = field(default_factory=list)  # (size_fine, errors)
     n_runs: int = 0
     converged: bool = False
+    initial: float = 0.0              # phase-0 start size
+    intermediate: float = 0.0         # coarsest stable size at the END of the
+                                      # halving phase (before the optional
+                                      # bisection refinement)
 
 
 def refine_until_stable(sample_fn: Callable[[float], Dict[str, np.ndarray]],
@@ -137,6 +141,10 @@ def refine_until_stable(sample_fn: Callable[[float], Dict[str, np.ndarray]],
     else:
         identified = size                # never stabilised -> finest tried
 
+    # End of the halving phase: this is the "intermediate" value (before the
+    # optional bisection refinement below).
+    intermediate = identified
+
     # Bisection (opt-in): only when a resolution is given. Finds the coarsest
     # Cauchy-stable size in [identified, identified/factor] using the same
     # self-convergence test E(s, s*factor) < eps. Without a resolution the
@@ -166,7 +174,8 @@ def refine_until_stable(sample_fn: Callable[[float], Dict[str, np.ndarray]],
                 hi = mid
         identified = best
     return MeshConvResult(identified=identified, history=history,
-                          n_runs=n_runs, converged=converged)
+                          n_runs=n_runs, converged=converged,
+                          initial=float(start_size), intermediate=intermediate)
 
 
 def verify_stability(sample_fn: Callable[[float], Dict[str, np.ndarray]],

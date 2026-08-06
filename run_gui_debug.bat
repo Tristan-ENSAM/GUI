@@ -5,6 +5,8 @@ REM  Uses python.exe (console stays open) so any traceback is visible. If the
 REM  venv already has the core dependencies it just launches - no host Python,
 REM  no network needed. Optional (experimental) deps are installed best-effort.
 REM ============================================================================
+set "GUI_DEBUG=1"
+set "GUI_DEBUG_DIR=%~dp0logs"
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
@@ -86,7 +88,8 @@ if not exist "%~dp0gui\main.py" (
     exit /b 1
 )
 echo [INFO] Launching GUI (console kept open for debug)...
-"%VENV_PY%" -m gui.main
+REM "%VENV_PY%" -m gui.main
+"%VENV_PY%" -X faulthandler -m gui.main
 echo.
 echo [INFO] GUI exited with code %errorlevel%
 pause

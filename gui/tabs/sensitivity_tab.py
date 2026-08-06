@@ -178,8 +178,8 @@ class SensitivityTab(QWidget):
         bl.addWidget(qoi_box)
 
         # Field QoI: screen how much each parameter moves whole Eulerian
-        # fields in the ZOI (SSD vs the base run). Jacobian only.
-        field_box = QGroupBox("Field QoI in the ZOI (SSD vs base run)")
+        # fields in the ROI (SSD vs the base run). Jacobian only.
+        field_box = QGroupBox("Field QoI in the ROI (SSD vs base run)")
         fg = QHBoxLayout(field_box)
         self._field_checks = {}
         for var, label in (("EVF", "EVF (chip)"), ("V", "V (flow)"),
@@ -295,7 +295,7 @@ class SensitivityTab(QWidget):
         self.fv_map = FieldViewer()
         mvl.addWidget(self.fv_map, 1)
         self.lbl_map_hint = QLabel(
-            "Run a Jacobian plan with at least one ZOI field ticked to get "
+            "Run a Jacobian plan with at least one ROI field ticked to get "
             "per-element sensitivity maps.")
         self.lbl_map_hint.setStyleSheet("color: #6b7280;")
         mvl.addWidget(self.lbl_map_hint)
@@ -627,9 +627,9 @@ class SensitivityTab(QWidget):
             field_vars = self._selected_field_vars()
             if method == "morris":
                 # Morris screens scalar QoI globally (mu*, sigma). The field
-                # (ZOI) sensitivity is a Jacobian-only construction.
+                # (ROI) sensitivity is a Jacobian-only construction.
                 if field_vars:
-                    self._warn("Field (ZOI) screening is only available with "
+                    self._warn("Field (ROI) screening is only available with "
                                "the Jacobian method; ignoring the field "
                                "selection for Morris.")
                     field_vars = []
@@ -645,7 +645,7 @@ class SensitivityTab(QWidget):
                                      temp_unit=self._temp_unit())
             else:
                 if not qois and not field_vars:
-                    self._warn("Tick at least one QoI (a scalar QoI, or a ZOI "
+                    self._warn("Tick at least one QoI (a scalar QoI, or a ROI "
                                "field).")
                     return
                 selected = self._collect_jacobian()
@@ -921,7 +921,7 @@ class SensitivityTab(QWidget):
     def _build_field_maps(self, result):
         """Compute per-element sensitivity maps from the kept run bundles and
         populate the Maps tab. No-op (and clears) unless this was a Jacobian
-        run with ZOI field(s) and bundles were kept."""
+        run with ROI field(s) and bundles were kept."""
         self._field_maps = {}
         self._map_param_paths = []
         self._map_field_vars = []
@@ -934,7 +934,7 @@ class SensitivityTab(QWidget):
             self._clear_map()
             self._set_map_controls_enabled(False)
             self.lbl_map_hint.setText(
-                "Run a Jacobian plan with at least one ZOI field ticked to "
+                "Run a Jacobian plan with at least one ROI field ticked to "
                 "get per-element sensitivity maps.")
             return
         ref = bundles[0] if bundles else None

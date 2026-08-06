@@ -64,7 +64,7 @@ def field_rel_change_pct(base_field, pert_field) -> float:
     of nodes and frames -- each node and each frame is weighted equally. The
     same finite mask is applied to numerator and denominator (only paired,
     finite entries count). Returns NaN if the base field has no finite
-    energy on the ZOI. Note the count cancels in the ratio, so this equals
+    energy on the ROI. Note the count cancels in the ratio, so this equals
     the relative L2 norm ||pert-base|| / ||base||."""
     a, b = _align(pert_field, base_field)   # a = pert, b = base
     d = (a - b).ravel()
@@ -116,7 +116,7 @@ def elementwise_signed_sensitivity(base_field, plus_field, minus_field,
     """Per-element, per-frame SIGNED finite-difference sensitivity dF/dparam.
 
     Unlike jacobian_field_sensitivity (which reduces the whole field to one
-    scalar over the ZOI), this keeps the element axis: it returns an array
+    scalar over the ROI), this keeps the element axis: it returns an array
     S of shape (n_frames, n_elements) where
 
         central  : S = (plus  - minus) / (2*delta)

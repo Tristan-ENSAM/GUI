@@ -375,13 +375,24 @@ def align_to_reference(keys: np.ndarray, values: np.ndarray,
 # sample_fn factory (bridges the optimiser to real Abaqus runs)
 # ---------------------------------------------------------------------------
 def mean_ke_ie_ratio(bundle, ke_channel="ALLKE", ie_channel="ALLIE"):
-    """Mean over time of the kinetic/internal energy ratio ALLKE/ALLIE (the
-    mass-scaling guard-rail). Computed only where ALLIE > 0 (skips the initial
-    samples where internal energy is still ~0). Returns None if the energy
-    history channels are absent.
+    """Kinetic/internal energy ratio used as the mass-scaling guard-rail,
+    computed as the ratio of the time-AGGREGATED energies:
 
-    INTERPRETATION: mean of the per-sample ratio, not ratio of the means; adjust
-    here if a different aggregate is wanted."""
+        guard = sum_t ALLKE(t) / sum_t ALLIE(t)
+
+    which equals mean(ALLKE)/mean(ALLIE) and, under uniform time sampling, the
+    ratio of the energy time-integrals (kinetic work / internal work).
+
+    This replaces the earlier mean of the per-sample ratio ALLKE/ALLIE: at the
+    start of the step the internal energy ALLIE is ~0, so the per-sample ratio
+    exploded there and dominated the average (giving spuriously huge guard
+    values). Aggregating first removes that division-by-near-zero sensitivity.
+    Returns None if the channels are absent or the total internal energy is not
+    positive.
+
+    NOTE: for a genuine time-integral under NON-uniform sampling, the energy
+    histories would have to be weighted by the sample time steps (a time channel
+    is required); the ratio of sums above is exact only for uniform sampling."""
     try:
         ke = np.asarray(bundle.history(ke_channel), dtype=float)
         ie = np.asarray(bundle.history(ie_channel), dtype=float)
@@ -390,11 +401,11 @@ def mean_ke_ie_ratio(bundle, ke_channel="ALLKE", ie_channel="ALLIE"):
     n = min(ke.size, ie.size)
     if n == 0:
         return None
-    ke, ie = ke[:n], ie[:n]
-    mask = ie > 0
-    if not np.any(mask):
+    ke_sum = float(np.nansum(ke[:n]))
+    ie_sum = float(np.nansum(ie[:n]))
+    if not (ie_sum > 0):
         return None
-    return float(np.mean(ke[mask] / ie[mask]))
+    return ke_sum / ie_sum
 
 
 def extract_force_normalized(bundle, elem_size, channel):

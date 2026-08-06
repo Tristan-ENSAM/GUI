@@ -151,20 +151,6 @@ class StepCfg:
     mass_scaling_factor_eulerian: float = 1.0
     mass_scaling_factor_tool:    float = 1.0
 
-    # Time scaling (Hammelmüller & Zehetner, COMPLAS XIII). A fictitious
-    # time τ = t / κ_t (κ_t > 1) speeds up the explicit solve linearly. To
-    # keep the machined length constant the kinematics are accelerated and
-    # the step shortened: cutting/initial velocities ×κ_t, sim_time ÷κ_t.
-    # To preserve the thermal time constant the specific heat is divided by
-    # κ_t as well (on top of any mass scaling). ρ and E are NOT changed by
-    # time scaling. Inertial-force effect equals mass scaling with κ_m=κ_t².
-    # VALIDITY: only when strain-rate dependence is negligible — with a
-    # rate-dependent Johnson-Cook law (C≠0) the rate terms are distorted.
-    # The velocity/time scaling is applied in ModelConfig.to_params_dict;
-    # run_simul.py applies κ_t to Cp only (velocities/time arrive scaled).
-    time_scaling_enabled:        bool  = False
-    time_scaling_factor:         float = 1.0
-
 
 @dataclass
 class AnalysisCfg:
@@ -331,7 +317,8 @@ class EulerPosition:
 
 @dataclass
 class BBox:
-    # Extraction ROI / ZOI (the geometry tab's "ROI" group edits this).
+    # Extraction ROI (the geometry tab's "ROI" group edits this). It is
+    # materialised in the model as the ROI_node / ROI_elem sets.
     # Default = the cutting zone of interest, so runs extract only this
     # region (faster, smaller .npz, more relevant for sensitivity/ID).
     # Widen these in the GUI to extract the full Eulerian domain.
@@ -343,72 +330,49 @@ class BBox:
     zmax: float = 0.001
 
 
-@dataclass
-class MeshElementCfg:
-    """Per-body element-type configuration.
+# ---------------------------------------------------------------------------
+# Float cleanup for the Abaqus export
+# ---------------------------------------------------------------------------
+# Unit conversions chain several float operations (e.g. density kg/m³ -> t/mm³
+# goes through a product of powers, and K -> °C subtracts 273.15), which leaves
+# representation noise in the exported dict: 4.430000000000001e-09 instead of
+# 4.43e-09, 24.850000000000023 instead of 24.85. That noise is meaningless
+# physically but it pollutes the .inp, the dry-run listing and the results
+# metadata snapshot.
+#
+# Rounding to 12 significant digits removes it while staying far below any
+# physical or numerical significance (relative change ~1e-12). Note this also
+# shortens genuine repeating decimals: a 40 m/min cutting speed is exactly
+# 2000/3 mm/s = 666.666666666667, exported as 666.666666667. That IS a real
+# (if negligible) change of value, not just cosmetic — it was chosen
+# deliberately over leaving the raw repeating value.
+_EXPORT_SIG_DIGITS = 12
 
-    Two flavours are supported, picked by family:
-      - Eulerian (CEL volume): EC3D8R or EC3D8RT depending on
-        `thermally_coupled`.
-      - Explicit/Lagrangian (rigid tool, Lagrangian workpiece): in this
-        GUI the explicit-family solids are ALWAYS thermally coupled —
-        Abaqus has no `C3D8` in our analysis path. So the type is
-        `C3D8T` (full integration) or `C3D8RT` (reduced integration)
-        depending on `reduced_integration`. `thermally_coupled` is
-        ignored for the explicit family but kept on the dataclass to
-        keep the storage uniform.
 
-    Common fields:
-      thermally_coupled    : Eulerian only (use EC3D8RT vs EC3D8R).
-      second_order_accuracy: Abaqus 'Second-order accuracy' Yes/No.
-      hourglass_control    : default | relax_stiffness | stiffness |
-                             viscous | combined
-                             Active scaling factors:
-                               default       -> lin+quad bulk viscosity
-                               combined      -> all four scaling factors
-                               other         -> all except svw
-      displacement_hourglass_scale_factor
-      linear_bulk_viscosity_scale_factor
-      quadratic_bulk_viscosity_scale_factor
-      stiffness_viscous_weight_factor   (only with 'combined' hourglass)
+def _clean_float(value: float) -> float:
+    """Round a float to `_EXPORT_SIG_DIGITS` significant digits.
 
-    Lagrangian-only fields (explicit family — Tool / Lagrangian workpiece):
-      reduced_integration  : True  -> C3D8RT  (with hourglass control)
-                             False -> C3D8T   (full integration; no
-                                              hourglass, no kinematic
-                                              split required)
-      kinematic_split      : "average_strain" | "orthogonal" | "centroid"
-                             (only meaningful for reduced-integration)
-      distortion_control_mode: "use_default" | "yes" | "no"
-      length_ratio          : float (only used when distortion_control_mode
-                                     == "yes")
-      element_deletion_mode : "use_default" | "yes" | "no"
-      max_degradation_mode  : "use_default" | "specify"
-      max_degradation_value : float (only used when max_degradation_mode
-                                     == "specify")
-      linear_kinematic_conversion_mode : "use_default" | "specify"
-      linear_kinematic_conversion_value: float
-    """
-    # Common
-    thermally_coupled:     bool  = True
-    second_order_accuracy: bool  = False
-    hourglass_control:     str   = "default"
+    Non-finite values (inf/nan) are returned unchanged, since formatting them
+    through %g would produce a string that float() cannot always round-trip
+    the same way across platforms."""
+    if not isinstance(value, float) or value != value or value in (
+            float("inf"), float("-inf")):
+        return value
+    return float("%.{}g".format(_EXPORT_SIG_DIGITS) % value)
 
-    displacement_hourglass_scale_factor:   float = 1.0
-    linear_bulk_viscosity_scale_factor:    float = 1.0
-    quadratic_bulk_viscosity_scale_factor: float = 1.0
-    stiffness_viscous_weight_factor:       float = 0.5
 
-    # Lagrangian-only (ignored for Eulerian-family bodies)
-    reduced_integration:                bool  = True
-    kinematic_split:                    str   = "average_strain"
-    distortion_control_mode:            str   = "use_default"
-    length_ratio:                       float = 0.1
-    element_deletion_mode:              str   = "use_default"
-    max_degradation_mode:               str   = "use_default"
-    max_degradation_value:              float = 0.0
-    linear_kinematic_conversion_mode:   str   = "use_default"
-    linear_kinematic_conversion_value:  float = 0.0
+def _clean_floats(obj):
+    """Recursively apply `_clean_float` to every float in a nested structure.
+
+    bool is deliberately excluded: it is a subclass of int, not float, so it
+    passes through untouched."""
+    if isinstance(obj, dict):
+        return {k: _clean_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_clean_floats(v) for v in obj)
+    if isinstance(obj, float):
+        return _clean_float(obj)
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +409,19 @@ class ModelConfig:
     elem_size:      float          = 0.005
     # Tool-nose seed size (was hard-coded to 0.001 in run_simul); exposed so
     # the mesh-convergence study can identify it. Backward-compatible default.
-    tool_elem_size: float          = 0.001
+    # Tool bias seeding, exposed in the Mesh tab. A single continuous grading
+    # runs from the nose to the borders through THREE sizes:
+    #   min_elem_size   = nose seed  = fine end of the rake/clearance bias
+    #   inter_elem_size = coarse end of the rake/clearance bias
+    #                   = fine end of the border bias   (shared junction)
+    #   max_elem_size   = coarse end of the border bias
+    # In run_simul: rake/clearance faces = bias 2, borders = bias 1.
+    # (`tool_elem_size` kept as the nose seed = min_elem_size.)
+    tool_elem_size:  float         = 0.001   # = min_elem_size (nose)
+    inter_elem_size: float         = 0.02    # rake/clear coarse = border fine
+    max_elem_size:   float         = 0.05    # border coarse
 
     # Per-body element configuration
-    tool_element:    MeshElementCfg = field(default_factory=MeshElementCfg)
-    euler_element:   MeshElementCfg = field(default_factory=MeshElementCfg)
-    wp_element:      MeshElementCfg = field(default_factory=MeshElementCfg)
 
     # Material dicts (placeholders, edited in the Materials tab later).
     # In CEL mode, `euler_material` is the workpiece material (Johnson-Cook).
@@ -484,19 +455,23 @@ class ModelConfig:
 
         Layout (every value is a plain literal so repr()/literal_eval round
         trips — see run_simul.py's contract):
-            analysis     : formulation + analysis options
             geometry     : tool {position, geometry}, euler {position,
                            workpiece_position, geometry}, bbox
             materials    : euler (workpiece material), tool (tool material)
-            mesh         : elem_size, discretize, euler_element, tool_element
+            mesh         : elem_size, discretize, tool seeding sizes
             interaction  : contact/friction/heat
             bcs          : cutting_speed, initial_velocity, ...
             step         : sim_time, n_frames, mass scaling, output
         `process` was removed: cutting_speed now comes from `bcs`, and
-        sim_time / n_frames from `step`.
+        sim_time / n_frames from `step`. `analysis` was removed too: the
+        build is CEL-only and run_simul.py reads none of its keys (the
+        fields stay on ModelConfig because the GUI itself still uses
+        `formulation`, `rp_location` and `tool_motion`).
+
+        Every float is passed through `_clean_float` so unit-conversion
+        noise (e.g. 4.430000000000001e-09) never reaches the .inp.
         """
-        return {
-            "analysis": asdict(self.analysis),
+        return _clean_floats({
             "geometry": {
                 "tool": {
                     "position": asdict(self.tool_position),
@@ -515,15 +490,15 @@ class ModelConfig:
             },
             "mesh": {
                 "elem_size":      self.elem_size,
-                "tool_elem_size": self.tool_elem_size,
+                "tool_elem_size":  self.tool_elem_size,
+                "inter_elem_size": self.inter_elem_size,
+                "max_elem_size":   self.max_elem_size,
                 "discretize":     self.euler_geometry.discretize,
-                "euler_element":  asdict(self.euler_element),
-                "tool_element":   asdict(self.tool_element),
             },
             "interaction": asdict(self.interaction),
             "bcs":         asdict(self.bcs),
             "step":        asdict(self.step),
-        }
+        })
 
     # ----- Profile save/load (JSON) -----
     #
@@ -571,9 +546,6 @@ class ModelConfig:
             },
             "mesh": {
                 "elem_size":     self.elem_size,
-                "tool_element":  asdict(self.tool_element),
-                "euler_element": asdict(self.euler_element),
-                "wp_element":    asdict(self.wp_element),
             },
             "bbox": asdict(self.bbox),
         }
@@ -666,9 +638,6 @@ class ModelConfig:
 
         mesh = data.get("mesh", {})
         if "elem_size" in mesh: cfg.elem_size = mesh["elem_size"]
-        _apply(cfg.tool_element,  mesh.get("tool_element"))
-        _apply(cfg.euler_element, mesh.get("euler_element"))
-        _apply(cfg.wp_element,    mesh.get("wp_element"))
 
         _apply(cfg.bbox, data.get("bbox"))
 
@@ -767,6 +736,39 @@ class ModelConfig:
             nx = round((l_wp + l_void) / self.elem_size)
             ny = round((h_wp + h_void) / self.elem_size)
         return max(0, nx * ny)
+
+    def tool_thermal_dt_estimate(self) -> float:
+        """Explicit heat-CONDUCTION stability limit for the tool:
+
+            dt ~= L^2 / (2 * alpha),   alpha = k / (rho * Cp)
+
+        Units: mm-t-s (rho [t/mm^3], Cp [mJ/(t.K)], k [mW/(mm.K)]) gives alpha
+        in mm^2/s, so dt in s when L is in mm.
+
+        WHY THIS MATTERS: `*RIGID BODY` constrains the MECHANICAL dofs only —
+        the tool's temperature dofs stay active, so the tool still obeys the
+        explicit conduction stability limit and can govern the global stable
+        increment. Mass scaling does NOT relax it: scaling rho by f while
+        dividing Cp by f leaves rho*Cp (hence alpha) invariant. Above the
+        factor where the Eulerian mechanical limit reaches this value, more
+        mass scaling buys no CPU time at all.
+
+        CAUTION: L is taken as the nose SEED size. The smallest element
+        actually generated on the nose fillet is usually smaller than the seed
+        (mesh generation on the radius + bias transitions), so the real limit
+        is LOWER than this estimate. Treat it as an upper bound.
+
+        Returns 0.0 if k, rho, Cp or the seed size are not usable. The exact
+        coefficient used by Abaqus should be confirmed in the Theory Manual
+        ('Stability limit for the explicit operator', heat transfer)."""
+        k   = float(self.tool_material.get("k", 0.0))
+        rho = float(self.tool_material.get("rho", 0.0))
+        cp  = float(self.tool_material.get("Cp", 0.0))
+        L   = float(self.tool_elem_size)
+        if k <= 0.0 or rho <= 0.0 or cp <= 0.0 or L <= 0.0:
+            return 0.0
+        alpha = k / (rho * cp)
+        return L * L / (2.0 * alpha)
 
     def stable_dt_estimate(self) -> float:
         """Courant-style explicit stable time increment for the workpiece:

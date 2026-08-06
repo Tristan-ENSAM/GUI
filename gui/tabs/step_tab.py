@@ -327,8 +327,6 @@ class StepTab(QWidget):
         s.mass_scaling_enabled         = self.cb_ms_enabled.isChecked()
         s.mass_scaling_factor_eulerian = self.f_ms_eul.value()
         s.mass_scaling_factor_tool     = self.f_ms_tool.value()
-        # Time scaling removed: keep it disabled in the config.
-        s.time_scaling_enabled = False
         # History sampling is always synced to the field-output frame count;
         # RF1/RF2 and PRESELECT are always written (fixed extraction).
         s.output.ho_n_intervals = s.n_frames
@@ -351,8 +349,7 @@ class StepTab(QWidget):
         finally:
             for w in widgets:
                 w.blockSignals(False)
-        # Keep the fixed-output / no-time-scaling invariants in the config.
-        s.time_scaling_enabled = False
+        # Keep the fixed-output invariants in the config.
         s.output.ho_n_intervals = s.n_frames
         s.output.ho_preselect   = True
         s.output.ho_rf_on_rp    = True
