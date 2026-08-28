@@ -367,11 +367,6 @@ class MaterialsTab(QWidget):
             abq = self.cfg.euler_material.get(key, 0.0)
             w.set_value(units.abaqus_to_gui(key, abq, tu))
 
-    def refresh_temp_unit(self):
-        """Back-compat alias: a temperature-base change is just a unit-system
-        change, so refresh everything."""
-        self.refresh_units()
-
     def refresh_units(self):
         """Recompute every field's displayed value AND its unit label from
         the (unchanged) Abaqus-internal storage, under the active unit

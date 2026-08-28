@@ -474,9 +474,6 @@ class SensitivityTab(QWidget):
     # ------------------------------------------------------------------
     # Method handling (Jacobian only)
     # ------------------------------------------------------------------
-    def _is_jacobian(self) -> bool:
-        return True
-
     def _scheme(self) -> str:
         return self.cb_scheme.currentText()
 

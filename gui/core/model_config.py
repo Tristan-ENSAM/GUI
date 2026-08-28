@@ -436,10 +436,6 @@ class ModelConfig:
     # Convenience alias — same dict as `euler_material` (the workpiece material
     # is the same physical entity in both formulations). Kept as a property to
     # avoid duplicating storage.
-    @property
-    def workpiece_material(self) -> dict:
-        return self.euler_material
-
     # ----- Serialization -----
     def to_params_dict(self) -> dict:
         """Build the `params` dict sent to run_simul.py, organised as one
@@ -692,15 +688,6 @@ class ModelConfig:
             return L / n
 
         return (_per_direction(Lx), _per_direction(Ly))
-
-    def effective_elem_size(self) -> float:
-        """Backwards-compatible scalar accessor: returns the LARGER of the
-        two effective sizes (worst case in the geometric sense).
-
-        Note: for the explicit-stability time increment, we instead want the
-        SMALLER of the two — see `stable_dt_estimate()`."""
-        ex, ey = self.effective_elem_sizes()
-        return max(ex, ey)
 
     def n_elements_estimate(self) -> int:
         """Approximate element count, depending on formulation.

@@ -25,10 +25,6 @@ _COLUMNS = ["qoi", "parameter", "label", "sensitivity",
             "abs_sensitivity", "dQdx", "normalized", "x0", "Q0"]
 
 
-def _is_field_qoi(qoi_id: str) -> bool:
-    return qoi_id.endswith("[field]")
-
-
 def result_rows(result, label_for: Optional[Callable[[str], str]] = None):
     """Flatten a RunResult into a list of dict rows, one per (QoI, param),
     sorted within each QoI by descending |sensitivity| (NaN last)."""

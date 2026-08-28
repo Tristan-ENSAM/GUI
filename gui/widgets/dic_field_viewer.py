@@ -353,9 +353,6 @@ class DicFieldViewer(QWidget):
             self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
-    def _toggle_profile(self, on):
-        self._profile_mode = bool(on)
-
     def _clear_profile(self):
         self._line = []
         self._draw_line_artist()

@@ -22,11 +22,6 @@ def _vprint(msg):
     sys.stdout.flush()
 
 
-def _bbox_of_array(arr):
-    """Return (min, max) tuples for a (N, 3) numpy array."""
-    return arr.min(axis=0), arr.max(axis=0)
-
-
 def _resolve_roi(model_cfg):
     """Read bbox from model_cfg. Return a dict {xmin,xmax,...} or None
     if degenerate (the ROI is the bbox of the user's region of

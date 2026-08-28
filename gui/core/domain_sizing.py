@@ -48,11 +48,6 @@ class DomainDims:
     l_wp: float       # material length upstream (x in [-l_wp, 0])
     l_void: float     # void length downstream (x in [0, l_void])
 
-    def as_dict(self) -> dict:
-        return {"h_wp": self.h_wp, "h_void": self.h_void,
-                "l_wp": self.l_wp, "l_void": self.l_void}
-
-
 def merchant_shear_angle(rake_deg: float, mu: float) -> float:
     """Merchant primary shear angle phi (degrees).
 

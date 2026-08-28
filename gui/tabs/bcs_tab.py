@@ -302,10 +302,6 @@ class BCsTab(QWidget):
         return g
 
 
-    def refresh_temp_unit(self):
-        """Back-compat alias — a temp-base change is a unit-system change."""
-        self.refresh_units()
-
     def refresh_units(self):
         tu = self.cfg.ui.temp_unit
         unit_str = "K" if tu == "K" else "°C"
