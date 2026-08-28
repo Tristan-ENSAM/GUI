@@ -20,7 +20,7 @@ from typing import Callable, Dict, Optional
 from PySide6.QtCore import QThread, Signal
 
 from gui.core.domain_sizing import DomainDims
-from gui.sensitivity.domain_opt import DomainOptimizer, OptimizeResult
+from gui.sensitivity.domain_opt import DomainOptimizer
 
 
 class DomainOptWorker(QThread):

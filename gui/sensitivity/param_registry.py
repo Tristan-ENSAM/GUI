@@ -46,7 +46,6 @@ current value (`default_display_bounds`) to pre-fill those fields.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from gui.core import units
 

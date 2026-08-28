@@ -28,8 +28,8 @@ from typing import Callable, Dict, Optional
 
 from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.domain_opt import (
-    make_sample_fn, DomainOptimizer, verify_domain, OptimizeResult,
-    DEFAULT_ORDER, DEFAULT_QUANTITIES)
+    make_sample_fn, DomainOptimizer, verify_domain, OptimizeResult, DEFAULT_ORDER
+)
 from gui.sensitivity.mesh_opt import (
     make_mesh_sample_fn, refine_until_stable, verify_stability, finest_size,
     MeshConvResult)

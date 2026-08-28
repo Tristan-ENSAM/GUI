@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QDialog, QComboBox, QFormLayout, QVBoxLayout, QHBoxLayout, QLabel,
-    QDialogButtonBox, QGroupBox, QPushButton,
+    QDialogButtonBox, QGroupBox
 )
 
 from gui.core import unit_system as us

@@ -22,10 +22,9 @@ import numpy as np
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QLabel,
-    QComboBox, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox, QSplitter,
-    QFileDialog, QMessageBox, QProgressBar, QGridLayout, QSlider,
-    QDialog, QDialogButtonBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QLabel, QComboBox,
+    QPushButton, QSpinBox, QCheckBox, QSplitter, QFileDialog, QMessageBox,
+    QProgressBar, QGridLayout, QDialog, QDialogButtonBox
 )
 
 from matplotlib.figure import Figure

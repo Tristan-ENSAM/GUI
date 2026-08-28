@@ -16,8 +16,7 @@ the Abaqus generator.
 from __future__ import annotations
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QGridLayout,
-    QScrollArea, QFrame, QCheckBox,
+    QWidget, QVBoxLayout, QGroupBox, QLabel, QScrollArea, QFrame, QCheckBox
 )
 
 from gui.core.model_config import ModelConfig
@@ -42,7 +41,7 @@ class StepTab(QWidget):
     # Field-output variables, grouped by category. Each entry:
     #   (cfg attribute name, Abaqus identifier, short human description)
     # The Abaqus identifier is what ends up in the .inp file (and what
-    # abq_odb_generator.py joins together for the *Output card).
+    # cel_model.py joins together for the *Output card).
     FIELD_VARS = {
         "Mechanical (element)": [
             ("fo_S",      "S",      "Stress tensor"),

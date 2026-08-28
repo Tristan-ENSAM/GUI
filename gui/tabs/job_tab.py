@@ -16,18 +16,17 @@ A future iteration will:
 """
 from __future__ import annotations
 from pathlib import Path
-from PySide6.QtCore import Signal, Qt, QProcess, QProcessEnvironment, QTimer
+from PySide6.QtCore import Signal, Qt, QProcess, QTimer
 from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QSpinBox,
-    QDoubleSpinBox, QCheckBox, QPushButton, QPlainTextEdit, QFormLayout,
-    QSplitter, QFileDialog, QFrame, QScrollArea, QMessageBox, QProgressBar,
+    QPushButton, QPlainTextEdit, QFormLayout, QFrame, QScrollArea, QMessageBox,
+    QProgressBar
 )
 
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
-from gui.core.preferences import Preferences
 
 
 def _section_header(title: str) -> QLabel:
@@ -287,7 +286,7 @@ class JobTab(QWidget):
         cpus     = int(self.spin_cpus.value())
         workdir  = prefs.default_workdir
 
-        # The model_params dict that abq_odb_generator.py will receive.
+        # The model_params dict that cel_model.py will receive.
         model_params = self.cfg.to_params_dict()
 
         # The run_params dict ABQ.run_simul writes into. We let Abaqus
@@ -363,7 +362,7 @@ class JobTab(QWidget):
         lines.append("")
 
         lines.append("-" * 72)
-        lines.append("model_params (what abq_odb_generator.py will receive):")
+        lines.append("model_params (what cel_model.py will receive):")
         lines.append("-" * 72)
         lines.append(repr(model_params))
         lines.append("")

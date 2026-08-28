@@ -24,22 +24,20 @@ import threading
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QGroupBox, QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox,
-    QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
+    QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar
 )
-from PySide6.QtGui import QDoubleValidator, QDesktopServices
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 
-from gui.core.domain_sizing import DomainDims, initial_domain_dimensions, \
-    merchant_shear_angle, chip_thickness, shear_band_bracket
+from gui.core.domain_sizing import DomainDims
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_pipeline_worker import MeshPipelineWorker

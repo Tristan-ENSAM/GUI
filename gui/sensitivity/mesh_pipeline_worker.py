@@ -2,11 +2,9 @@
 """Background worker running the full mesh+domain convergence pipeline."""
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.mesh_pipeline import run_mesh_domain_pipeline
 
 

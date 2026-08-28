@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Unit conversions between the GUI (human-friendly SI / engineering units)
-and the Abaqus internal consistent system used by abq_odb_generator.py.
+and the Abaqus internal consistent system used by cel_model.py.
 
 The Abaqus model uses the consistent unit system:
     length   : mm

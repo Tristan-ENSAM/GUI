@@ -2,7 +2,7 @@
 """
 Interaction tab: tool-workpiece contact properties.
 
-Mirrors the ContactProperty block in abq_odb_generator.py:
+Mirrors the ContactProperty block in cel_model.py:
     IntProp.TangentialBehavior(formulation, table=((mu,),), fraction=slip_frac)
     IntProp.NormalBehavior(pressureOverclosure=HARD)
     # optional: IntProp.HeatGeneration(...)

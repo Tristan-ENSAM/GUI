@@ -45,7 +45,7 @@ gui/
 ├── main.py                       Entrée: QMainWindow + QTabWidget
 ├── core/
 │   └── model_config.py           Dataclass ModelConfig + sérialisation
-│                                 → dict params au format abq_odb_generator.py
+│                                 → dict params au format cel_model.py
 ├── tabs/
 │   └── geometry_tab.py           Formulaire Tool / WP / Euler / BBox
 ├── widgets/
@@ -58,7 +58,7 @@ gui/
 - Édition live des paramètres géométriques (outil, pièce, domaine eulérien,
   bbox ROI), preview Matplotlib synchronisée à chaque caractère tapé.
 - Reproduction fidèle de la géométrie d'outil construite par
-  `abq_odb_generator.py` (quadrilatère + filet de rayon `r_tool` au coin
+  `cel_model.py` (quadrilatère + filet de rayon `r_tool` au coin
   inférieur gauche = arête de coupe, angles de coupe et de dépouille
   appliqués via la même convention `90 + angle`).
 - Discrétisation des dimensions du domaine eulérien au multiple inférieur
@@ -72,7 +72,7 @@ gui/
       complexe documentée dans le Theory Manual, section "Stability
       limit for the explicit operator")
 - `ModelConfig.to_params_dict()` produit le dict exactement au format
-  attendu par `abq_odb_generator.py`, prêt à être passé à `ABQ.run_simul`.
+  attendu par `cel_model.py`, prêt à être passé à `ABQ.run_simul`.
 
 ## Limites connues / différences avec Abaqus
 

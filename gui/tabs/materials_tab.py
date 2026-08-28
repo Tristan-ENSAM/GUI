@@ -7,17 +7,17 @@ units (kg/m³, GPa, MPa, W/(m·K), J/(kg·K), 1/K, °C or K). The conversion
 to the Abaqus internal consistent unit system (t-mm-s-MPa-°C) is performed
 in this tab via `gui.core.units`, so:
   - `cfg.tool_material` / `cfg.euler_material` always hold Abaqus-internal
-    values, ready to be passed verbatim to abq_odb_generator.py;
+    values, ready to be passed verbatim to cel_model.py;
   - the user never sees the awkward 8.96e-9 t/mm³ — they see 8960 kg/m³.
 
 Temperature display unit (°C or K) follows `cfg.ui.temp_unit`. The internal
 storage is always °C (matching the Abaqus side).
 """
 from __future__ import annotations
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QScrollArea,
-    QFrame, QComboBox, QPushButton, QInputDialog, QMessageBox, QFileDialog,
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QScrollArea, QFrame,
+    QPushButton, QMessageBox, QFileDialog
 )
 
 from gui.core.model_config import ModelConfig

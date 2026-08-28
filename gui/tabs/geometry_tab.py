@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.core.model_config import ModelConfig
-from gui.widgets.param_field import NumField, IntField, BoolField, PairRow
+from gui.widgets.param_field import NumField, PairRow
 from gui.widgets.geometry_preview import GeometryPreview
 
 

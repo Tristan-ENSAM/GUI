@@ -54,7 +54,7 @@ gui/
 
 ## Notes
 
-- The Abaqus generator (`abq_odb_generator.py`) lives outside this
+- The Abaqus generator (`cel_model.py`) lives outside this
   repository; the GUI only formats parameters and prints the command.
 - `materials_user.json` and `preferences.json` (per-user state) are
   ignored by git.

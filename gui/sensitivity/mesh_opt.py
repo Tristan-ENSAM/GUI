@@ -27,8 +27,8 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from gui.sensitivity.domain_opt import (
-    roi_rmse, errors_between, all_below, element_centroids_xy,
-    DEFAULT_QUANTITIES)
+    errors_between, all_below, element_centroids_xy, DEFAULT_QUANTITIES
+)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,6 @@ def refine_until_stable(sample_fn: Callable[[float], Dict[str, np.ndarray]],
                          "n_runs": n_runs})
         if all_below(err, thresholds):
             identified = size            # the coarser, already-stable size
-            stable_sample = prev         # its (converged) reference field
             converged = True
             break
         size = nxt

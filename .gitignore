@@ -62,6 +62,6 @@ dist/
 
 # ---- Local test outputs / screenshots (not part of the codebase) ----
 /home/claude/out/
-test_*.py
+/test_*.py
 test_*.png
 *.bak

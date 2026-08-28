@@ -28,7 +28,7 @@ The result arrays follow gui/results/FORMAT.md (experimental DIC section):
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Optional, Tuple
+from typing import Tuple
 import time
 import numpy as np
 

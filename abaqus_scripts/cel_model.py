@@ -454,13 +454,13 @@ def create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p
     #%%% Sets + fields
     ref_point  = assembly.ReferencePoint(point=tool_instance.vertices[4])
     RP         = assembly.Set(name='RP', referencePoints=(assembly.referencePoints[ref_point.id],))
-    tool_nodes = assembly.Set(name='tool_nodes', nodes=tool_instance.nodes)
+    assembly.Set(name='tool_nodes', nodes=tool_instance.nodes)   # side effect only
     tool_elem  = assembly.Set(name='tool_elem',  elements=tool_instance.elements)
 
     assembly.DiscreteFieldByVolumeFraction(name='VolFraction', description='',
                                            eulerianInstance=eul_instance, referenceInstance=wp_instance)
 
-    eul_nodes = assembly.Set(name='eul_nodes', nodes=eul_instance.nodes)
+    assembly.Set(name='eul_nodes', nodes=eul_instance.nodes)     # side effect only
 
     roi_nodes = eul_instance.nodes.getByBoundingBox(
         xMin=xmin - margin, xMax=xmax + margin,
@@ -491,7 +491,6 @@ def create_interaction(model, RP, tool_elem, p):
     inter_pressure = p["inter_pressure"]
     inter_heat_gen = p["inter_heat_gen"]
     inter_heat_to_slave = p["inter_heat_to_slave"]
-    inter_heat_to_master = p["inter_heat_to_master"]
     #%%% Contact
     # All knobs (tangential formulation, friction coefficient, slip tolerance,
     # pressure-overclosure law, heat generation + fractions) come from the GUI's

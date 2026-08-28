@@ -33,8 +33,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from gui.core.experiment_session import ExperimentSession
 from gui.core.sequence_io import _read_image
-from gui.core.alignment import (pixel_to_model, line_tilt_from_vertical_deg,
-                                 line_tilt_from_horizontal_deg)
+from gui.core.alignment import pixel_to_model
 from gui.core import tool_detect as td
 from gui.core.logging_util import log_swallowed
 
@@ -287,7 +286,6 @@ class AlignmentTab(QWidget):
         independent per face and stored in self._adj[which]. The Fit button
         fits only this face."""
         title = "Adjust %s face" % which
-        col = "orange" if which == "rake" else "magenta"
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         v = QVBoxLayout(dlg)
@@ -409,7 +407,6 @@ class AlignmentTab(QWidget):
         own Adjust settings and its [start, end] sub-range. Returns
         (point_on_line, unit_dir, far_idx, far_v, captured_pts) or None. Does not
         modify the polygon (the caller decides how to place the vertices)."""
-        import gui.core.tool_detect as td
         edge = self._poly_rake if which == "rake" else self._poly_flank
         if self._image is None or edge is None or len(self._poly_verts) != 4:
             return None

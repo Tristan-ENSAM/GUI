@@ -35,10 +35,10 @@ import numpy as np
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "abaqus_scripts"))
-from cel_common import (                                    # noqa: E402
-    ToolGeometryError,
+from cel_common import (                                    # noqa: F401
+    ToolGeometryError,          # re-exported: callers import it from here
     solve_tool_dimensions,
-    resolve_tool_translation,
+    resolve_tool_translation,   # re-exported: geometry_preview + tests
 )
 
 

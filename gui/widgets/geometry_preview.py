@@ -2,7 +2,7 @@
 """
 Matplotlib-based 2D preview of the cutting model geometry.
 
-Reproduces what abq_odb_generator.py builds, viewed in the XY plane:
+Reproduces what cel_model.py builds, viewed in the XY plane:
   - Tool: rectangle (h_tool x l_tool) with a fillet of radius r_tool between
     the rake face and the clearance face, rotated by rake/clear angles.
     NOTE: in your script the angles are encoded via the AngularDimensions
@@ -15,14 +15,12 @@ Reproduces what abq_odb_generator.py builds, viewed in the XY plane:
   - ROI / bbox: dashed rectangle.
 """
 from __future__ import annotations
-import math
 import logging
 import numpy as np
 
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon, Rectangle, FancyArrowPatch
 from matplotlib.collections import LineCollection
-from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerBase
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
@@ -501,7 +499,7 @@ class GeometryPreview(QWidget):
         # Always shown, in both formulations: the Reference Point is where
         # the velocity / encastrement BC will be applied in the Abaqus model.
         #   - CEL:        RP is hard-coded to TR (see tool_instance.vertices[4]
-        #                 in abq_odb_generator.py).
+        #                 in cel_model.py).
         #   - Lagrangian: RP is the corner the user picked in the Analysis tab.
         rp_loc = "TR" if not is_lagrangian else cfg.analysis.rp_location
         rp_world = None    # remains None when the tool geometry is invalid
@@ -638,7 +636,6 @@ class GeometryPreview(QWidget):
         and P_on_bot->BR are the rake/clearance faces; BR->TR and TR->TL are the
         borders."""
         try:
-            n_fillet = 24                       # must match tool_polygon default
             arc = tool_local[4 + 1:]            # after P_on_rake -> the fillet
             P_on_bot  = tool_local[0]
             BR, TR, TL = tool_local[1], tool_local[2], tool_local[3]

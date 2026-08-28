@@ -2,7 +2,7 @@
 """
 Model configuration dataclasses.
 
-Mirrors the dict structure expected by abq_odb_generator.py
+Mirrors the dict structure expected by cel_model.py
 (MODEL_CFG keys: process, tool, euler, bbox).
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from gui.core.unit_system import UnitSystem
 # ---------------------------------------------------------------------------
 def discretize(dim: float, element_size: float) -> float:
     """Floor `dim` to the nearest multiple of `element_size`, Decimal-safe.
-    Mirrors the function in abq_odb_generator.py so the GUI preview matches
+    Mirrors the function in cel_model.py so the GUI preview matches
     exactly what Abaqus will build."""
     d = Decimal(str(dim))
     es = Decimal(str(element_size))
@@ -140,7 +140,7 @@ class StepCfg:
         Its admissible window is computed by `mass_scaling_bounds()`.
 
     The factor is applied directly at material-write time inside
-    abq_odb_generator.py:  rho_eff = factor * rho ;  Cp_eff = Cp / factor.
+    cel_model.py:  rho_eff = factor * rho ;  Cp_eff = Cp / factor.
     No *Mass Scaling card is emitted in the .inp — the scaling lives in
     the material definition itself.
     """
@@ -224,7 +224,7 @@ class UICfg:
 
     `temp_unit` switches the display of Tm, Tr and similar temperature fields
     between Celsius and Kelvin. The internal Abaqus value is always in °C
-    (matching abq_odb_generator.py's expectations)."""
+    (matching cel_model.py's expectations)."""
     temp_unit: str = "C"     # "C" | "K"
 
 
@@ -232,7 +232,7 @@ class UICfg:
 class InteractionCfg:
     """Contact / interaction parameters for the tool-workpiece pair.
 
-    Mirrors what abq_odb_generator.py builds via `ContactProperty`:
+    Mirrors what cel_model.py builds via `ContactProperty`:
         - TangentialBehavior(formulation, table=((mu,),), fraction=slip_frac)
         - NormalBehavior(pressureOverclosure=HARD)
         - (optional) HeatGeneration(slaveFraction, masterFraction)
