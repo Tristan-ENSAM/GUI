@@ -7,6 +7,7 @@ Mirrors the dict structure expected by abq_odb_generator.py
 """
 from __future__ import annotations
 import json
+import math
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from decimal import Decimal
@@ -128,13 +129,15 @@ class StepCfg:
     Mass scaling
     ------------
     `mass_scaling_enabled`: whether to apply the factor to the materials.
-    `mass_scaling_factor_eulerian`: multiplied with the Eulerian (workpiece)
-        material density at the moment the .inp is written. Cp is divided
-        by the same factor so that thermal diffusivity k/(rho*Cp) is
-        preserved — only mechanical inertia is artificially boosted, the
-        thermal response stays physical.
-    `mass_scaling_factor_tool`: same idea for the tool. Often left at 1.0
-        (the tool is rigid in CEL, so mass scaling has no effect there).
+    `mass_scaling_factor`: ONE factor, multiplied with BOTH materials'
+        density at the moment the .inp is written. Cp is divided by the same
+        factor so that thermal diffusivity k/(rho*Cp) is preserved — only
+        mechanical inertia is artificially boosted, the thermal response
+        stays physical.
+        The export expands it into the two keys run_simul.py reads
+        (`..._eulerian` and `..._tool`); see `_step_export`. They used to be
+        two independent GUI fields, which had no legitimate reason to differ.
+        Its admissible window is computed by `mass_scaling_bounds()`.
 
     The factor is applied directly at material-write time inside
     abq_odb_generator.py:  rho_eff = factor * rho ;  Cp_eff = Cp / factor.
@@ -147,9 +150,29 @@ class StepCfg:
 
     # Mass scaling (CEL only — Lagrangian users should use Abaqus's own
     # *Mass Scaling card directly; we don't expose that here yet)
+    # Runtime output filter (Butterworth, applied by Abaqus BEFORE writing to
+    # the ODB, so it removes aliasing that no post-processing could undo).
+    # Cutoff in Hz: set it on the camera's integration bandwidth (-3 dB of the
+    # exposure boxcar = 0.443 / t_exposure).
+    output_filter_enabled:       bool  = False
+    # FIELD cutoff: the DIC chain. Correlating two images separated by dt and
+    # dividing by dt is already a moving average over that interval, and it
+    # DOMINATES the exposure blur. Cascade of both -> ~25.6 kHz at 60 kfps with
+    # a 5 us exposure (the exposure alone would give 88.6 kHz).
+    output_filter_cutoff_hz:     float = 25600.0
+    # HISTORY cutoff: forces are sampled far faster (500 kHz), so this filter
+    # only has to prevent ALIASING at the output rate; the real sensor
+    # bandwidth is applied afterwards in post-processing. Keep it HIGH: an IIR
+    # filter needs cutoff/(1/dt) > 1e-3, so a low cutoff here would demand an
+    # unreachable mass-scaling factor.
+    output_filter_cutoff_history_hz: float = 139000.0
+
     mass_scaling_enabled:        bool  = False
-    mass_scaling_factor_eulerian: float = 1.0
-    mass_scaling_factor_tool:    float = 1.0
+    # ONE factor, applied to BOTH the Eulerian workpiece and the tool. They
+    # used to be separate; keeping them equal removes a knob that had no
+    # legitimate reason to differ (and, when the tool factor was left at 1,
+    # silently halved the intended scaling of the model's inertia).
+    mass_scaling_factor:         float = 1.0
 
 
 @dataclass
@@ -375,6 +398,17 @@ def _clean_floats(obj):
     return obj
 
 
+def _step_export(step) -> dict:
+    """asdict(step), with the single mass-scaling factor expanded into the
+    two keys run_simul.py reads (`..._eulerian` and `..._tool`). The GUI
+    exposes one field; the generator applies it to both materials."""
+    d = asdict(step)
+    f = d.pop("mass_scaling_factor", 1.0)
+    d["mass_scaling_factor_eulerian"] = f
+    d["mass_scaling_factor_tool"] = f
+    return d
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -497,7 +531,7 @@ class ModelConfig:
             },
             "interaction": asdict(self.interaction),
             "bcs":         asdict(self.bcs),
-            "step":        asdict(self.step),
+            "step":        _step_export(self.step),
         })
 
     # ----- Profile save/load (JSON) -----
@@ -769,6 +803,110 @@ class ModelConfig:
             return 0.0
         alpha = k / (rho * cp)
         return L * L / (2.0 * alpha)
+
+    # Empirical calibration of the hexahedral characteristic length. The
+    # naive h/c overestimates Abaqus's initial stable increment by 1.84x;
+    # (h/sqrt(3))/c * bulk-viscosity correction reproduces it to 0.03% on
+    # 5 um and 2 um cubic Eulerian meshes. The sqrt(3) is INFERRED from those
+    # runs, not taken from the documentation: it holds for cubic hexes and
+    # should be re-checked on strongly distorted elements.
+    _HEX_CHAR_LENGTH_DIVISOR = 3.0 ** 0.5
+    # Abaqus refuses a filter whose cutoff/sampling ratio falls below this.
+    _FILTER_MIN_RATIO = 1.0e-3
+    # Reverberation must stay this many times ABOVE the filter cutoff, so the
+    # (2nd-order Butterworth) filter still attenuates it strongly. k = 3 is a
+    # deliberate compromise: k = 1 would leave the artefact at the -3 dB point.
+    _REVERB_MARGIN = 3.0
+
+    def initial_stable_dt(self, bulk_viscosity_b1: float = 0.06) -> float:
+        """Analytical Abaqus initial stable increment, at mass scaling = 1.
+
+            dt0 = (h / sqrt(3)) / c_d * (sqrt(1 + b1^2) - b1)
+
+        with c_d the DILATATIONAL wave speed sqrt((lambda + 2 mu)/rho) of the
+        Eulerian material. Returns 0.0 if the inputs are unusable.
+
+        Verified against two runs (5 um -> 4.3063e-10 s, 2 um -> 1.7230e-10 s)
+        to better than 0.03%, so the mass-scaling bounds below need no
+        reference simulation."""
+        try:
+            E = float(self.euler_material.get("E", 0.0))       # MPa
+            nu = float(self.euler_material.get("nu", 0.0))
+            rho = float(self.euler_material.get("rho", 0.0))   # t/mm^3
+            h = float(self.elem_size)                          # mm
+        except (TypeError, ValueError):
+            return 0.0
+        if E <= 0 or rho <= 0 or h <= 0 or not (-1.0 < nu < 0.5):
+            return 0.0
+        lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        mu = E / (2.0 * (1.0 + nu))
+        c_d = math.sqrt((lam + 2.0 * mu) / rho)   # mm/s in mm-t-s
+        if c_d <= 0:
+            return 0.0
+        b1 = float(bulk_viscosity_b1)
+        corr = math.sqrt(1.0 + b1 * b1) - b1
+        return (h / self._HEX_CHAR_LENGTH_DIVISOR) / c_d * corr
+
+    def mass_scaling_bounds(self, filter_cutoff_hz: float,
+                            guard_coefficient: float = 1.609e-6,
+                            guard_max: float = 0.01) -> dict:
+        """Admissible mass-scaling window, derived analytically.
+
+        LOWER bound - numerical validity of the runtime output filter. The
+        Butterworth is an IIR filter running at the SOLVER increment; Abaqus
+        rejects a normalized cutoff below 1e-3, and mass scaling raises the
+        increment as sqrt(ms):
+            ms > (1e-3 / (fc * dt0))^2
+
+        UPPER bound 1 - the domain reverberation (an artefact of reflecting
+        boundaries) is lowered as 1/sqrt(ms). Scaled too far, it drops INTO
+        the band the filter is supposed to protect, defeating the filter:
+            ms < (c_d / (2 * L * k * fc))^2
+        L is taken as the DIAGONAL of the Eulerian domain.
+
+        UPPER bound 2 - energy guard: the parasitic kinetic-to-internal energy
+        ratio grows linearly with the factor, so
+            ms < guard_max / guard_coefficient
+        `guard_coefficient` MUST be re-measured per configuration (it depends
+        on the mesh through ALLIE); the default is from one 5 um run and is
+        only indicative.
+
+        Returns a dict with the three bounds, the retained window and whether
+        it is empty. Values are 0.0/None when the inputs are unusable."""
+        out = {"dt0": 0.0, "ms_min": None, "ms_freq": None, "ms_guard": None,
+               "ms_max": None, "empty": True, "limiting": ""}
+        dt0 = self.initial_stable_dt()
+        if dt0 <= 0 or filter_cutoff_hz <= 0:
+            return out
+        out["dt0"] = dt0
+        # dt0 is in seconds; cutoff in Hz -> the product is dimensionless.
+        out["ms_min"] = (self._FILTER_MIN_RATIO / (filter_cutoff_hz * dt0)) ** 2
+
+        E = float(self.euler_material.get("E", 0.0))
+        nu = float(self.euler_material.get("nu", 0.0))
+        rho = float(self.euler_material.get("rho", 0.0))
+        lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        mu = E / (2.0 * (1.0 + nu))
+        c_d = math.sqrt((lam + 2.0 * mu) / rho)          # mm/s
+
+        g = self.euler_geometry
+        width = float(g.l_wp) + float(g.l_void)
+        height = float(g.h_wp) + float(g.h_void)
+        L = math.hypot(width, height)                     # mm, domain diagonal
+        if L > 0:
+            out["ms_freq"] = (c_d / (2.0 * L * self._REVERB_MARGIN
+                                     * filter_cutoff_hz)) ** 2
+        if guard_coefficient > 0:
+            out["ms_guard"] = guard_max / guard_coefficient
+
+        highs = [v for v in (out["ms_freq"], out["ms_guard"]) if v is not None]
+        if highs:
+            out["ms_max"] = min(highs)
+            out["limiting"] = ("reverberation"
+                               if out["ms_max"] == out["ms_freq"]
+                               else "energy guard")
+            out["empty"] = out["ms_max"] <= out["ms_min"]
+        return out
 
     def stable_dt_estimate(self) -> float:
         """Courant-style explicit stable time increment for the workpiece:

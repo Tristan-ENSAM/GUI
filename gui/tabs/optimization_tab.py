@@ -522,7 +522,7 @@ class OptimizationTab(QWidget):
                     "noGUI=%s" % prefs.abaqus_script, "--",
                     "--model_cfg", repr(cfg.to_params_dict()),
                     "--run_cfg", repr({"cpus": cpus, "job_name": job})]
-            _ms = (float(getattr(cfg.step, "mass_scaling_factor_eulerian", 1.0))
+            _ms = (float(getattr(cfg.step, "mass_scaling_factor", 1.0))
                    if getattr(cfg.step, "mass_scaling_enabled", False) else 1.0)
             self._log_ui("\n%s\n[%s] ms=%.4g wp=%.4g tool=%.4g | "
                          "h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g\n%s\n"

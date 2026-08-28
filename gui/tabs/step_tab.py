@@ -169,7 +169,7 @@ class StepTab(QWidget):
         """Mass scaling controls.
 
         When enabled, the Eulerian (workpiece) material's density is
-        multiplied by `mass_scaling_factor_eulerian` AND its specific
+        multiplied by `mass_scaling_factor` AND its specific
         heat Cp is divided by the same factor — preserving the thermal
         diffusivity k/(ρ·Cp). Same logic for the tool. Stable time-step
         scales as sqrt(factor), so a factor of 100 → ~10× speedup.
@@ -202,32 +202,92 @@ class StepTab(QWidget):
         explainer.setWordWrap(True)
         v.addWidget(explainer)
 
-        # Factor: eulerian
+        # ONE factor for BOTH bodies (the tool factor was removed: two knobs
+        # with no reason to differ, and leaving the tool at 1 silently halved
+        # the intended scaling of the model's inertia).
         self.f_ms_eul = NumField(
-            "Factor (Eulerian / workpiece)",
-            self.cfg.step.mass_scaling_factor_eulerian, "",
+            "Factor (workpiece AND tool)",
+            self.cfg.step.mass_scaling_factor, "",
             minimum=1.0, maximum=1e8, decimals=3,
         )
         self.f_ms_eul.setToolTip(
-            "Mass-scaling factor applied to the Eulerian (workpiece)\n"
-            "material. Typical values: 1 (no scaling) to ~1000."
+            "Mass-scaling factor, applied identically to the Eulerian\n"
+            "workpiece and to the tool.\n"
+            "See the admissible window computed below: it is bounded from\n"
+            "BELOW by the output filter's numerical validity and from ABOVE\n"
+            "by the domain reverberation dropping into the filtered band."
         )
         v.addWidget(self.f_ms_eul)
         self.f_ms_eul.valueChanged.connect(self._on_change)
 
-        # Factor: tool
-        self.f_ms_tool = NumField(
-            "Factor (Tool)",
-            self.cfg.step.mass_scaling_factor_tool, "",
-            minimum=1.0, maximum=1e8, decimals=3,
+        # ---- Output filter (drives the lower bound of the window) ----------
+        self.cb_filter = QCheckBox("Filter field output (Butterworth, runtime)")
+        self.cb_filter.setChecked(self.cfg.step.output_filter_enabled)
+        self.cb_filter.setToolTip(
+            "Abaqus filters BEFORE writing to the ODB, at the solver\n"
+            "increment. This is the only way to prevent aliasing: once\n"
+            "aliased data is written, no post-processing can recover it."
         )
-        self.f_ms_tool.setToolTip(
-            "Mass-scaling factor applied to the tool material. Often kept\n"
-            "at 1.0 since the tool is rigid in CEL and mass scaling has\n"
-            "no effect on rigid bodies."
+        v.addWidget(self.cb_filter)
+        self.cb_filter.toggled.connect(self._on_change)
+
+        self.f_fc = NumField(
+            "Field cutoff (DIC chain)", self.cfg.step.output_filter_cutoff_hz,
+            "Hz", minimum=1.0, maximum=1e9, decimals=1,
         )
-        v.addWidget(self.f_ms_tool)
-        self.f_ms_tool.valueChanged.connect(self._on_change)
+        self.f_fc.setToolTip(
+            "Bandwidth of the DIC velocity measurement.\n"
+            "Correlating two images separated by dt and dividing by dt is\n"
+            "ALREADY a moving average over that interval, and it dominates the\n"
+            "exposure blur. The two cascade:\n"
+            "    H(f) = sinc(pi f dt_frames) x sinc(pi f t_exposure)\n"
+            "e.g. 60 kfps + 5 us exposure -> 25.6 kHz (the exposure alone would\n"
+            "give 88.6 kHz -- using it would filter 3.5x too high).\n"
+            "This cutoff drives the LOWER bound of the mass-scaling window."
+        )
+        v.addWidget(self.f_fc)
+        self.f_fc.valueChanged.connect(self._on_change)
+
+        self.f_fc_hist = NumField(
+            "History cutoff (anti-aliasing)",
+            self.cfg.step.output_filter_cutoff_history_hz,
+            "Hz", minimum=1.0, maximum=1e9, decimals=1,
+        )
+        self.f_fc_hist.setToolTip(
+            "Applies to the reaction forces at the tool RP.\n"
+            "Forces are acquired far faster than images, so this filter is NOT\n"
+            "meant to match the sensor: it only prevents ALIASING at the output\n"
+            "rate. Apply the real dynamometer bandwidth afterwards, in\n"
+            "post-processing (history output is 1-D, so that is cheap).\n"
+            "KEEP THIS HIGH: an IIR filter needs cutoff/(1/dt) > 1e-3, so a low\n"
+            "cutoff here would demand an unreachable mass-scaling factor.\n"
+            "A sensible value is the output rate / 6."
+        )
+        v.addWidget(self.f_fc_hist)
+        self.f_fc_hist.valueChanged.connect(self._on_change)
+
+        # ---- Admissible mass-scaling window (computed, no run needed) ------
+        self.lbl_ms_bounds = QLabel()
+        self.lbl_ms_bounds.setWordWrap(True)
+        self.lbl_ms_bounds.setStyleSheet(
+            "QLabel { padding: 6px; border: 1px solid #ccc; "
+            "background: #fafafa; }")
+        self.lbl_ms_bounds.setToolTip(
+            "Bounds derived analytically from the mesh, the materials and the\n"
+            "domain size - no reference simulation needed.\n\n"
+            "LOWER: Abaqus rejects an output filter whose cutoff/sampling\n"
+            "ratio is below 1e-3; mass scaling raises the solver increment as\n"
+            "sqrt(ms), which raises that ratio.\n\n"
+            "UPPER: mass scaling lowers the domain reverberation as 1/sqrt(ms).\n"
+            "Scaled too far it falls INTO the filtered band and the filter can\n"
+            "no longer remove it. A margin k = 3 is imposed so the 2nd-order\n"
+            "Butterworth still attenuates it strongly (k = 1 would leave the\n"
+            "artefact sitting at the -3 dB point).\n\n"
+            "The energy-guard bound uses an INDICATIVE coefficient measured on\n"
+            "one 5 um run; it depends on the mesh through ALLIE and should be\n"
+            "re-measured per configuration."
+        )
+        v.addWidget(self.lbl_ms_bounds)
 
         # Live indicator: stable-dt speedup estimate (sqrt of factor)
         self.lbl_ms_speedup = QLabel()
@@ -244,7 +304,6 @@ class StepTab(QWidget):
         refresh the speed-up estimate label."""
         enabled = self.cb_ms_enabled.isChecked()
         self.f_ms_eul.setEnabled(enabled)
-        self.f_ms_tool.setEnabled(enabled)
         if enabled:
             f_eul = self.f_ms_eul.value()
             self.lbl_ms_speedup.setText(
@@ -252,6 +311,43 @@ class StepTab(QWidget):
             )
         else:
             self.lbl_ms_speedup.setText("(disabled — materials unchanged)")
+        self.f_fc.setEnabled(self.cb_filter.isChecked())
+        self.f_fc_hist.setEnabled(self.cb_filter.isChecked())
+        self._refresh_ms_bounds()
+
+    def _refresh_ms_bounds(self):
+        """Show the admissible mass-scaling window, computed analytically."""
+        self._pull_from_widgets()
+        fc = self.cfg.step.output_filter_cutoff_hz
+        if not self.cfg.step.output_filter_enabled:
+            self.lbl_ms_bounds.setText(
+                "Output filter disabled — no lower bound on the factor.\n"
+                "Without it the ODB stores ALIASED velocity fields, which no "
+                "post-processing can undo.")
+            return
+        b = self.cfg.mass_scaling_bounds(fc)
+        if b["ms_min"] is None or b["ms_max"] is None:
+            self.lbl_ms_bounds.setText(
+                "Admissible window: not computable (check E, ν, ρ, elem_size "
+                "and the domain dimensions).")
+            return
+        cur = self.cfg.step.mass_scaling_factor
+        if b["empty"]:
+            self.lbl_ms_bounds.setText(
+                f"⚠ EMPTY window: lower bound {b['ms_min']:.0f} exceeds upper "
+                f"bound {b['ms_max']:.0f} ({b['limiting']}).\n"
+                "The mesh is too fine relative to the domain for any factor to "
+                "satisfy both. Coarsen the mesh, shrink the domain, or raise "
+                "the filter cutoff.")
+            return
+        inside = b["ms_min"] <= cur <= b["ms_max"]
+        mark = "✓ inside" if inside else "⚠ OUTSIDE"
+        self.lbl_ms_bounds.setText(
+            f"Admissible factor: {b['ms_min']:.0f} … {b['ms_max']:.0f}   "
+            f"(current {cur:.0f} — {mark})\n"
+            f"lower = filter validity · upper = {b['limiting']} · "
+            f"dt₀ = {b['dt0']:.3e} s"
+        )
 
     def _refresh_dt_label(self):
         st = self.f_sim_time.value()
@@ -325,8 +421,10 @@ class StepTab(QWidget):
         s.sim_time = self.f_sim_time.value()
         s.n_frames = self.f_n_frames.value()
         s.mass_scaling_enabled         = self.cb_ms_enabled.isChecked()
-        s.mass_scaling_factor_eulerian = self.f_ms_eul.value()
-        s.mass_scaling_factor_tool     = self.f_ms_tool.value()
+        s.mass_scaling_factor          = self.f_ms_eul.value()
+        s.output_filter_enabled        = self.cb_filter.isChecked()
+        s.output_filter_cutoff_hz      = self.f_fc.value()
+        s.output_filter_cutoff_history_hz = self.f_fc_hist.value()
         # History sampling is always synced to the field-output frame count;
         # RF1/RF2 and PRESELECT are always written (fixed extraction).
         s.output.ho_n_intervals = s.n_frames
@@ -337,15 +435,18 @@ class StepTab(QWidget):
         """Push cfg values into widgets (used after Open / New)."""
         s = self.cfg.step
         widgets = [self.f_sim_time, self.f_n_frames,
-                   self.cb_ms_enabled, self.f_ms_eul, self.f_ms_tool]
+                   self.cb_ms_enabled, self.f_ms_eul,
+                   self.cb_filter, self.f_fc, self.f_fc_hist]
         for w in widgets:
             w.blockSignals(True)
         try:
             self.f_sim_time.set_value(s.sim_time)
             self.f_n_frames.set_value(s.n_frames)
             self.cb_ms_enabled.setChecked(s.mass_scaling_enabled)
-            self.f_ms_eul.set_value(s.mass_scaling_factor_eulerian)
-            self.f_ms_tool.set_value(s.mass_scaling_factor_tool)
+            self.f_ms_eul.set_value(s.mass_scaling_factor)
+            self.cb_filter.setChecked(s.output_filter_enabled)
+            self.f_fc.set_value(s.output_filter_cutoff_hz)
+            self.f_fc_hist.set_value(s.output_filter_cutoff_history_hz)
         finally:
             for w in widgets:
                 w.blockSignals(False)

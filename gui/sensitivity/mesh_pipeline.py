@@ -144,8 +144,7 @@ def run_mesh_domain_pipeline(
         # hold the identified factor for every later step (workpiece AND tool)
         base_cfg = _apply(base_cfg)
         base_cfg.step.mass_scaling_enabled = True
-        base_cfg.step.mass_scaling_factor_eulerian = float(ms_factor)
-        base_cfg.step.mass_scaling_factor_tool = float(ms_factor)
+        base_cfg.step.mass_scaling_factor = float(ms_factor)
 
     # -- Step 1: workpiece element size (optional) ---------------------------
     wp = float(base_cfg.elem_size)

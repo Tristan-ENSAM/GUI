@@ -264,8 +264,8 @@ def make_mass_scaling_sample_fn(base_cfg, run_bundle, roi, grid_step,
     """Return sample_fn(factor) -> {vel_label: (Nt, Np), "guard": float} for the
     mass-scaling step.
 
-    Sets `mass_scaling_enabled` + `mass_scaling_factor_eulerian` AND
-    `mass_scaling_factor_tool` (both = the probed factor) on a copy of the
+    Sets `mass_scaling_enabled` + `mass_scaling_factor` (one factor, applied
+    to workpiece AND tool by the exporter) on a copy of the
     config, forces the energy history on, runs one Abaqus job, and returns the
     ROI velocity sampled on the fixed grid plus the guard = ratio of
     time-aggregated ALLKE/ALLIE.
@@ -283,10 +283,9 @@ def make_mass_scaling_sample_fn(base_cfg, run_bundle, roi, grid_step,
     def sample_fn(factor):
         cfg = copy.deepcopy(base_cfg)
         cfg.step.mass_scaling_enabled = True
-        cfg.step.mass_scaling_factor_eulerian = float(factor)
+        cfg.step.mass_scaling_factor = float(factor)
         # The identified factor is applied to the tool as well (ms_tool =
         # ms_eul), so each probe reflects both materials being scaled.
-        cfg.step.mass_scaling_factor_tool = float(factor)
         try:
             # ALLKE/ALLIE come from the PRESELECT whole-model history
             cfg.step.output.ho_preselect = True

@@ -232,7 +232,7 @@ def _non_material_specs() -> list[ParamSpec]:
 
         # --- Numerical ---
         ParamSpec("elem_size",                 "Taille d'élément",       "Numérique", "mm", rel_range=0.40),
-        ParamSpec("step.mass_scaling_factor_eulerian", "Mass scaling (pièce)", "Numérique", "—", rel_range=0.0, abs_range=0.0),
+        ParamSpec("step.mass_scaling_factor", "Mass scaling (pièce + outil)", "Numérique", "—", rel_range=0.0, abs_range=0.0),
     ]
 
 
