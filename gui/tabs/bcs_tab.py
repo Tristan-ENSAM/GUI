@@ -301,13 +301,6 @@ class BCsTab(QWidget):
         self.f_T.valueChanged.connect(self._on_change)
         return g
 
-    # =====================================================================
-    # Hooks
-    # =====================================================================
-    def on_analysis_changed(self):
-        is_lagrangian = (self.cfg.analysis.formulation == "Lagrangian")
-        self._eul_group.setVisible(not is_lagrangian)
-        self._refresh_preview()
 
     def refresh_temp_unit(self):
         """Back-compat alias — a temp-base change is a unit-system change."""
@@ -425,6 +418,5 @@ class BCsTab(QWidget):
         finally:
             for w in widgets:
                 w.blockSignals(False)
-        self.on_analysis_changed()
         self._refresh_face_visibility()
         self._refresh_preview()

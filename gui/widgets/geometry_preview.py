@@ -99,11 +99,8 @@ from gui.core.tool_geometry_calc import (
 class GeometryPreview(QWidget):
     """Embeds a Matplotlib FigureCanvas that draws the model.
 
-    What is displayed is driven entirely by `cfg.analysis.formulation`:
-      - CEL:        Eulerian domain (blue) + workpiece reference (green)
-                    + tool (orange) + ROI (dashed)
-      - Lagrangian: workpiece (green, meshed body) + tool (orange) +
-                    Tool RP marker + ROI (dashed)
+    The build is CEL-only: Eulerian domain (blue) + workpiece reference
+    (green) + tool (orange) + Tool RP marker + ROI (dashed).
 
     The optional mesh overlay (toggled from the Mesh seeds group of the
     GeometryTab via update_from_config's `show_mesh` arg) is drawn over
@@ -222,9 +219,6 @@ class GeometryPreview(QWidget):
     def _compute_fit_limits(self, cfg: ModelConfig):
         """Return (xlim, ylim) tuples that fit all visible shapes with a
         10% margin. Same logic that update_from_config uses on each redraw."""
-        is_lagrangian = (cfg.analysis.formulation == "Lagrangian")
-        show_euler = not is_lagrangian
-
         h_wp_eff, h_void_eff, l_wp_eff, l_void_eff = cfg.effective_euler_dims()
         eul_x = -l_wp_eff + cfg.euler_position.x0
         eul_y = -h_wp_eff + cfg.euler_position.y0
@@ -254,9 +248,8 @@ class GeometryPreview(QWidget):
             # No tool contribution to the fit; fall back to the other shapes
             xs = [wp_x, wp_x + l_wp_eff]
             ys = [wp_y, wp_y + h_wp_eff]
-        if show_euler:
-            xs += [eul_x, eul_x + eul_w]
-            ys += [eul_y, eul_y + eul_h]
+        xs += [eul_x, eul_x + eul_w]
+        ys += [eul_y, eul_y + eul_h]
         pad = 0.1 * max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
 
@@ -395,10 +388,6 @@ class GeometryPreview(QWidget):
         # Reference-image watermark first, so it sits behind everything.
         self._draw_reference_overlay()
 
-        is_lagrangian = (cfg.analysis.formulation == "Lagrangian")
-        # In CEL mode we draw the Eulerian background domain; in Lagrangian
-        # mode we don't (the workpiece IS the deformable body).
-        show_euler = not is_lagrangian
 
         # --- Eulerian domain (CEL only) ---
         h_wp_eff, h_void_eff, l_wp_eff, l_void_eff = cfg.effective_euler_dims()
@@ -407,30 +396,23 @@ class GeometryPreview(QWidget):
         eul_w = l_wp_eff + l_void_eff
         eul_h = h_wp_eff + h_void_eff
 
-        if show_euler:
-            eul = Rectangle((eul_x, eul_y), eul_w, eul_h,
-                            facecolor="#cce5ff", edgecolor="#1f6fb2",
-                            linewidth=1.2, alpha=0.55, label="Eulerian domain")
-            self._ax.add_patch(eul)
-            # In CEL the mesh covers the full Eulerian domain (workpiece + void)
-            if show_mesh and cfg.elem_size > 0:
-                self._draw_mesh(eul_x, eul_y, eul_w, eul_h, cfg.elem_size,
-                                color="#1f6fb2")
+        eul = Rectangle((eul_x, eul_y), eul_w, eul_h,
+                        facecolor="#cce5ff", edgecolor="#1f6fb2",
+                        linewidth=1.2, alpha=0.55, label="Eulerian domain")
+        self._ax.add_patch(eul)
+        # The mesh covers the full Eulerian domain (workpiece + void)
+        if show_mesh and cfg.elem_size > 0:
+            self._draw_mesh(eul_x, eul_y, eul_w, eul_h, cfg.elem_size,
+                            color="#1f6fb2")
 
         # --- Workpiece ---
         wp_x = -l_wp_eff + cfg.wp_position.x0
         wp_y = -h_wp_eff + cfg.wp_position.y0
-        wp_label = "Workpiece" if is_lagrangian else "Workpiece (reference)"
+        wp_label = "Workpiece (reference)"
         wp = Rectangle((wp_x, wp_y), l_wp_eff, h_wp_eff,
                        facecolor="#a8d8a8", edgecolor="#2e7d32",
                        linewidth=1.2, alpha=0.75, label=wp_label)
         self._ax.add_patch(wp)
-
-        # In Lagrangian mode the workpiece is the deformable body, so the
-        # mesh overlay goes here.
-        if is_lagrangian and show_mesh and cfg.elem_size > 0:
-            self._draw_mesh(wp_x, wp_y, l_wp_eff, h_wp_eff, cfg.elem_size,
-                            color="#2e7d32")
 
         # --- Tool ---
         # The tool outline depends on a closure system that can be ill-
@@ -496,12 +478,11 @@ class GeometryPreview(QWidget):
                               level=logging.DEBUG)
 
         # --- Tool RP marker ---
-        # Always shown, in both formulations: the Reference Point is where
+        # Always shown: the Reference Point is where
         # the velocity / encastrement BC will be applied in the Abaqus model.
-        #   - CEL:        RP is hard-coded to TR (see tool_instance.vertices[4]
-        #                 in cel_model.py).
-        #   - Lagrangian: RP is the corner the user picked in the Analysis tab.
-        rp_loc = "TR" if not is_lagrangian else cfg.analysis.rp_location
+        # CEL: the RP is hard-coded to TR (see tool_instance.vertices[4] in
+        # cel_model.py).
+        rp_loc = "TR"
         rp_world = None    # remains None when the tool geometry is invalid
         # Only place the RP if we have a valid tool (otherwise no anchor
         # point makes sense). _tool_rp_world_position returns None when
@@ -532,8 +513,7 @@ class GeometryPreview(QWidget):
         if show_bcs:
             self._draw_bcs(cfg, tool_world, rp_world,
                            eul_x, eul_y, eul_w, eul_h,
-                           wp_x, wp_y, l_wp_eff, h_wp_eff,
-                           is_lagrangian)
+                           wp_x, wp_y, l_wp_eff, h_wp_eff)
 
         # --- Origin marker ---
         self._ax.plot(0, 0, marker="+", color="black", markersize=10)
@@ -589,16 +569,15 @@ class GeometryPreview(QWidget):
 
         `tool_world` is the polygon vertices already translated to
         cfg.tool_position.
-        `rp_location` overrides cfg.analysis.rp_location when supplied —
-        used by the preview to force TR in CEL mode regardless of the
-        Lagrangian-only setting in the Analysis tab.
+        `rp_location` selects the corner; it defaults to "TR", which is
+        what cel_model.py hard-codes (tool_instance.vertices[4]).
 
         Returns None if the location is unknown or if the tool geometry
         is invalid (in which case `tool_world` will not have been built
         either and the caller already handles the error)."""
         g = cfg.tool_geometry
         tx, ty, _engages, _reason = GeometryPreview._tool_offset(cfg)
-        loc = rp_location if rp_location is not None else cfg.analysis.rp_location
+        loc = rp_location if rp_location is not None else "TR"
         # Resolve the true (h, l) of the tool outline — these are NOT the
         # raw GUI inputs h_tool / l_tool, they are solved from the closure
         # system (see _solve_tool_dimensions). The TR / BR corners are at
@@ -774,8 +753,7 @@ class GeometryPreview(QWidget):
 
     def _draw_bcs(self, cfg, tool_world, rp_world,
                   eul_x, eul_y, eul_w, eul_h,
-                  wp_x, wp_y, l_wp_eff, h_wp_eff,
-                  is_lagrangian: bool):
+                  wp_x, wp_y, l_wp_eff, h_wp_eff):
         """Overlay BC or IC decorations on the preview, based on
         `self.bc_view_mode`:
           - "BC": cutting velocity arrows + per-face inflow/outflow arrows
@@ -791,25 +769,24 @@ class GeometryPreview(QWidget):
         mode = getattr(self, "bc_view_mode", "BC")
 
         # Pickable segments: 4 Eulerian faces (CEL only)
-        if not is_lagrangian:
-            self._pickable_segments.append(
-                ("eul_left",   (eul_x, eul_y,
-                                eul_x, eul_y + eul_h)))
-            self._pickable_segments.append(
-                ("eul_right",  (eul_x + eul_w, eul_y,
-                                eul_x + eul_w, eul_y + eul_h)))
-            self._pickable_segments.append(
-                ("eul_bot",    (eul_x,         eul_y,
-                                eul_x + eul_w, eul_y)))
-            self._pickable_segments.append(
-                ("eul_top",    (eul_x,         eul_y + eul_h,
-                                eul_x + eul_w, eul_y + eul_h)))
+        self._pickable_segments.append(
+            ("eul_left",   (eul_x, eul_y,
+                            eul_x, eul_y + eul_h)))
+        self._pickable_segments.append(
+            ("eul_right",  (eul_x + eul_w, eul_y,
+                            eul_x + eul_w, eul_y + eul_h)))
+        self._pickable_segments.append(
+            ("eul_bot",    (eul_x,         eul_y,
+                            eul_x + eul_w, eul_y)))
+        self._pickable_segments.append(
+            ("eul_top",    (eul_x,         eul_y + eul_h,
+                            eul_x + eul_w, eul_y + eul_h)))
 
         # =================================================================
         # IC view: initial velocity field + Tini cross-hatch on bodies
         # =================================================================
         if mode == "IC":
-            if not is_lagrangian and abs(b.initial_velocity) > 0:
+            if abs(b.initial_velocity) > 0:
                 v_sign = 1.0 if b.initial_velocity > 0 else -1.0
                 v_mmin = b.initial_velocity * 60.0 / 1000.0
                 self._draw_velocity_field(
@@ -826,9 +803,9 @@ class GeometryPreview(QWidget):
             if tool_world is not None:
                 self._draw_temperature_hatch(tool_world,
                                              color="#e74c3c", legend=False)
-            if not is_lagrangian:
-                self._draw_eul_temperature_hatch(eul_x, eul_y, eul_w, eul_h,
-                                                  color="#e74c3c")
+            self._draw_eul_temperature_hatch(eul_x, eul_y, eul_w, eul_h,
+                                              color="#e74c3c")
+
             self._ax.plot([], [], color="#e74c3c", linestyle=":",
                           linewidth=1.4,
                           label=f"Initial temperature ({T_label})")
@@ -838,12 +815,11 @@ class GeometryPreview(QWidget):
         # BC view
         # =================================================================
         # Inflow/outflow arrows on the enabled faces
-        if not is_lagrangian:
-            self._decorate_euler_faces(eul_x, eul_y, eul_w, eul_h, b)
+        self._decorate_euler_faces(eul_x, eul_y, eul_w, eul_h, b)
 
         # Cutting velocity arrows
         v_cut = b.cutting_speed
-        if abs(v_cut) > 0 and not is_lagrangian:
+        if abs(v_cut) > 0:
             v_mmin = v_cut * 60.0 / 1000.0
             faces = list(b.cutting_velocity_faces or [])
             for face_id in faces:
@@ -859,12 +835,8 @@ class GeometryPreview(QWidget):
                               label=f"Cutting velocity ({v_mmin:.3g} m/min)")[0]
                 setattr(proxy, _ARROW_FLAG, True)
 
-        # Tool encastrement on l_2 + l_3 (CEL = always; Lagrangian tool_moves: skip)
-        tool_is_fixed = not (
-            cfg.analysis.formulation == "Lagrangian"
-            and cfg.analysis.tool_motion == "tool_moves"
-        )
-        if tool_is_fixed and tool_world is not None:
+        # Tool encastrement on l_2 + l_3: in CEL the tool is always fixed.
+        if tool_world is not None:
             self._draw_tool_encastrement(tool_world, cfg)
 
     # ---------------------------------------------------------------

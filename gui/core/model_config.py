@@ -176,47 +176,6 @@ class StepCfg:
 
 
 @dataclass
-class AnalysisCfg:
-    """High-level analysis-type settings.
-
-    `formulation` switches between two Abaqus generator scripts:
-      - "CEL"        -> abq_odb_generator.py        (Eulerian workpiece,
-                                                     ExplicitDynamicsStep,
-                                                     VolFraction predefined field)
-      - "Lagrangian" -> abq_lagrangian_generator.py (deformable workpiece mesh,
-                                                     TempDisplacementDynamicsStep,
-                                                     element deletion via JC damage)
-
-    The remaining fields are only used in Lagrangian mode (ignored in CEL):
-
-      - `tool_motion`     : which body moves.
-            "tool_moves"      : workpiece bottom fixed, cutting_speed applied
-                                to the tool RP (the workpiece stays still).
-            "workpiece_moves" : tool RP fixed, cutting_speed applied to the
-                                workpiece bottom (same kinematics as the
-                                current CEL setup).
-      - `tool_rigid`      : if True, the tool is a RigidBody driven by the RP
-                            (same as your CEL); if False, the tool is a
-                            deformable elastic body (allows realistic tool
-                            heating, but ~2-3x slower).
-      - `element_deletion`: if True, fully-damaged elements are removed from
-                            the mesh, which lets the chip form by material
-                            separation (continuum approach). Disable only for
-                            debugging — without deletion the workpiece will
-                            entangle.
-      - `rp_location`     : which corner of the tool carries the Reference
-                            Point. Default "TR" (top-right): far from the
-                            plastically active cutting edge, numerically
-                            cleaner for applying the velocity BC.
-    """
-    formulation:      str  = "CEL"           # "CEL" | "Lagrangian"
-    tool_motion:      str  = "workpiece_moves"  # "tool_moves" | "workpiece_moves"
-    tool_rigid:       bool = True
-    element_deletion: bool = True
-    rp_location:      str  = "TR"            # "TR" | "BR" | "centroid"
-
-
-@dataclass
 class UICfg:
     """User-interface preferences that don't affect the physics but do affect
     how values are displayed in the GUI (and saved alongside the profile so
@@ -426,7 +385,6 @@ class JobCfg:
 class ModelConfig:
     """Top-level model config. Materials are kept as raw dicts for now
     (filled by the Materials tab later — defaults below match test.py)."""
-    analysis:       AnalysisCfg    = field(default_factory=AnalysisCfg)
     ui:             UICfg          = field(default_factory=UICfg)
     units:          UnitSystem     = field(default_factory=UnitSystem)
     job:            JobCfg         = field(default_factory=JobCfg)
@@ -550,7 +508,6 @@ class ModelConfig:
         return {
             "format_version": self.FORMAT_VERSION,
             "saved_at":       datetime.now().isoformat(timespec="seconds"),
-            "analysis":       asdict(self.analysis),
             "ui":             asdict(self.ui),
             "units":          self.units.to_dict(),
             "job":            asdict(self.job),
@@ -606,7 +563,6 @@ class ModelConfig:
                 if hasattr(dc, k):
                     setattr(dc, k, v)
 
-        _apply(cfg.analysis,       data.get("analysis"))
         _apply(cfg.ui,             data.get("ui"))
         # Unit system (newer format). Keep it consistent with ui.temp_unit:
         #  - new profiles carry a "units" block -> it drives the temp base;
@@ -726,11 +682,8 @@ class ModelConfig:
         if g.discretize:
             return (self.elem_size, self.elem_size)
 
-        # Determine the rectangle that gets seeded
-        if self.analysis.formulation == "Lagrangian":
-            Lx, Ly = g.l_wp, g.h_wp
-        else:
-            Lx, Ly = (g.l_wp + g.l_void), (g.h_wp + g.h_void)
+        # Rectangle that gets seeded (CEL: workpiece + void)
+        Lx, Ly = (g.l_wp + g.l_void), (g.h_wp + g.h_void)
 
         def _per_direction(L: float) -> float:
             if L <= 0:
@@ -763,12 +716,8 @@ class ModelConfig:
         if self.elem_size <= 0:
             return 0
         h_wp, h_void, l_wp, l_void = self.effective_euler_dims()
-        if self.analysis.formulation == "Lagrangian":
-            nx = round(l_wp / self.elem_size)
-            ny = round(h_wp / self.elem_size)
-        else:
-            nx = round((l_wp + l_void) / self.elem_size)
-            ny = round((h_wp + h_void) / self.elem_size)
+        nx = round((l_wp + l_void) / self.elem_size)
+        ny = round((h_wp + h_void) / self.elem_size)
         return max(0, nx * ny)
 
     def tool_thermal_dt_estimate(self) -> float:

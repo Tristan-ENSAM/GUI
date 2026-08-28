@@ -276,9 +276,6 @@ class GeometryTab(QWidget):
         self.f_ymin.set_value(c.bbox.ymin); self.f_ymax.set_value(c.bbox.ymax)
         # z bounds are fixed (z = 0 face); no widget to update.
 
-        # Also update visibility of the Eulerian-domain group (it depends on
-        # analysis.formulation, which may have changed via the loaded file).
-        self._euler_group.setVisible(c.analysis.formulation != "Lagrangian")
         self._refresh()
 
     def set_reference_overlay(self, image, mm_per_px):
@@ -302,21 +299,13 @@ class GeometryTab(QWidget):
             show_bcs=False,
         )
 
-        is_lagrangian = (self.cfg.analysis.formulation == "Lagrangian")
         h_wp, h_void, l_wp, l_void = self.cfg.effective_euler_dims()
 
-        # Effective dims row: hide h_void / l_void in Lagrangian mode where
-        # they are meaningless.
-        if is_lagrangian:
-            self.lbl_eff_dims_title.setText("Effective (h_wp, l_wp):")
-            self.lbl_eff_dims.setText(f"{h_wp:.6g}, {l_wp:.6g} mm")
-            self.lbl_nel_title.setText("Workpiece element count (~):")
-        else:
-            self.lbl_eff_dims_title.setText("Effective (h_wp, h_void, l_wp, l_void):")
-            self.lbl_eff_dims.setText(
-                f"{h_wp:.6g}, {h_void:.6g}, {l_wp:.6g}, {l_void:.6g} mm"
-            )
-            self.lbl_nel_title.setText("Eulerian element count (~):")
+        self.lbl_eff_dims_title.setText("Effective (h_wp, h_void, l_wp, l_void):")
+        self.lbl_eff_dims.setText(
+            f"{h_wp:.6g}, {h_void:.6g}, {l_wp:.6g}, {l_void:.6g} mm"
+        )
+        self.lbl_nel_title.setText("Eulerian element count (~):")
 
         # Effective element size: reveals what Abaqus will actually seed
         # when `discretize` is off (the user-typed value may not divide the
@@ -352,14 +341,3 @@ class GeometryTab(QWidget):
         else:
             self.lbl_dt.setText("—  (need E, ρ, elem_size > 0)")
 
-    # =====================================================================
-    # Reaction to the Analysis tab changing formulation
-    # =====================================================================
-    def on_analysis_changed(self):
-        """Called by MainWindow when the user toggles formulation.
-        We hide the entire Eulerian-domain group in Lagrangian mode (the
-        void region and the Eulerian-domain placement are meaningless),
-        and refresh the preview + derived-quantities panel."""
-        is_lagrangian = (self.cfg.analysis.formulation == "Lagrangian")
-        self._euler_group.setVisible(not is_lagrangian)
-        self._refresh()

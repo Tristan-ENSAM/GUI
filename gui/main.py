@@ -470,12 +470,7 @@ class MainWindow(QMainWindow):
         # Activate the loaded profile's unit system so every tab converts
         # through it (and the displayed values match the saved preference).
         units.set_active_system(self.cfg.units)
-        # The Analysis tab was removed (the build is CEL-only). The
-        # formulation-dependent group visibilities that AnalysisTab used to
-        # trigger are now refreshed explicitly here.
         self.geometry_tab.apply_from_cfg()
-        self.geometry_tab.on_analysis_changed()
-        self.bcs_tab.on_analysis_changed()
         self.materials_tab.apply_from_cfg()
         self.interaction_tab.apply_from_cfg()
         self.bcs_tab.apply_from_cfg()
