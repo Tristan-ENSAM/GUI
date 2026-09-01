@@ -40,6 +40,40 @@ def _popen_group_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+def abaqus_terminate_job(abaqus_cmd: str, job_name: str, workdir,
+                         timeout: float = 20.0) -> bool:
+    """Ask Abaqus to stop `job_name` cleanly: ``abaqus terminate job=<name>``.
+
+    WHY THIS BEFORE KILLING THE PROCESS TREE: terminating through Abaqus stops
+    the analysis executable AND RELEASES ITS LICENCE TOKENS. A hard taskkill /
+    SIGKILL leaves the tokens checked out until the FlexNet server reclaims
+    them, which on a shared licence pool penalises everyone else.
+
+    The command must run FROM THE JOB'S WORKING DIRECTORY: it reads
+    ``<job_name>.cid`` there to find the host and port used to signal the job.
+    No .cid means the solver never started (or has already exited), so there is
+    nothing to terminate.
+
+    Returns True if Abaqus accepted the request. Best-effort: any failure
+    returns False so the caller can fall back to killing the process tree.
+    """
+    if not abaqus_cmd or not job_name:
+        return False
+    workdir = Path(workdir)
+    if not (workdir / ("%s.cid" % job_name)).is_file():
+        # Nothing to signal: the analysis is not running.
+        return False
+    try:
+        completed = subprocess.run(
+            [abaqus_cmd, "terminate", "job=%s" % job_name],
+            cwd=str(workdir), capture_output=True, timeout=timeout, check=False)
+        return completed.returncode == 0
+    except Exception:
+        log_swallowed("asking Abaqus to terminate job %r" % job_name,
+                      level=logging.DEBUG)
+        return False
+
+
 def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> None:
     """Terminate `proc` and every process it spawned. Best-effort and
     cross-platform.
@@ -127,10 +161,33 @@ class SensitivityRunWorker(QObject):
         self._solve_fn = solve_fn          # injected (tests); else Abaqus
         self._cancel = False
         self._proc = None                  # current subprocess.Popen
+        self._current_job = None           # job name of the run in flight
 
     # -- control -------------------------------------------------------
     def cancel(self):
+        """Stop the campaign, and the run currently in flight.
+
+        Two stages, in this order:
+          1. ``abaqus terminate job=<name>`` -- the clean route: it stops the
+             solver AND releases the licence tokens.
+          2. kill the process tree -- the fallback, for when Abaqus does not
+             answer (no .cid yet, job already finishing, hung solver). This
+             leaves the tokens checked out, hence the ordering.
+        """
         self._cancel = True
+        job = self._current_job
+        if job:
+            self.log.emit("[CANCEL] asking Abaqus to terminate job %s\n" % job)
+            if abaqus_terminate_job(self._abaqus_cmd, job, self._workdir):
+                # Give the solver a moment to unwind before force-killing.
+                p = self._proc
+                if p is not None:
+                    try:
+                        p.wait(timeout=10.0)
+                        return
+                    except Exception:
+                        log_swallowed("waiting for the terminated job to exit",
+                                      level=logging.DEBUG)
         p = self._proc
         if p is not None:
             _terminate_process_tree(p)
@@ -170,6 +227,9 @@ class SensitivityRunWorker(QObject):
 
         self.log.emit("\n%s\n[run %d] %s\n%s\n"
                       % ("-" * 60, i + 1, job_name, "-" * 60))
+        # Published BEFORE the process starts so cancel() can name the job to
+        # `abaqus terminate` even if the click lands during start-up.
+        self._current_job = job_name
         try:
             self._proc = subprocess.Popen(
                 args, cwd=str(self._workdir),
@@ -177,6 +237,7 @@ class SensitivityRunWorker(QObject):
                 **_popen_group_kwargs())
         except Exception as e:
             self.log.emit("[run %d] failed to start Abaqus: %s\n" % (i + 1, e))
+            self._current_job = None
             self.runDone.emit(i, False)
             return None
 
@@ -192,6 +253,7 @@ class SensitivityRunWorker(QObject):
         self._proc.wait()
         rc_code = self._proc.returncode
         self._proc = None
+        self._current_job = None
 
         if self._cancel:
             self.runDone.emit(i, False)

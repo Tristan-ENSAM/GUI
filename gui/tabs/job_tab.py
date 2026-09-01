@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
+from gui.sensitivity.run_worker import abaqus_terminate_job
 
 
 def _section_header(title: str) -> QLabel:
@@ -605,18 +606,45 @@ class JobTab(QWidget):
         self.progress_label.setText("   ·   ".join(parts))
 
     def _cancel_run(self):
-        """Forcefully terminate the running Abaqus process. Use sparingly:
-        the .odb may be left in an incomplete state."""
+        """Stop the running Abaqus job.
+
+        Two stages, in this order:
+          1. ``abaqus terminate job=<name>`` -- the clean route. It stops the
+             analysis executable AND RELEASES ITS LICENCE TOKENS. A hard kill
+             leaves them checked out until the FlexNet server reclaims them,
+             which on a shared pool penalises everyone else.
+          2. terminate/kill the process -- the fallback, when Abaqus does not
+             answer (no .cid yet, solver already exiting, hung job).
+
+        Either way the .odb may be left incomplete.
+        """
         if self._proc is None or self._proc.state() == QProcess.NotRunning:
             return
         reply = QMessageBox.question(
             self, "Cancel run?",
-            "Kill the running Abaqus process now?\n"
+            "Stop the running Abaqus job now?\n"
             "The .odb file may be incomplete or corrupt.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+
+        ctx = self._pipeline or {}
+        job_name = ctx.get("job_name")
+        workdir = ctx.get("workdir")
+        try:
+            abq = self._get_prefs().abaqus_cmd
+        except Exception:
+            abq = None
+        if job_name and workdir and abq:
+            self._append_output(
+                "\n[CANCEL] asking Abaqus to terminate job %s\n" % job_name)
+            if abaqus_terminate_job(abq, job_name, workdir):
+                # Let the solver unwind before force-killing it.
+                if self._proc.waitForFinished(10000):
+                    self._append_output("\n[CANCELLED by user]\n")
+                    return
+
         # On Windows, terminate() sends WM_CLOSE which Abaqus may ignore;
         # kill() is more reliable. Try terminate first, then kill if it
         # hasn't exited within 2 seconds.
