@@ -2,9 +2,8 @@
 """Background worker for the convergence-based Eulerian domain sizing (Option B).
 
 Runs `domain_convergence.run_domain_convergence` off the GUI thread, forwarding
-its progress events as Qt signals. Mirrors DomainJacobianWorker so the tab can
-switch from the Jacobian study to the convergence study with the same launch
-mechanism.
+its progress events as Qt signals. This is the only domain-sizing study wired
+to the Optimization tab; the earlier Jacobian-based one was abandoned.
 """
 from __future__ import annotations
 
