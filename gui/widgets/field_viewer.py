@@ -188,12 +188,21 @@ class FieldViewer(QWidget):
         self._canvas.draw_idle()
 
     def clear(self):
-        """Remove the field & mesh; leave an empty axes."""
+        """Remove the field & mesh; leave an empty axes. Removal is
+        best-effort: matplotlib can raise while tearing down a colorbar
+        (e.g. headless, or a detached subplotspec), which must not crash the
+        app when closing a run."""
         if self._polys is not None:
-            self._polys.remove()
+            try:
+                self._polys.remove()
+            except Exception:
+                pass
             self._polys = None
         if self._cbar is not None:
-            self._cbar.remove()
+            try:
+                self._cbar.remove()
+            except Exception:
+                pass
             self._cbar = None
         self._ax.set_title("")
         self._canvas.draw_idle()

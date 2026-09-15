@@ -40,6 +40,33 @@ def _section_header(title: str) -> QLabel:
     return lbl
 
 
+
+def _existing_job_files(workdir, job_name):
+    """Files of `job_name` already sitting in `workdir`.
+
+    Matched CASE-INSENSITIVELY on the stem: on Windows "Job1.odb" and
+    "JOB1.odb" are the same file, and Abaqus collides on them just the same.
+    """
+    from pathlib import Path
+    wd = Path(workdir)
+    if not wd.is_dir():
+        return []
+    low = job_name.lower()
+    return sorted(f for f in wd.iterdir()
+                  if f.is_file() and f.name.lower().startswith(low + "."))
+
+
+def _remove_job_files(files):
+    """Delete `files`; return those that could not be removed."""
+    failed = []
+    for f in files:
+        try:
+            f.unlink()
+        except OSError:
+            failed.append(f)
+    return failed
+
+
 class JobTab(QWidget):
     """Job parameters editor + dry-run command preview.
 
@@ -431,6 +458,29 @@ class JobTab(QWidget):
             wd.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             problems.append(f"Cannot create working directory '{workdir}': {e}")
+        # --- existing job in the working directory -----------------------
+        # Abaqus refuses to overwrite a job's files and simply dies. Windows
+        # paths are case-insensitive, so "Job1" and "JOB1" collide too --
+        # hence the case-insensitive match on the stem.
+        resume = False
+        if not problems and not write_inp_only:
+            existing = _existing_job_files(wd, job_name)
+            if existing:
+                choice = self._ask_existing_job(job_name, existing,
+                                                (wd / (job_name + ".res")).exists())
+                if choice == "cancel":
+                    return
+                if choice == "overwrite":
+                    failed = _remove_job_files(existing)
+                    if failed:
+                        QMessageBox.critical(
+                            self, "Cannot overwrite",
+                            "These files could not be removed (open elsewhere?):"
+                            "\n\n• " + "\n• ".join(str(f.name) for f in failed))
+                        return
+                else:
+                    resume = True
+
         if problems:
             QMessageBox.critical(
                 self, "Cannot launch Abaqus",
@@ -453,6 +503,7 @@ class JobTab(QWidget):
             "sim_time": float(self.cfg.step.sim_time),
             "n_frames": int(self.cfg.step.n_frames),
             "write_inp_only": write_inp_only,
+            "resume": resume,
         }
 
         # Build the args (same construction as the dry-run + ABQ.run_simul)
@@ -460,21 +511,33 @@ class JobTab(QWidget):
         run_params   = {"cpus": cpus, "job_name": job_name}
         if write_inp_only:
             run_params["write_inp_only"] = True
-        args = [
-            "cae",
-            f"noGUI={prefs.abaqus_script}",
-            "--",
-            "--model_cfg",
-            repr(model_params),
-            "--run_cfg",
-            repr(run_params),
-        ]
+        if resume:
+            # `abaqus job=<name> continue` restarts the interrupted analysis
+            # from its restart files. It bypasses run_simul.py entirely, so the
+            # model is NOT rebuilt (the existing .inp is reused) and NO results
+            # bundle is written -- the user was warned in the dialog.
+            args = ["job=%s" % job_name, "continue", "cpus=%d" % cpus]
+        else:
+            args = [
+                "cae",
+                f"noGUI={prefs.abaqus_script}",
+                "--",
+                "--model_cfg",
+                repr(model_params),
+                "--run_cfg",
+                repr(run_params),
+            ]
 
         # Header in the output panel — replaces the dry-run text.
-        title = (f"WRITING .inp — job: {job_name}" if write_inp_only
-                 else f"RUNNING Abaqus — job: {job_name}")
-        body = ("Live output (build + write .inp):" if write_inp_only
-                else "Live output (build + solve + extract):")
+        if resume:
+            title = f"RESUMING Abaqus — job: {job_name}"
+            body = "Live output (solver only — no results bundle):"
+        elif write_inp_only:
+            title = f"WRITING .inp — job: {job_name}"
+            body = "Live output (build + write .inp):"
+        else:
+            title = f"RUNNING Abaqus — job: {job_name}"
+            body = "Live output (build + solve + extract):"
         header = [
             "=" * 72,
             title,
@@ -604,6 +667,46 @@ class JobTab(QWidget):
         if snap.kinetic_energy is not None:
             parts.append(f"KE = {snap.kinetic_energy:.2e}")
         self.progress_label.setText("   ·   ".join(parts))
+
+    def _ask_existing_job(self, job_name, existing, has_restart):
+        """Overwrite / resume / cancel when the job already exists.
+
+        Resuming uses `abaqus job=<name> continue`, which restarts an
+        interrupted analysis from its restart files. IMPORTANT: that path runs
+        the SOLVER ONLY -- extraction lives in run_simul.py, which is executed
+        through `abaqus cae noGUI=`, so a resumed job produces no
+        .results.npz / .meta.json. The dialog says so rather than letting the
+        user discover it at the end of a long run.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Job already exists")
+        box.setText("%d file(s) named '%s.*' are already in the working "
+                    "directory." % (len(existing), job_name))
+        detail = ("Overwrite  — delete them and start from scratch.\n\n")
+        if has_restart:
+            detail += ("Resume     — `abaqus job=%s continue`, restarting the "
+                       "interrupted analysis from its restart files.\n"
+                       "             WARNING: this runs the solver only, so NO "
+                       "results bundle (.results.npz / .meta.json) will be "
+                       "written. Re-run the extraction separately."
+                       % job_name)
+        else:
+            detail += ("Resume     — unavailable: no .res restart file was "
+                       "found for this job.")
+        box.setInformativeText(detail)
+        ow = box.addButton("Overwrite", QMessageBox.DestructiveRole)
+        rs = None
+        if has_restart:
+            rs = box.addButton("Resume", QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is ow:
+            return "overwrite"
+        if rs is not None and clicked is rs:
+            return "resume"
+        return "cancel"
 
     def _cancel_run(self):
         """Stop the running Abaqus job.

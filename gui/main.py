@@ -93,10 +93,14 @@ class MainWindow(QMainWindow):
         self.results_tab     = ResultsTab()
         self.sensitivity_tab = SensitivityTab(
             self.cfg, lambda: self.prefs,
-            cpus_getter=lambda: self.job_tab.cpus())
+            cpus_getter=lambda: self.job_tab.cpus(),
+            profile_name_getter=self._profile_name)
         self.optimization_tab = OptimizationTab(
             self.cfg, lambda: self.prefs,
-            cpus_getter=lambda: self.job_tab.cpus())
+            cpus_getter=lambda: self.job_tab.cpus(),
+            profile_name_getter=self._profile_name)
+        # Editing an optimization parameter dirties the profile.
+        self.optimization_tab.changed.connect(self._mark_dirty)
 
         # Two-level tabs: a top row of theme categories, each holding its
         # own row of sub-tabs (so the window shows several tab rows).
@@ -331,6 +335,10 @@ class MainWindow(QMainWindow):
     # =====================================================================
     # Title
     # =====================================================================
+    def _profile_name(self) -> str:
+        """Base name of the current profile (or 'Untitled'), for run folders."""
+        return self._current_path.stem if self._current_path else "Untitled"
+
     def _refresh_title(self):
         name = self._current_path.name if self._current_path else "Untitled"
         star = "*" if self._dirty else ""

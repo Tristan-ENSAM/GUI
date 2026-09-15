@@ -409,13 +409,45 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     return {var + "1": v1_out, var + "2": v2_out, var: mag}
 
 
+def _find_history_key(outputs, base):
+    """Resolve the ``historyOutputs`` key that actually holds ``base``.
+
+    A FILTERED history request is written to the ODB under a SUFFIXED name:
+    'RF1' requested with the 'SensorBand' Butterworth filter appears as
+    'RF1_SENSORBAND', mirroring the filtered field outputs (V ->
+    V_CAMERABAND). The filter is attached in cel_model.create_step (see
+    cel_model.py:596-599 for H-Output-1); the bare name does NOT exist when
+    the filter is on, so a hard-coded "RF1" silently finds nothing.
+
+    Same resolution order as _resolve_fo_name for field outputs: exact name
+    first, then a '<base>_<suffix>' candidate. When several suffixed
+    candidates match, the choice is made deterministic (sorted) and reported,
+    rather than depending on repository iteration order.
+
+    Returns the key, or None when no candidate exists.
+    """
+    if base in outputs:
+        return base
+    prefix = base + "_"
+    candidates = [k for k in outputs.keys() if k.startswith(prefix)]
+    if not candidates:
+        return None
+    candidates = sorted(candidates)
+    if len(candidates) > 1:
+        _vprint("[WARNING] several history keys match %r: %s -- using %r"
+                % (base, candidates, candidates[0]))
+    return candidates[0]
+
+
 def _extract_history_rf(step):
     """Return (time, rf1, rf2) or (None, None, None)."""
     for region_key, region in step.historyRegions.items():
         outputs = region.historyOutputs
-        if "RF1" in outputs and "RF2" in outputs:
-            rf1_pairs = outputs["RF1"].data
-            rf2_pairs = outputs["RF2"].data
+        k_rf1 = _find_history_key(outputs, "RF1")
+        k_rf2 = _find_history_key(outputs, "RF2")
+        if k_rf1 is not None and k_rf2 is not None:
+            rf1_pairs = outputs[k_rf1].data
+            rf2_pairs = outputs[k_rf2].data
             t = _np.asarray([p[0] for p in rf1_pairs], dtype=_np.float64)
             rf1 = _np.asarray([p[1] for p in rf1_pairs], dtype=_np.float32)
             rf2 = _np.asarray([p[1] for p in rf2_pairs], dtype=_np.float32)
@@ -429,9 +461,15 @@ def _extract_history_energy(step):
     region (no element/RP region)."""
     for region_key, region in step.historyRegions.items():
         outputs = region.historyOutputs
-        if "ALLKE" in outputs and "ALLIE" in outputs:
-            ke_pairs = outputs["ALLKE"].data
-            ie_pairs = outputs["ALLIE"].data
+        # Defensive: H-Output-2 (PRESELECT) is deliberately UNfiltered today
+        # (cel_model.py:601-606), so these names are never suffixed. Going
+        # through the resolver costs nothing and keeps the two extractors
+        # from drifting apart if that request is ever filtered.
+        k_ke = _find_history_key(outputs, "ALLKE")
+        k_ie = _find_history_key(outputs, "ALLIE")
+        if k_ke is not None and k_ie is not None:
+            ke_pairs = outputs[k_ke].data
+            ie_pairs = outputs[k_ie].data
             t = _np.asarray([p[0] for p in ke_pairs], dtype=_np.float64)
             allke = _np.asarray([p[1] for p in ke_pairs], dtype=_np.float32)
             allie = _np.asarray([p[1] for p in ie_pairs], dtype=_np.float32)
@@ -589,7 +627,15 @@ def extract_results(job_name, model_cfg):
             _history_vars = ["RF1_RP", "RF2_RP"]
             _vprint("  history: %d samples, RF1/RF2 stored" % len(_h_t))
         else:
-            _vprint("  no RP history found.")
+            # Not fatal (the bundle is still worth writing), but loud: the
+            # failure used to surface much later, and far from its cause, as
+            # a KeyError on 'RF1_RP' in gui/results/reader.py:338-342. List
+            # what the ODB actually holds so the real key is one log away.
+            _vprint("[WARNING] no RP history found (RF1/RF2 missing from "
+                    "every history region).")
+            for _rk, _rg in _step.historyRegions.items():
+                _vprint("    region %r: %s"
+                        % (_rk, sorted(_rg.historyOutputs.keys())))
 
         _he_t, _allke, _allie = _extract_history_energy(_step)
         if _he_t is not None:

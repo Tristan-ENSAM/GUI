@@ -106,17 +106,40 @@ class ResultsBundle:
 
         Accepts either:
           - path/to/<name>.results.npz   (the canonical naming)
-          - path/to/<name>.results.json
+          - path/to/<name>.meta.json     (metadata; also .results.json)
           - path/to/<name>.results       (both extensions auto-appended)
         """
         p = Path(path)
+
+        def _meta_beside(npz: Path) -> Path:
+            """Locate the metadata file that goes with `npz`.
+
+            The generator writes "<job>.meta.json" (the file describes the run
+            and holds the config snapshot -- it contains no results, hence the
+            name). Bundles produced before that rename carry the old
+            "<job>.results.json"; both are accepted so older results stay
+            loadable. The new name is preferred when both exist.
+            """
+            stem = npz.name[:-len(".results.npz")] if \
+                npz.name.endswith(".results.npz") else npz.stem
+            meta = npz.with_name(stem + ".meta.json")
+            if meta.exists():
+                return meta
+            legacy = npz.with_suffix(".json")     # <job>.results.json
+            return legacy if legacy.exists() else meta
+
         # Resolve the (.json, .npz) pair from whatever the user passed.
         if p.suffix == ".npz":
             npz_path  = p
-            json_path = p.with_suffix(".json")
+            json_path = _meta_beside(p)
         elif p.suffix == ".json":
             json_path = p
-            npz_path  = p.with_suffix(".npz")
+            # "<job>.meta.json" -> "<job>.results.npz"; "<job>.results.json"
+            # -> "<job>.results.npz" (with_suffix handles the latter).
+            if p.name.endswith(".meta.json"):
+                npz_path = p.with_name(p.name[:-len(".meta.json")] + ".results.npz")
+            else:
+                npz_path = p.with_suffix(".npz")
         else:
             # Treat as a basename and APPEND both extensions. We use string
             # concatenation rather than Path.with_suffix(...) on purpose: the

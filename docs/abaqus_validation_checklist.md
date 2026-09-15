@@ -10,6 +10,17 @@ This checklist captures what must be confirmed **once on the Abaqus PC** after
 any change to `abaqus_scripts/run_simul.py`, the launch commands, or the
 cancel logic. Tick each item.
 
+## Terminology (ROI vs ZOI)
+
+Two distinct zones, different grids, defined in different tabs:
+
+- **ROI** — model output set, edited in the **Geometry** tab, matched to the
+  real measurement fields (DIC / IRT) for the sim-vs-experiment comparison.
+  Materialised in the Abaqus model as `ROI_node` / `ROI_elem` (EULER instance).
+- **ZOI** — measurement zone defined by the user in the **Optimization** tab to
+  size the Eulerian domain. Own grid, host-side sampling, not an Abaqus set.
+  May default to the ROI but is a separate object.
+
 ## 0. Environment
 
 - [ ] `pip install -r requirements.txt` in the GUI Python (3.11+).
@@ -77,3 +88,21 @@ For the SAME physical case, compare the `.inp` material cards:
       and CPUs, save the profile, reopen it: unit system, job name and CPUs
       are restored (the working directory resets to the Preferences default
       by design — it is machine-specific).
+
+## 8. Domain sizing by convergence — ZOI (Optimization tab) — *pending wiring*
+
+Applies once the ZOI + `run_domain_convergence` are wired to the Optimization
+tab (the engine `gui/sensitivity/domain_convergence.py` is unit-tested headless;
+the end-to-end needs a real Abaqus install).
+
+- [ ] The ZOI (Optimization tab) is edited independently of the ROI (Geometry
+      tab): changing one does not move the other; the study samples the ZOI.
+- [ ] The study refuses to start when the ZOI is not inside the initial domain
+      with the configured margin (`stopped_by="zoi_outside"`).
+- [ ] With the EVF mask on (default threshold 0.5) and the settled window
+      (default 0.3–1.0), the material-field comparison is no longer dominated
+      by the moving material/void interface (TEMP/V no longer saturate as they
+      did with the raw frame-by-frame metric).
+- [ ] Growth is outward-only, in whole elements, and stops at the smallest
+      domain where every quantity is below tolerance (`stopped_by="converged"`)
+      or at the reverberation ceiling (`stopped_by="diagonal"`).

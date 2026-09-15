@@ -230,3 +230,24 @@ def discretize(dim, element_size):
             "discretize({0}, {1}) -> {2} elements: dim too small relative to "
             "element_size".format(dim, element_size, int(n)))
     return float(n * es)
+
+
+def zoi_grid_points(zoi, step):
+    """Regular grid of ZOI measurement points (x, y).
+
+    Matches the host-side ``roi_grid``: points at ``xmin + i*step`` and
+    ``ymin + j*step``, always including one at or before xmax/ymax. Pure Python
+    (Abaqus 2.7 and 3.x). Returns a list of ``(x, y)`` tuples, y-major (like the
+    ``numpy.meshgrid`` default ordering).
+    """
+    xmin, xmax, ymin, ymax = zoi
+    if step <= 0:
+        return []
+    nx = max(1, int(math.floor((xmax - xmin) / float(step) + 1e-9)) + 1)
+    ny = max(1, int(math.floor((ymax - ymin) / float(step) + 1e-9)) + 1)
+    pts = []
+    for j in range(ny):
+        y = ymin + step * j
+        for i in range(nx):
+            pts.append((xmin + step * i, y))
+    return pts

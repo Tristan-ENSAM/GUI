@@ -252,7 +252,7 @@ def test_tab_live_estimate_and_table(qapp, tmp_path):
                          cpus_getter=lambda: 1)
 
     # A partial .sta (half done) so the estimate extrapolates a total.
-    sta = tmp_path / "sens_run000.sta"
+    sta = tmp_path / "sensitivity_run000.sta"
     sta.write_text(
         "  Output Field Frame Number    4, of    8, at step time 2.500E-04\n"
         "   1234  2.500E-04 2.500E-04  00:00:30 5.6E-10       16760  9.0E-6  1.6E-1\n",

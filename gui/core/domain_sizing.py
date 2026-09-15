@@ -155,3 +155,25 @@ def initial_domain_dimensions(t1: float, rake_deg: float, mu: float,
         l_wp=_snap_up(l_wp + m, elem_size),
         l_void=_snap_up(l_void + m, elem_size),
     )
+
+
+# --- Reverberation ceiling and dimension helpers -----------------------------
+# Relocated from domain_jacobian (now removed) so the sizing helpers live beside
+# DomainDims. Used by domain_convergence and the Optimization tab.
+DIMENSION_NAMES = ("h_wp", "h_void", "l_wp", "l_void")
+
+# The mass-scaling window (see ModelConfig.mass_scaling_bounds) is empty unless
+# the domain diagonal stays below this multiple of the element size, so
+# enlarging the domain has a hard ceiling.
+_DIAGONAL_OVER_ELEM_MAX = 90.6
+
+
+def diagonal(dims: DomainDims) -> float:
+    """Domain diagonal -- the longest wave path, which sets the reverberation
+    frequency c/(2L) and hence the mass-scaling ceiling."""
+    return math.hypot(dims.l_wp + dims.l_void, dims.h_wp + dims.h_void)
+
+
+def diagonal_limit(elem_size: float) -> float:
+    """Largest diagonal that still leaves a non-empty mass-scaling window."""
+    return _DIAGONAL_OVER_ELEM_MAX * elem_size

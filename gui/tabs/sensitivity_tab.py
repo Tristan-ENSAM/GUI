@@ -55,10 +55,12 @@ _EXCLUDED_PATHS = {"elem_size"}
 
 
 class SensitivityTab(QWidget):
-    def __init__(self, cfg, prefs_getter=None, cpus_getter=None):
+    def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
+                 profile_name_getter=None):
         super().__init__()
         self.cfg = cfg
         self._prefs_getter = prefs_getter
+        self._profile_name_getter = profile_name_getter
         self._cpus_getter = cpus_getter
         self.plan = None                 # last generated JacobianPlan
         self.plan_kind = "jacobian"
@@ -727,6 +729,25 @@ class SensitivityTab(QWidget):
 
         # Timing state for the live wall-clock estimate (from the running
         # job's .sta, plus measured durations of finished runs).
+        # Group this sensitivity campaign in its own timestamped folder
+        # ({profile}_sensitivity_{stamp}) with a config.json; its run files
+        # are prefixed with "sensitivity".
+        from gui.core.run_output import create_study_dir
+        try:
+            _pname = (self._profile_name_getter()
+                      if self._profile_name_getter else None)
+        except Exception:
+            _pname = None
+        _study_cfg = {"plan_kind": self.plan_kind,
+                      "n_runs": int(self.plan.n_runs),
+                      "qois": [getattr(q, "name", str(q))
+                               for q in self.selected_qois],
+                      "field_vars": list(self._selected_field_vars())}
+        try:
+            wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg)
+        except OSError:
+            pass   # fall back to the flat working directory
+
         import time
         self._run_workdir = wd
         self._run_total = self.plan.n_runs
@@ -748,7 +769,7 @@ class SensitivityTab(QWidget):
             self.plan, self.plan_kind, self.selected_qois, self.cfg,
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
             workdir=str(wd), cpus=self._current_cpus(),
-            job_prefix="sens", field_vars=field_vars)
+            job_prefix="sensitivity", field_vars=field_vars)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -816,7 +837,8 @@ class SensitivityTab(QWidget):
         fraction of the current run already done."""
         if self._running_index is None or self._run_workdir is None:
             return
-        sta = self._run_workdir / ("sens_run%03d.sta" % self._running_index)
+        sta = self._run_workdir / ("sensitivity_run%03d.sta"
+                                   % self._running_index)
         cur_frac = 0.0
         try:
             snap = parse_sta(sta)

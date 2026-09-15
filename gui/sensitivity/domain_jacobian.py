@@ -57,6 +57,7 @@ import numpy as np
 
 from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.mesh_opt import roi_grid, nearest_samples
+from gui.sensitivity.runner_core import eulerian_instance
 
 DIMENSION_NAMES = ("h_wp", "h_void", "l_wp", "l_void")
 
@@ -140,16 +141,19 @@ def guard_coefficient(bundle, mass_scaling_factor: float,
       * ALLIE ACCUMULATES while ALLKE does not, so the ratio decays roughly as
         1/t. G must always be measured over the SAME duration to be
         comparable between runs.
-      * ALLKE scales with the moving mass, hence with the domain VOLUME, while
-        ALLIE is dominated by plastic work in the cutting zone. Enlarging the
-        domain therefore INCREASES G and LOWERS the mass-scaling ceiling.
+      * ALLKE scales with the moving MASS, not with the domain volume, so
+        growing a VOID dimension (h_void, l_void) leaves G essentially
+        unchanged -- measured stable at 1.765e-06 +/- 0.1% while h_void went
+        from 0.10 to 0.18 mm. Only the material dimensions (h_wp, l_wp) can
+        move it, by adding moving mass while the cutting-zone plastic work
+        stays put.
     This is why G is re-measured on every run of the study instead of being
     taken as a fixed number.
     """
     try:
         ke = np.asarray(bundle.history("ALLKE"), dtype=float)
         ie = np.asarray(bundle.history("ALLIE"), dtype=float)
-        t = np.asarray(bundle.history_time(), dtype=float)
+        t = np.asarray(bundle.history_time, dtype=float)
     except Exception:
         return None
     if ke.size == 0 or ie.size != ke.size or t.size != ke.size:
@@ -163,8 +167,8 @@ def guard_coefficient(bundle, mass_scaling_factor: float,
 
 def sample_domain(run_bundle: Callable, cfg, dims: DomainDims, roi,
                   grid_step: float, field_vars: Sequence[str],
-                  instance: str = "Euler",
-                  force_channel: str = "RF1",
+                  instance: Optional[str] = None,
+                  force_channel: str = "RF1_RP",
                   mass_scaling_factor: float = 1.0,
                   settled_fraction: float = 0.3) -> DomainSample:
     """Run one simulation at `dims` and reduce it to comparable quantities.
@@ -180,20 +184,41 @@ def sample_domain(run_bundle: Callable, cfg, dims: DomainDims, roi,
     if bundle is None:
         raise RuntimeError("run_bundle returned None for dims=%r" % (dims,))
 
+    # The instance name comes from the ODB, not from the model: Abaqus
+    # upper-cases it ("Euler" -> "EULER"), so it must be resolved from the
+    # bundle instead of hard-coded. eulerian_instance() picks the instance
+    # carrying EVF, which is the Eulerian domain by construction.
+    inst = instance or eulerian_instance(bundle)
+    if not inst:
+        raise RuntimeError(
+            "No Eulerian instance found in the results bundle: cannot sample "
+            "the ROI. (Expected an instance carrying EVF.)")
+
     points = roi_grid(roi, grid_step)
     fields = {}
+    missing: List[str] = []
     for var in field_vars:
         try:
-            fields[var] = np.asarray(nearest_samples(bundle, var, instance,
+            fields[var] = np.asarray(nearest_samples(bundle, var, inst,
                                                      points), dtype=float)
-        except Exception:
+        except Exception as exc:
+            # NaN propagates to "not converged", but a silent NaN is
+            # indistinguishable from a genuine one -- say which variable and
+            # why, otherwise a whole study returns NaN with no explanation.
+            missing.append("%s (%s: %s)" % (var, type(exc).__name__, exc))
             fields[var] = np.full((1, len(points)), np.nan)
 
     force = None
     try:
         force = np.asarray(bundle.history(force_channel), dtype=float)
-    except Exception:
-        pass
+    except Exception as exc:
+        missing.append("%s (%s: %s)" % (force_channel, type(exc).__name__, exc))
+
+    if missing:
+        raise RuntimeError(
+            "Quantities missing from the results bundle: %s.\n"
+            "Check the field/history variable names against what the "
+            "generator actually writes." % "; ".join(missing))
 
     return DomainSample(
         dims=dims, fields=fields, force=force,
@@ -263,12 +288,13 @@ def run_domain_study(run_bundle: Callable, cfg, roi,
                      grid_step: float,
                      thresholds: Dict[str, float],
                      elem_size: float,
-                     field_vars: Sequence[str] = ("EVF", "TEMP", "V"),
+                     field_vars: Sequence[str] = ("EVF", "TEMP", "V1", "V2"),
                      step_elems: int = 1,
                      grow_elems: int = 4,
                      max_iterations: int = 8,
                      mass_scaling_factor: float = 1.0,
                      linearity_check: bool = True,
+                     linearity_tolerance: float = 0.2,
                      should_cancel: Optional[Callable] = None,
                      progress_cb: Optional[Callable] = None
                      ) -> List[JacobianResult]:
@@ -332,6 +358,14 @@ def run_domain_study(run_bundle: Callable, cfg, roi,
 
         # converged when EVERY thresholded quantity is below its bound for
         # EVERY dimension; a NaN counts as not converged (conservative).
+        # A derivative must scale with the step: J(h) and J(2h) should agree.
+        # J(h)/J(2h) ~ 2 means ||dQ|| does NOT depend on the step at all --
+        # the difference has saturated and measures decorrelated noise, not
+        # boundary influence. Continuing would burn runs on a meaningless
+        # quantity, so the study stops and says which quantity is at fault.
+        bad = [(q, n, r) for q, per in linearity.items() for n, r in per.items()
+               if math.isfinite(r) and abs(r - 1.0) > linearity_tolerance]
+
         converged = True
         worst_val, worst_dim = -1.0, ""
         for q, eps in thresholds.items():
@@ -346,13 +380,15 @@ def run_domain_study(run_bundle: Callable, cfg, roi,
             limiting=worst_dim, guard_coefficient=base.guard_coefficient,
             linearity=linearity, n_runs=n_runs,
             stopped_by="converged" if converged else "")
+        if bad and not converged:
+            res.stopped_by = "nonlinear"
         history.append(res)
         if progress_cb:
             progress_cb({"phase": "domain_iteration", "dims": _as_dict(dims),
                          "elasticities": el, "converged": converged,
                          "limiting": worst_dim,
                          "guard_coefficient": base.guard_coefficient})
-        if converged or not worst_dim:
+        if converged or not worst_dim or bad:
             break
 
         # grow the most influential dimension and check the hard ceiling

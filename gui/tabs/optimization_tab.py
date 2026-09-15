@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
@@ -40,7 +40,10 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from gui.core.domain_sizing import DomainDims
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
-from gui.sensitivity.mesh_pipeline_worker import MeshPipelineWorker
+from gui.sensitivity.mesh_gci_worker import MeshGciWorker
+from gui.sensitivity.domain_convergence_worker import DomainConvergenceWorker
+from gui.core.domain_sizing import (
+    DIMENSION_NAMES, diagonal, diagonal_limit)
 from gui.results.reader import ResultsBundle
 from gui.widgets.geometry_preview import GeometryPreview
 
@@ -61,11 +64,18 @@ _DIM_ORDER = ("l_wp", "h_wp", "h_void", "l_void")
 
 
 class OptimizationTab(QWidget):
+    # Emitted when a persisted optimization parameter changes, so the
+    # main window can mark the profile dirty.
+    changed = Signal()
 
-    def __init__(self, cfg, prefs_getter=None, cpus_getter=None):
+
+    def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
+                 profile_name_getter=None):
         super().__init__()
         self.cfg = cfg
         self._prefs_getter = prefs_getter
+        self._profile_name_getter = profile_name_getter
+        self._loading = False   # guard: True while populating from cfg
         self._cpus_getter = cpus_getter
         self._initial = None            # DomainDims from Merchant
         self._cancel_evt = threading.Event()
@@ -81,7 +91,7 @@ class OptimizationTab(QWidget):
         # directly from the config when needed.)
 
         # ---- Initial domain = the measurement ROI ----------------------
-        gdom = QGroupBox("Initial eulerian domain")
+        gdom = QGroupBox("4 \u00b7 Eulerian domain (initial + caps)")
         dg = QGridLayout(gdom)
         self._max = {}
         self._init_lbl = {}
@@ -122,7 +132,7 @@ class OptimizationTab(QWidget):
         # (added to the left column below)
 
         # ---- Convergence criterion -------------------------------------
-        gcrit = QGroupBox("Convergence criterion")
+        gcrit = QGroupBox("2 \u00b7 Convergence criterion (RMSE thresholds)")
         cg = QGridLayout(gcrit)
         cg.addWidget(QLabel("quantity"), 0, 0)
         cg.addWidget(QLabel("ε_q"), 0, 1)
@@ -150,87 +160,57 @@ class OptimizationTab(QWidget):
                 cg.addWidget(le, r + 1, c0 + 1)
                 cg.addWidget(QLabel(_unit[q]), r + 1, c0 + 2)
 
-        # ---- Optimisation pipeline (per-variable start / factor / cap) --
-        gmesh = QGroupBox("Optimisation pipeline")
-        mg = QGridLayout(gmesh)
-        for c, h in enumerate(["variable", "start", "factor", "cap",
-                               "bisection res"]):
-            mg.addWidget(QLabel(h), 0, c)
+        # ---- 1 · ZOI (measurement zone for the optimization) ----------
+        # DISTINCT from the ROI (Geometry tab, model output set for DIC/IRT):
+        # this is the user zone the domain/mesh studies sample. Own bbox; the
+        # sampling grid reuses the "Centroid step" above. Must stay inside the
+        # domain (margin above). Empty fields default to the ROI.
+        gzoi = QGroupBox("1 \u00b7 ZOI (measurement zone)")
+        zg = QGridLayout(gzoi)
+        self.le_zoi = {}
+        for c, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax")]):
+            zg.addWidget(QLabel(lbl), 0, 2 * c); le = QLineEdit()
+            le.setPlaceholderText("= ROI"); self.le_zoi[key] = le
+            zg.addWidget(le, 0, 2 * c + 1)
+        for c, (lbl, key) in enumerate([("y min", "ymin"), ("y max", "ymax")]):
+            zg.addWidget(QLabel(lbl), 1, 2 * c); le = QLineEdit()
+            le.setPlaceholderText("= ROI"); self.le_zoi[key] = le
+            zg.addWidget(le, 1, 2 * c + 1)
+        self.btn_zoi_from_roi = QPushButton("Set ZOI = ROI")
+        self.btn_zoi_from_roi.clicked.connect(self._zoi_from_roi)
+        zg.addWidget(self.btn_zoi_from_roi, 2, 0, 1, 2)
+        _zt = QLabel("mm \u2014 sampled at the Centroid step; kept inside the "
+                     "domain")
+        _zt.setStyleSheet("color:#6b7280;")
+        zg.addWidget(_zt, 2, 2, 1, 2)
+        for _le in self.le_zoi.values():
+            _le.textChanged.connect(self._draw_preview)
 
-        # Step 0 - mass scaling (cap = MAX; growth factor > 1)
-        self.cb_identify_ms = QCheckBox("mass scaling")
-        self.cb_identify_ms.setToolTip(
-            "Step 0 \u2014 criterion on Vx/Vy; keeps the LARGEST factor "
-            "admissible under the energy guard (least costly).")
-        self.cb_identify_ms.setChecked(False)
-        self.cb_identify_ms.toggled.connect(self._enforce_pipeline_selection)
-        mg.addWidget(self.cb_identify_ms, 1, 0)
-        self.le_ms_start = QLineEdit("1"); mg.addWidget(self.le_ms_start, 1, 1)
-        self.le_ms_factor = QLineEdit("2")
-        mg.addWidget(self.le_ms_factor, 1, 2)
-        self.le_ms_max = QLineEdit(); self.le_ms_max.setPlaceholderText("max")
-        mg.addWidget(self.le_ms_max, 1, 3)
-        self.le_ms_bisect = QLineEdit()
-        self.le_ms_bisect.setPlaceholderText("e.g. 100")
-        mg.addWidget(self.le_ms_bisect, 1, 4)
-        mg.addWidget(QLabel("energy guard \u27e8ALLKE/ALLIE\u27e9 <"), 2, 0, 1, 2)
-        self.le_ms_guard = QLineEdit()
-        self.le_ms_guard.setPlaceholderText("e.g. 0.05")
-        mg.addWidget(self.le_ms_guard, 2, 2, 1, 3)
+        # ---- 3 · Mesh convergence (GCI / Richardson) ------------------
+        gmeshgci = QGroupBox("3 \u00b7 Mesh convergence (GCI)")
+        mgl = QGridLayout(gmeshgci)
+        mgl.addWidget(QLabel("finest elem"), 0, 0)
+        self.le_gci_finest = QLineEdit()
+        self.le_gci_finest.setPlaceholderText("= element size")
+        mgl.addWidget(self.le_gci_finest, 0, 1)
+        mgl.addWidget(QLabel("mm"), 0, 2)
+        mgl.addWidget(QLabel("ratio"), 0, 3)
+        self.le_gci_ratio = QLineEdit("2")
+        mgl.addWidget(self.le_gci_ratio, 0, 4)
+        mgl.addWidget(QLabel("min elem"), 1, 0)
+        self.le_gci_min = QLineEdit()
+        self.le_gci_min.setPlaceholderText("floor e.g. 0.006")
+        mgl.addWidget(self.le_gci_min, 1, 1)
+        mgl.addWidget(QLabel("mm"), 1, 2)
+        mgl.addWidget(QLabel("n meshes"), 1, 3)
+        self.sp_gci_n = QSpinBox(); self.sp_gci_n.setRange(3, 6)
+        self.sp_gci_n.setValue(3)
+        mgl.addWidget(self.sp_gci_n, 1, 4)
+        _gt = QLabel("On a FIXED (large) domain; refine finest\u2192coarse, "
+                     "GCI per quantity.")
+        _gt.setStyleSheet("color:#6b7280;")
+        mgl.addWidget(_gt, 2, 0, 1, 5)
 
-        # wp elem (cap = MIN, finest; shrink factor < 1) — optional
-        self.cb_include_wp = QCheckBox("wp elem")
-        self.cb_include_wp.setChecked(True)
-        self.cb_include_wp.toggled.connect(self._enforce_pipeline_selection)
-        mg.addWidget(self.cb_include_wp, 3, 0)
-        self.le_wp_start = QLineEdit("0.01")
-        mg.addWidget(self.le_wp_start, 3, 1)
-        self.le_wp_factor = QLineEdit("0.5")
-        mg.addWidget(self.le_wp_factor, 3, 2)
-        self.le_wp_min = QLineEdit(); self.le_wp_min.setPlaceholderText("min")
-        mg.addWidget(self.le_wp_min, 3, 3)
-        self.le_wp_bisect = QLineEdit()
-        self.le_wp_bisect.setPlaceholderText("e.g. 0.001")
-        mg.addWidget(self.le_wp_bisect, 3, 4)
-
-        # tool elem / nose (cap = MIN, finest; shrink factor < 1) — optional
-        self.cb_include_tool = QCheckBox("tool elem")
-        self.cb_include_tool.setChecked(True)
-        self.cb_include_tool.toggled.connect(self._enforce_pipeline_selection)
-        mg.addWidget(self.cb_include_tool, 4, 0)
-        self.le_tool_start = QLineEdit("0.005")
-        mg.addWidget(self.le_tool_start, 4, 1)
-        self.le_tool_factor = QLineEdit("0.5")
-        mg.addWidget(self.le_tool_factor, 4, 2)
-        self.le_tool_min = QLineEdit()
-        self.le_tool_min.setPlaceholderText("min")
-        mg.addWidget(self.le_tool_min, 4, 3)
-        self.le_tool_bisect = QLineEdit()
-        self.le_tool_bisect.setPlaceholderText("e.g. 0.001")
-        mg.addWidget(self.le_tool_bisect, 4, 4)
-
-        # Eulerian domain (start = ROI; cap = the max caps above; factor > 1)
-        self.cb_include_domain = QCheckBox("euler dim")
-        self.cb_include_domain.setChecked(True)
-        self.cb_include_domain.toggled.connect(self._enforce_pipeline_selection)
-        mg.addWidget(self.cb_include_domain, 5, 0)
-        self.le_domain_factor = QLineEdit("2")
-        mg.addWidget(self.le_domain_factor, 5, 2)
-        _mc = QLabel("= max caps \u2191"); _mc.setStyleSheet("color:#6b7280;")
-        mg.addWidget(_mc, 5, 3)
-        self.le_domain_bisect = QLineEdit()
-        self.le_domain_bisect.setPlaceholderText("e.g. 0.01")
-        mg.addWidget(self.le_domain_bisect, 5, 4)
-
-        self.cb_do_verify = QCheckBox(
-            "verification passes (bracket each identified value by "
-            "\u00b1resolution)")
-        self.cb_do_verify.setChecked(True)
-        mg.addWidget(self.cb_do_verify, 6, 0, 1, 5)
-        # NOTE: the single launcher is the "Run optimization" button in the
-        # bottom run-controls bar (wired to the checkbox-driven pipeline). The
-        # former in-group "Run full pipeline" button was removed to avoid two
-        # launchers with different semantics.
 
         # ---- Preview (reuses the Geometry tab's preview widget) --------
         gprev = QGroupBox("Preview")
@@ -246,9 +226,14 @@ class OptimizationTab(QWidget):
         # Right: the whole preview.
         cols = QHBoxLayout()
         left = QVBoxLayout()
+        left.addWidget(gzoi)
+        # Panels 2 (criteria) and 3 (mesh GCI) share a row to save vertical
+        # space (the left column is cramped at 16:9).
+        row23 = QHBoxLayout()
+        row23.addWidget(gcrit, 1)
+        row23.addWidget(gmeshgci, 1)
+        left.addLayout(row23)
         left.addWidget(gdom)
-        left.addWidget(gcrit)
-        left.addWidget(gmesh)
         left.addStretch(1)
         cols.addLayout(left, 1)
         cols.addWidget(gprev, 1)
@@ -256,22 +241,43 @@ class OptimizationTab(QWidget):
 
         # ---- Run controls ----------------------------------------------
         rc = QHBoxLayout()
-        self.btn_run = QPushButton("Run optimization")
-        self.btn_run.setToolTip(
-            "Run the pipeline steps selected by the checkboxes above "
-            "(mass scaling, wp/tool element size, Eulerian domain, "
-            "verification). Only the checked steps are executed.")
-        # Single launcher: drives the checkbox-driven pipeline worker.
-        self.btn_run.clicked.connect(self._on_run_pipeline)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self._on_cancel_pipeline)
-        rc.addWidget(self.btn_run)
+        # Sizing tolerances (relative, dimensionless): the stop criterion for
+        # BOTH studies. For the mesh GCI, "force" applies to Fc and Ff.
+        eg = QGroupBox("Sizing tolerances (relative)")
+        egl = QGridLayout(eg)
+        egl.setContentsMargins(8, 6, 8, 6)
+        self._dj_eps = {}
+        for i, q in enumerate(("EVF", "TEMP", "V1", "V2", "force")):
+            egl.addWidget(QLabel(q), 0, 2 * i)
+            le = QLineEdit("0.02"); le.setFixedWidth(58)
+            le.setToolTip("Relative tolerance on %s (0.02 = 2%%). Empty = "
+                          "excluded from the criterion." % q)
+            self._dj_eps[q] = le
+            egl.addWidget(le, 0, 2 * i + 1)
+        rc.addWidget(eg)
+        self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
+        self.btn_mesh.setToolTip(
+            "GCI/Richardson mesh convergence on a FIXED (large) domain: three\n"
+            "systematically-refined meshes, observed order p, extrapolated\n"
+            "value and GCI uncertainty per quantity. Recommends the coarsest\n"
+            "mesh within tolerance of the extrapolated value.")
+        self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
+        rc.addWidget(self.btn_mesh)
+        self.btn_domain = QPushButton("Run domain sizing (convergence)")
+        self.btn_domain.setToolTip(
+            "Grow the domain outward around the fixed ZOI until pushing each\n"
+            "boundary no longer changes the windowed, EVF-masked ZOI field\n"
+            "beyond tolerance (mesh held fixed). Smallest adequate domain,\n"
+            "bounded by the reverberation ceiling.")
+        self.btn_domain.clicked.connect(self._on_run_domain_convergence)
+        rc.addWidget(self.btn_domain)
         self.btn_open_wd = QPushButton("Open working dir")
-        self.btn_open_wd.setToolTip("Open the Preferences working directory in "
-                                    "the file explorer.")
+        self.btn_open_wd.setToolTip("Open the Preferences working directory.")
         self.btn_open_wd.clicked.connect(self._open_working_dir)
         rc.addWidget(self.btn_open_wd)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel)
         rc.addWidget(self.btn_cancel)
         self.lbl_status = QLabel("")
         rc.addWidget(self.lbl_status, 1)
@@ -328,6 +334,7 @@ class OptimizationTab(QWidget):
         self.le_grid_step.textChanged.connect(self._draw_preview)
         self.sp_margin.valueChanged.connect(self._draw_preview)
 
+        self._wire_opt_persistence()
         self.refresh_inputs()
         self._draw_preview()
 
@@ -358,13 +365,6 @@ class OptimizationTab(QWidget):
             pass
         return float(self.cfg.elem_size)
 
-    def wp_min(self):
-        """Cap of the workpiece element size = MINIMUM (finest allowed)."""
-        return self._float_or(self.le_wp_min, None)
-
-    def tool_min(self):
-        """Cap of the tool-nose element size = MINIMUM (finest allowed)."""
-        return self._float_or(self.le_tool_min, None)
 
     def compute_initial_dims(self) -> DomainDims:
         """Initial Eulerian domain = the user measurement ROI (BBox), mapped to
@@ -390,9 +390,72 @@ class OptimizationTab(QWidget):
     # =====================================================================
     # UI actions
     # =====================================================================
+    # ===================================================================
+    # Persistence of the optimization parameters (saved in the .acpf profile)
+    # ===================================================================
+    def _opt_line_edits(self):
+        les = [self.le_grid_step, self.le_gci_finest, self.le_gci_ratio,
+               self.le_gci_min]
+        les += list(self.le_zoi.values())
+        les += list(self._q_eps.values())
+        les += list(self._dj_eps.values())
+        les += list(self._max.values())
+        return les
+
+    def _wire_opt_persistence(self):
+        for le in self._opt_line_edits():
+            le.textChanged.connect(self._sync_opt_to_cfg)
+        self.sp_margin.valueChanged.connect(self._sync_opt_to_cfg)
+        self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
+
+    def _sync_opt_to_cfg(self, *_):
+        """Write the current widget values into cfg.optimization. No-op while
+        loading (so populating widgets from a file does not re-dirty it)."""
+        if self._loading:
+            return
+        o = self.cfg.optimization
+        o.zoi = {k: self.le_zoi[k].text()
+                 for k in ("xmin", "xmax", "ymin", "ymax")}
+        o.criterion_rmse = {q: le.text() for q, le in self._q_eps.items()}
+        o.sizing_tol = {q: le.text() for q, le in self._dj_eps.items()}
+        o.gci_finest = self.le_gci_finest.text()
+        o.gci_ratio = self.le_gci_ratio.text()
+        o.gci_min = self.le_gci_min.text()
+        o.gci_n_meshes = int(self.sp_gci_n.value())
+        o.caps = {d: le.text() for d, le in self._max.items()}
+        o.margin_elems = int(self.sp_margin.value())
+        o.centroid_step = self.le_grid_step.text()
+        self.changed.emit()
+
+    def _load_opt_from_cfg(self):
+        """Populate the widgets from cfg.optimization (called on construction
+        and after a profile is opened via _rebind_cfg -> refresh_inputs)."""
+        o = getattr(self.cfg, "optimization", None)
+        if o is None:
+            return
+        self._loading = True
+        try:
+            for k in ("xmin", "xmax", "ymin", "ymax"):
+                self.le_zoi[k].setText(str(o.zoi.get(k, "")))
+            for q, le in self._q_eps.items():
+                le.setText(str(o.criterion_rmse.get(q, "")))
+            for q, le in self._dj_eps.items():
+                le.setText(str(o.sizing_tol.get(q, "0.02")))
+            self.le_gci_finest.setText(str(o.gci_finest))
+            self.le_gci_ratio.setText(str(o.gci_ratio or "2"))
+            self.le_gci_min.setText(str(o.gci_min))
+            self.sp_gci_n.setValue(int(o.gci_n_meshes or 3))
+            for d, le in self._max.items():
+                le.setText(str(o.caps.get(d, "")))
+            self.sp_margin.setValue(int(o.margin_elems or 0))
+            self.le_grid_step.setText(str(o.centroid_step))
+        finally:
+            self._loading = False
+
     def refresh_inputs(self):
         # The Inputs-from-model panel was removed; refreshing now just redraws
         # the preview from the current config (kept for _rebind_cfg callers).
+        self._load_opt_from_cfg()
         self._draw_preview()
 
     def compute_initial(self):
@@ -445,23 +508,28 @@ class OptimizationTab(QWidget):
             rect(-cp["l_wp"] + ex0, cp["l_void"] + ex0, -cp["h_wp"] + ey0,
                  cp["h_void"] + ey0, fill=False, edgecolor="#7c3aed", lw=1.6,
                  ls="--", zorder=5)                          # max cap (purple)
-        # measurement ROI (= initial Eulerian domain) + evaluation points at the
-        # centroid step, filling the whole ROI
+        # ROI (Geometry tab, model output set for DIC/IRT) -- dotted green,
+        # no points; the studies do NOT sample it.
         xmin, xmax, ymin, ymax = inp["roi"]
         rect(xmin, xmax, ymin, ymax, fill=False, edgecolor="#15803d",
-             lw=1.4, zorder=7)
+             lw=1.3, ls=":", zorder=6)
+        # ZOI (Optimization measurement zone) + measurement points at the
+        # centroid step -- distinct colour; this is what the studies sample.
+        zx0, zx1, zy0, zy1 = self.zoi()
+        rect(zx0, zx1, zy0, zy1, fill=False, edgecolor="#c2410c",
+             lw=1.6, zorder=7)
         step = self.grid_step()
         if step > 0:
-            gx = np.arange(xmin, xmax + 1e-9, step)
-            gy = np.arange(ymin, ymax + 1e-9, step)
+            gx = np.arange(zx0, zx1 + 1e-9, step)
+            gy = np.arange(zy0, zy1 + 1e-9, step)
             if gx.size and gy.size:
                 XX, YY = np.meshgrid(gx, gy)
-                ax.scatter(XX.ravel(), YY.ravel(), s=4, c="#15803d",
-                           alpha=0.5, zorder=7)
+                ax.scatter(XX.ravel(), YY.ravel(), s=4, c="#c2410c",
+                           alpha=0.6, zorder=7)
         ax.plot([tip_x], [tip_y], marker="v", color="k", markersize=7,
                 zorder=8)
-        ax.set_title("measurement ROI = initial domain (green)  "
-                     "max cap (purple)", fontsize=7)
+        ax.set_title("ROI (green dotted) \u2014 ZOI + points (orange) \u2014 "
+                     "max cap (purple dashed)", fontsize=7)
         self.preview._canvas.draw_idle()
 
     def thresholds(self) -> dict:
@@ -499,8 +567,27 @@ class OptimizationTab(QWidget):
                     pass
         return out
 
+    def _profile_name(self):
+        try:
+            n = self._profile_name_getter() if self._profile_name_getter else None
+        except Exception:
+            n = None
+        return n or "Untitled"
+
+    def _study_run_dir(self, workdir, prefix, study_config):
+        """Timestamped per-study folder {profile}_{PREFIX}_{stamp} + config.json
+        (via gui.core.run_output). Falls back to the flat working dir if the
+        folder cannot be created."""
+        from gui.core.run_output import create_study_dir
+        try:
+            return create_study_dir(workdir, self._profile_name(), prefix,
+                                    study_config)
+        except OSError:
+            log_swallowed("creating study dir", level=logging.DEBUG)
+            return Path(workdir)
+
     # -- Abaqus launcher (replicates the Sensitivity run mechanism) --------
-    def _make_run_bundle(self, prefs, workdir, cpus):
+    def _make_run_bundle(self, prefs, run_dir, cpus, prefix):
         import subprocess
 
         counter = {"i": 0}
@@ -508,9 +595,9 @@ class OptimizationTab(QWidget):
         def run_bundle(cfg):
             self._cancel_evt.clear() if False else None
             i = counter["i"]; counter["i"] += 1
-            job = "opt_run%03d" % i
-            out_path = Path(workdir) / ("%s.results.npz" % job)
-            self._current_sta = Path(workdir) / ("%s.sta" % job)
+            job = "%s_run%03d" % (prefix, i)
+            out_path = Path(run_dir) / ("%s.results.npz" % job)
+            self._current_sta = Path(run_dir) / ("%s.sta" % job)
             try:
                 if out_path.exists():
                     out_path.unlink()
@@ -531,7 +618,7 @@ class OptimizationTab(QWidget):
                             "-" * 60))
             try:
                 proc = subprocess.Popen(
-                    args, cwd=str(workdir),
+                    args, cwd=str(run_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except Exception as e:
                 self._log_ui("failed to start Abaqus: %s\n" % e)
@@ -661,26 +748,55 @@ class OptimizationTab(QWidget):
         self.canvas.draw_idle()
 
     # ===================================================================
-    # Mesh + domain full pipeline
+    # ZOI (measurement zone) — distinct from the ROI
     # ===================================================================
-    def _step_checkboxes(self):
-        return [self.cb_identify_ms, self.cb_include_wp, self.cb_include_tool,
-                self.cb_include_domain]
+    def zoi(self):
+        """The measurement ZOI bbox (xmin, xmax, ymin, ymax).
 
-    def _enforce_pipeline_selection(self, *_):
-        """At least one pipeline step must stay checked; if the user unchecks the
-        last one, re-check it."""
-        boxes = self._step_checkboxes()
-        if not any(b.isChecked() for b in boxes):
-            sender = self.sender()
-            if sender in boxes:
-                sender.blockSignals(True)
-                sender.setChecked(True)
-                sender.blockSignals(False)
-                QMessageBox.information(
-                    self, "Pipeline",
-                    "At least one pipeline step must be selected.")
+        DISTINCT from the ROI (Geometry tab, model output set). Empty panel
+        fields fall back to the ROI, so a blank ZOI reproduces the previous
+        ROI-as-ZOI behaviour. The studies sample THIS zone, not the ROI.
+        """
+        roi = self.config_inputs()["roi"]
+        out = []
+        for k, d in zip(("xmin", "xmax", "ymin", "ymax"), roi):
+            out.append(self._float_or(self.le_zoi[k], d))
+        return tuple(out)
 
+    def _zoi_from_roi(self):
+        for k, v in zip(("xmin", "xmax", "ymin", "ymax"),
+                        self.config_inputs()["roi"]):
+            self.le_zoi[k].setText("%.6g" % v)
+        self._draw_preview()
+
+    def _tolerances(self):
+        """Relative per-quantity tolerances (empty field = quantity excluded)."""
+        out = {}
+        for q, le in self._dj_eps.items():
+            txt = le.text().strip().replace(",", ".")
+            if txt:
+                try:
+                    out[q] = float(txt)
+                except ValueError:
+                    pass
+        return out
+
+    def _dims_from_cfg(self):
+        g = self.cfg.euler_geometry
+        return DomainDims(h_wp=float(g.h_wp), h_void=float(g.h_void),
+                          l_wp=float(g.l_wp), l_void=float(g.l_void))
+
+    def _busy(self, on, msg="", color="#1d4ed8"):
+        self.btn_mesh.setEnabled(not on)
+        self.btn_domain.setEnabled(not on)
+        self.btn_cancel.setEnabled(on)
+        if msg:
+            self.lbl_status.setStyleSheet("color: %s;" % color)
+            self.lbl_status.setText(msg)
+
+    # ===================================================================
+    # Shared launch helpers (preserved verbatim)
+    # ===================================================================
     def _open_working_dir(self):
         """Open the Preferences working directory in the file explorer."""
         prefs = self._prefs_getter() if self._prefs_getter else None
@@ -731,267 +847,188 @@ class OptimizationTab(QWidget):
         except (ValueError, TypeError):
             return default
 
-    def _on_run_pipeline(self):
-        d0 = self.compute_initial_dims()
-        if min(d0.h_wp, d0.h_void, d0.l_wp, d0.l_void) <= 0:
-            QMessageBox.warning(self, "Initial domain",
-                                "The measurement ROI (BBox) is degenerate.")
-            return
-        if self._initial is None:
-            self.compute_initial()
-        if self._initial is None:
-            return
-        thr = self.thresholds()
-        if not self.thresholds_complete():
-            QMessageBox.warning(self, "Thresholds",
-                                "A threshold \u03b5_q is required for every "
-                                "field (Vx, Vy, T, EVF, Fc, Ff).")
-            return
+    # ===================================================================
+    # 4 - Eulerian domain sizing by convergence (grow outward, ZOI fixed)
+    # ===================================================================
+    def _on_run_domain_convergence(self):
         val = self._validate_launch()
         if val is None:
             return
-        if self.cb_identify_ms.isChecked():
-            problems = []
-            if not ("Vx" in thr and "Vy" in thr):
-                problems.append("Set Vx and Vy thresholds (the mass-scaling "
-                                "criterion is on the velocity).")
-            if self._float_or(self.le_ms_guard, None) is None:
-                problems.append("Set the energy guard threshold "
-                                "\u27e8ALLKE/ALLIE\u27e9.")
-            if self._float_or(self.le_ms_bisect, None) is None:
-                problems.append("Set the mass-scaling factor bisection "
-                                "resolution (the dichotomy stop step).")
-            if problems:
-                QMessageBox.warning(self, "Mass scaling", "\n".join(problems))
-                return
         prefs, wd, cpus = val
-        inp = self.config_inputs()
-        opt_roi = inp["roi"]
+        elem = float(self.cfg.elem_size)
+        dims = self._dims_from_cfg()
+        zoi = self.zoi()
+        tol = self._tolerances()
+        if not tol:
+            QMessageBox.warning(self, "Tolerances",
+                                "Set at least one relative tolerance: it is the "
+                                "stopping criterion of the study.")
+            return
+        study_cfg = {
+            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
+                    "ymin": zoi[2], "ymax": zoi[3]},
+            "elem_size": elem, "margin_elems": int(self.sp_margin.value()),
+            "grid_step": self.grid_step(), "tolerances": tol,
+            "field_vars": ["EVF", "TEMP", "V1", "V2"], "evf_threshold": 0.5,
+            "grow_elems": 4, "max_iterations": 8,
+            "initial_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
+                             "l_wp": dims.l_wp, "l_void": dims.l_void}}
+        run_dir = self._study_run_dir(wd, "domainsizing", study_cfg)
+        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "domainsizing")
         self._cancel_evt.clear()
-        run_bundle = self._make_run_bundle(prefs, wd, cpus)
-
         self.log.clear()
-        self._hist = {}
-        self.table.setRowCount(0)
-        self._plot()
         self.tabs.setCurrentIndex(0)
-        self.btn_run.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.lbl_status.setStyleSheet("color: #1d4ed8;")
-        self.lbl_status.setText("Running pipeline… (many Abaqus runs)")
-
-        self._pipe_worker = MeshPipelineWorker(
-            base_cfg=self.cfg, run_bundle=run_bundle, roi=opt_roi,
-            quantity_field_map=self.quantity_field_map(), thresholds=thr,
-            wp_start=self._float_or(self.le_wp_start, inp["elem"]),
-            tool_start=self._float_or(self.le_tool_start,
-                                      float(self.cfg.tool_elem_size)),
-            initial_domain=self._initial,
-            wp_factor=self._float_or(self.le_wp_factor, 0.5),
-            tool_factor=self._float_or(self.le_tool_factor, 0.5),
-            domain_grow_factor=self._float_or(self.le_domain_factor, 2.0),
-            wp_min=self.wp_min(), tool_min=self.tool_min(),
-            caps=self.caps() or None, order=_DIM_ORDER,
-            include_wp=self.cb_include_wp.isChecked(),
-            include_tool=self.cb_include_tool.isChecked(),
-            include_domain=self.cb_include_domain.isChecked(),
-            do_verify=self.cb_do_verify.isChecked(),
-            force_channels=self.force_channels(),
-            grid_step=self.grid_step(),
-            identify_ms=self.cb_identify_ms.isChecked(),
-            ms_start=self._float_or(self.le_ms_start, 1.0),
-            ms_factor_growth=self._float_or(self.le_ms_factor, 2.0),
-            ms_max_factor=self._float_or(self.le_ms_max, None),
-            ms_guard_threshold=self._float_or(self.le_ms_guard, None),
-            ms_bisection_resolution=self._float_or(self.le_ms_bisect, 0.0),
-            wp_bisection_resolution=self._float_or(self.le_wp_bisect, 0.0),
-            tool_bisection_resolution=self._float_or(self.le_tool_bisect, 0.0),
-            domain_bisection_resolution=self._float_or(self.le_domain_bisect,
-                                                       0.0))
-        self._pipe_worker.progress.connect(self._on_pipeline_progress)
-        self._pipe_worker.finished_ok.connect(self._on_pipeline_finished)
-        self._pipe_worker.failed.connect(self._on_pipeline_failed)
+        self._busy(True, "Domain sizing (convergence)\u2026")
+        self._log_ui("=" * 68)
+        self._log_ui("DOMAIN SIZING BY CONVERGENCE (grow outward, ZOI fixed)")
+        self._log_ui("  ZOI  x[%.4g,%.4g] y[%.4g,%.4g]" % zoi)
+        self._log_ui("  mesh %.4g mm (held fixed) | margin %d elem"
+                     % (elem, int(self.sp_margin.value())))
+        self._log_ui("=" * 68)
+        self._dc_worker = DomainConvergenceWorker(
+            run_bundle=run_bundle, base_cfg=self.cfg, zoi=zoi, initial_dims=dims,
+            grid_step=self.grid_step(), elem_size=elem, tolerances=tol,
+            field_vars=("EVF", "TEMP", "V1", "V2"), evf_threshold=0.5,
+            grow_elems=4, margin_elems=int(self.sp_margin.value()),
+            max_iterations=8)
+        self._dc_worker.progress.connect(self._on_dc_progress)
+        self._dc_worker.finished_ok.connect(self._on_dc_done)
+        self._dc_worker.failed.connect(self._on_fail)
         self._start_progress()
-        self._pipe_worker.start()
+        self._dc_worker.start()
 
-    def _on_cancel_pipeline(self):
+    def _on_dc_progress(self, ev):
+        if ev.get("phase") != "domain_convergence":
+            return
+        d = ev.get("dims", {})
+        self._log_ui("  dims h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g "
+                     "| settled=%s"
+                     % (d.get("h_wp", 0), d.get("h_void", 0), d.get("l_wp", 0),
+                        d.get("l_void", 0), ev.get("settled")))
+
+    def _on_dc_done(self, res):
+        self._stop_progress()
+        self._busy(False)
+        d = res.dims
+        why = {
+            "converged": "converged \u2014 smallest domain no longer perturbed "
+                         "by the boundaries",
+            "diagonal": "STOPPED at the reverberation ceiling before "
+                        "independence could be reached",
+            "zoi_outside": "the ZOI is not inside the initial domain (enlarge "
+                           "the domain or reduce the margin)",
+            "max_iter": "stopped at the iteration cap, NOT converged",
+            "cancelled": "cancelled",
+        }.get(res.stopped_by, res.stopped_by or "stopped")
+        self._log_ui("=" * 68)
+        self._log_ui("RESULT: %s" % why)
+        self._log_ui("  h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g | %d runs"
+                     % (d.h_wp, d.h_void, d.l_wp, d.l_void, res.n_runs))
+        ok = res.converged
+        self.lbl_status.setStyleSheet(
+            "color: %s;" % ("#15803d" if ok else "#b45309"))
+        self.lbl_status.setText("Domain sizing \u2014 %s" % why)
+
+    # ===================================================================
+    # 3 - Mesh convergence by GCI / Richardson (fixed domain)
+    # ===================================================================
+    def _on_run_mesh_gci(self):
+        val = self._validate_launch()
+        if val is None:
+            return
+        prefs, wd, cpus = val
+        finest = self._float_or(self.le_gci_finest, float(self.cfg.elem_size))
+        ratio = self._float_or(self.le_gci_ratio, 2.0)
+        nmesh = int(self.sp_gci_n.value())
+        minh = self._float_or(self.le_gci_min, None)
+        tol = self._tolerances()
+        gci_tol = {q: tol[q] for q in ("EVF", "TEMP", "V1", "V2") if q in tol}
+        if "force" in tol:
+            gci_tol["Fc"] = tol["force"]
+            gci_tol["Ff"] = tol["force"]
+        dims = self._dims_from_cfg()
+        zoi = self.zoi()
+        study_cfg = {
+            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
+                    "ymin": zoi[2], "ymax": zoi[3]},
+            "finest_elem_size": finest, "ratio": ratio, "n_meshes": nmesh,
+            "min_elem_size": minh, "grid_step": self.grid_step(),
+            "tolerances": gci_tol, "field_vars": ["EVF", "TEMP", "V1", "V2"],
+            "evf_threshold": 0.5,
+            "domain_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
+                            "l_wp": dims.l_wp, "l_void": dims.l_void}}
+        run_dir = self._study_run_dir(wd, "GCI", study_cfg)
+        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "GCI")
+        self._cancel_evt.clear()
+        self.log.clear()
+        self.tabs.setCurrentIndex(0)
+        self._busy(True, "Mesh convergence (GCI)\u2026")
+        self._log_ui("=" * 68)
+        self._log_ui("MESH CONVERGENCE (GCI / Richardson) on a fixed domain")
+        self._log_ui("  finest %.4g mm | ratio %.3g | n %d | floor %s"
+                     % (finest, ratio, nmesh,
+                        "n/a" if minh is None else "%.4g" % minh))
+        self._log_ui("=" * 68)
+        self._mesh_worker = MeshGciWorker(
+            run_bundle=run_bundle, base_cfg=self.cfg, zoi=zoi, domain_dims=dims,
+            grid_step=self.grid_step(), finest_elem_size=finest, ratio=ratio,
+            n_meshes=nmesh, tolerances=(gci_tol or None),
+            field_vars=("EVF", "TEMP", "V1", "V2"), evf_threshold=0.5,
+            min_elem_size=minh)
+        self._mesh_worker.progress.connect(self._on_mesh_progress)
+        self._mesh_worker.finished_ok.connect(self._on_mesh_done)
+        self._mesh_worker.failed.connect(self._on_fail)
+        self._start_progress()
+        self._mesh_worker.start()
+
+    def _on_mesh_progress(self, ev):
+        if ev.get("phase") != "mesh_gci":
+            return
+        sc = ev.get("scalars", {})
+        self._log_ui("  h=%.4g -> %s" % (
+            ev.get("elem_size", 0),
+            "  ".join("%s=%.4g" % (q, v) for q, v in sorted(sc.items())
+                      if v is not None)))
+
+    def _on_mesh_done(self, res):
+        self._stop_progress()
+        self._busy(False)
+        self._log_ui("=" * 68)
+        self._log_ui("MESH GCI RESULT (%s)" % (res.stopped_by or ""))
+        for q, g in sorted(res.per_quantity.items()):
+            self._log_ui(
+                "  %-5s p=%.3g  f_ext=%.4g  GCI=%.3g%%  asym=%.3g%s%s"
+                % (q, g.p, g.f_extrapolated, 100.0 * g.gci_fine,
+                   g.asymptotic_ratio,
+                   "" if g.monotonic else "  (non-monotonic)",
+                   "" if g.reliable else "  [extrapolation unreliable "
+                   "\u2014 converged/noisy, ref = finest]"))
+        self._log_ui("  in asymptotic range: %s" % res.in_asymptotic_range)
+        rec = res.recommended_size
+        self._log_ui("  recommended element size: %s"
+                     % ("none within tolerance" if rec is None
+                        else "%.4g mm" % rec))
+        ok = rec is not None and res.in_asymptotic_range
+        self.lbl_status.setStyleSheet(
+            "color: %s;" % ("#15803d" if ok else "#b45309"))
+        self.lbl_status.setText(
+            "Mesh GCI \u2014 recommended %s"
+            % ("n/a" if rec is None else "%.4g mm" % rec))
+
+    # ===================================================================
+    # Cancel / failure
+    # ===================================================================
+    def _on_cancel(self):
+        for attr in ("_dc_worker", "_mesh_worker"):
+            w = getattr(self, attr, None)
+            if w is not None and w.isRunning():
+                w.cancel()
         self._cancel_evt.set()
-        if getattr(self, "_pipe_worker", None) is not None:
-            self._pipe_worker.cancel()
-        self.lbl_status.setText("Cancelling pipeline…")
+        self.lbl_status.setText("Cancelling after the current run\u2026")
 
-    def _on_pipeline_progress(self, ev):
-        phase = ev.get("phase", "")
-        sub = ev.get("sub") or {}
-        # ---- live convergence points: append to the matching axis history ----
-        # Each sub-optimizer emits a (value, errors) pair per Abaqus comparison;
-        # we route it to its parameter history key and redraw the subplots.
-        if phase == "ms" and "errors" in sub and "factor" in sub:
-            self._hist.setdefault("mass_scaling", []).append(
-                (sub["factor"], sub["errors"]))
-            g = sub.get("guard")
-            self._log_ui("    factor=%.4g → ⟨ALLKE/ALLIE⟩=%s | E_max=%.3g"
-                         % (sub["factor"],
-                            ("%.4g" % g) if g is not None else "n/a",
-                            self._e_max(sub["errors"])))
-            self._live_status("mass scaling", sub["factor"], sub["errors"],
-                              sub.get("n_runs"))
-            self._plot()
-            return
-        if phase == "wp" and "errors" in sub and "size" in sub:
-            self._hist.setdefault("wp_elem", []).append(
-                (sub["size"], sub["errors"]))
-            self._live_status("wp element", sub["size"], sub["errors"],
-                              sub.get("n_runs"))
-            self._plot()
-            return
-        if phase == "tool" and "errors" in sub and "size" in sub:
-            self._hist.setdefault("tool_elem", []).append(
-                (sub["size"], sub["errors"]))
-            self._live_status("tool element", sub["size"], sub["errors"],
-                              sub.get("n_runs"))
-            self._plot()
-            return
-        if phase == "domain" and sub.get("phase") == "compare":
-            self._hist.setdefault(sub["name"], []).append(
-                (sub["value"], sub["errors"]))
-            self._live_status(sub["name"], sub["value"], sub["errors"],
-                              sub.get("n_runs"))
-            self._plot()
-            return
-        # ---- textual step milestones ----
-        if phase == "ms_done":
-            self._log_ui("  → mass-scaling factor = %.4g "
-                         "(⟨ALLKE/ALLIE⟩=%.4g) — %s"
-                         % (ev.get("identified", float("nan")),
-                            ev.get("guard", float("nan")),
-                            self._ms_verdict(ev.get("limited_by", ""),
-                                             ev.get("converged"))))
-        elif phase in ("wp_done", "tool_done"):
-            self._log_ui("  → identified %s = %.4g (runs so far: %d)"
-                         % (phase.split("_")[0], ev.get("identified", float("nan")),
-                            ev.get("n_runs", 0)))
-        elif phase == "domain_done":
-            d = ev["dims"]
-            self._log_ui("  → domain h_wp=%.4g h_void=%.4g l_wp=%.4g "
-                         "l_void=%.4g" % (d.h_wp, d.h_void, d.l_wp, d.l_void))
-        elif phase.endswith("_start"):
-            self._log_ui("[%s]" % phase.replace("_start", ""))
-        elif phase.startswith("verify_") and phase.endswith("_done"):
-            self._log_ui("  → %s stable=%s" % (phase, ev.get("stable")))
-
-    @staticmethod
-    def _ms_verdict(limited_by, converged):
-        """Human-readable mass-scaling verdict from the `limited_by` reason.
-
-        The search minimizes the velocity sensitivity E(f) = E(f, f*factor)
-        under the energy guard-rail; `converged` reports whether E < 1 at the
-        retained point (informational, not an admissibility condition)."""
-        txt = {
-            "minimum": "sensitivity minimum bracketed and refined",
-            "start": "minimum at the start factor — E already rises at the "
-                     "first ladder step (lower the start factor to explore "
-                     "below it)",
-            "guard": "guard-limited — the energy guard-rail stopped the search "
-                     "before the sensitivity minimum",
-            "cap": "cap reached — the sensitivity was still decreasing at the "
-                   "max factor (raise the cap to keep exploring)",
-            "cancelled": "cancelled before any evaluation",
-        }.get(limited_by, "converged" if converged else "NOT converged")
-        return txt + (" | E < 1" if converged else " | E >= 1")
-
-    def _live_status(self, name, value, errors, n_runs):
-        """Update the status label with the current parameter value and E_max."""
-        emax = self._e_max(errors)
-        try:
-            vtxt = "%.4g" % float(value)
-        except (TypeError, ValueError):
-            vtxt = str(value)
-        self.lbl_status.setStyleSheet("color: #1d4ed8;")
-        self.lbl_status.setText(
-            "Optimizing %s… value=%s | E_max=%.3g | runs=%s"
-            % (name, vtxt, emax, "?" if n_runs is None else n_runs))
-
-    def _on_pipeline_finished(self, result):
+    def _on_fail(self, msg):
         self._stop_progress()
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        d = result.domain
-
-        def _vtxt(v):
-            return "n/a" if v is None else ("stable" if v["stable"]
-                                            else "NOT stable")
-        self.lbl_status.setStyleSheet("color: #15803d;")
-        self.lbl_status.setText(
-            "Pipeline done — wp*=%.4g tool*=%.4g | domain l_wp=%.4g h_wp=%.4g "
-            "| %d runs" % (result.wp_elem, result.tool_elem, d.l_wp, d.h_wp,
-                           result.n_runs))
-        ms_line = ""
-        if result.ms_factor is not None:
-            r = result.ms_result
-            ms_line = ("mass-scaling factor: %.4g  (⟨ALLKE/ALLIE⟩=%.4g) — %s\n"
-                       % (result.ms_factor,
-                          (r.guard_at_identified if r else float("nan")),
-                          self._ms_verdict(getattr(r, "limited_by", ""),
-                                           r.velocity_converged if r else None)))
-        self._log_ui(
-            "\n=== PIPELINE RESULT ===\n"
-            + ms_line +
-            "wp element size  : %.4g  (verify: %s)\n"
-            "tool element size: %.4g  (verify: %s)\n"
-            "domain           : h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g "
-            "(verify: %s)\n"
-            "grid step (fixed ROI grid): %.4g | total Abaqus runs: %d"
-            % (result.wp_elem, _vtxt(result.wp_verify),
-               result.tool_elem, _vtxt(result.tool_verify),
-               d.h_wp, d.h_void, d.l_wp, d.l_void, _vtxt(result.domain_verify),
-               result.grid_step, result.n_runs))
-        self._fill_pipeline_table(result)
-
-    def _fill_pipeline_table(self, result):
-        """Populate the results table with one row per identified parameter,
-        in pipeline order (mass scaling, wp element, tool element, then the four
-        Eulerian domain dimensions). Columns: parameter | initial |
-        intermediate (end of bracketing) | final (end of dichotomy). Steps that
-        were skipped (unchecked) contribute no row."""
-        def _fmt(v):
-            try:
-                return "%.4g" % float(v)
-            except (TypeError, ValueError):
-                return ""
-
-        rows = []
-        if getattr(result, "ms_result", None) is not None:
-            r = result.ms_result
-            rows.append(("mass_scaling", r.initial, r.intermediate,
-                         r.identified))
-        if getattr(result, "wp_conv", None) is not None:
-            r = result.wp_conv
-            rows.append(("wp_elem", r.initial, r.intermediate, r.identified))
-        if getattr(result, "tool_conv", None) is not None:
-            r = result.tool_conv
-            rows.append(("tool_elem", r.initial, r.intermediate, r.identified))
-        if getattr(result, "domain_result", None) is not None:
-            for name in _DIM_ORDER:
-                dr = result.domain_result.per_dim.get(name)
-                if dr is not None:
-                    # DimResult: d_large is the end-of-bracketing (intermediate)
-                    # reference; final is the end-of-dichotomy retained value.
-                    rows.append((name, dr.initial, dr.d_large, dr.final))
-
-        self.table.setRowCount(0)
-        for (name, ini, inter, fin) in rows:
-            r = self.table.rowCount()
-            self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem(str(name)))
-            self.table.setItem(r, 1, QTableWidgetItem(_fmt(ini)))
-            self.table.setItem(r, 2, QTableWidgetItem(_fmt(inter)))
-            self.table.setItem(r, 3, QTableWidgetItem(_fmt(fin)))
-
-    def _on_pipeline_failed(self, msg):
-        self._stop_progress()
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
+        self._busy(False)
         self.lbl_status.setStyleSheet("color: #b91c1c;")
-        self.lbl_status.setText("Pipeline failed: %s" % msg)
-        self._log_ui("PIPELINE ERROR: %s" % msg)
+        self.lbl_status.setText("Study failed: %s" % msg)
+        self._log_ui("ERROR: %s" % msg)

@@ -382,6 +382,28 @@ class JobCfg:
 
 
 @dataclass
+class OptimizationCfg:
+    """Persisted state of the Optimization > Model tab: the ZOI, the mesh
+    convergence (GCI) study, the domain-sizing tolerances and the RMSE
+    criterion. Values are kept as the raw widget STRINGS so the
+    'empty = default' behaviour (ZOI = ROI, finest = element size, centroid
+    step = element size) round-trips exactly. Missing keys keep the dataclass
+    defaults, so older .acpf files load unchanged."""
+    zoi:            dict = field(default_factory=lambda: {
+        "xmin": "", "xmax": "", "ymin": "", "ymax": ""})
+    criterion_rmse: dict = field(default_factory=dict)
+    sizing_tol:     dict = field(default_factory=lambda: {
+        q: "0.02" for q in ("EVF", "TEMP", "V1", "V2", "force")})
+    gci_finest:     str  = ""
+    gci_ratio:      str  = "2"
+    gci_min:        str  = ""
+    gci_n_meshes:   int  = 3
+    caps:           dict = field(default_factory=dict)
+    margin_elems:   int  = 0
+    centroid_step:  str  = ""
+
+
+@dataclass
 class ModelConfig:
     """Top-level model config. Materials are kept as raw dicts for now
     (filled by the Materials tab later — defaults below match test.py)."""
@@ -398,6 +420,7 @@ class ModelConfig:
     euler_position: EulerPosition  = field(default_factory=EulerPosition)
     wp_position:    EulerPosition  = field(default_factory=EulerPosition)
     bbox:           BBox           = field(default_factory=BBox)
+    optimization:   OptimizationCfg = field(default_factory=OptimizationCfg)
     elem_size:      float          = 0.005
     # Tool-nose seed size (was hard-coded to 0.001 in run_simul); exposed so
     # the mesh-convergence study can identify it. Backward-compatible default.
@@ -532,8 +555,12 @@ class ModelConfig:
                 "position":   asdict(self.euler_position),
             },
             "mesh": {
-                "elem_size":     self.elem_size,
+                "elem_size":       self.elem_size,
+                "tool_elem_size":  self.tool_elem_size,
+                "inter_elem_size": self.inter_elem_size,
+                "max_elem_size":   self.max_elem_size,
             },
+            "optimization": asdict(self.optimization),
             "bbox": asdict(self.bbox),
         }
 
@@ -623,7 +650,14 @@ class ModelConfig:
         _apply(cfg.euler_position, eul.get("position"))
 
         mesh = data.get("mesh", {})
-        if "elem_size" in mesh: cfg.elem_size = mesh["elem_size"]
+        if "elem_size"       in mesh: cfg.elem_size       = mesh["elem_size"]
+        if "tool_elem_size"  in mesh: cfg.tool_elem_size  = mesh["tool_elem_size"]
+        if "inter_elem_size" in mesh: cfg.inter_elem_size = mesh["inter_elem_size"]
+        if "max_elem_size"   in mesh: cfg.max_elem_size   = mesh["max_elem_size"]
+
+        opt = data.get("optimization")
+        if opt:
+            _apply(cfg.optimization, opt)
 
         _apply(cfg.bbox, data.get("bbox"))
 

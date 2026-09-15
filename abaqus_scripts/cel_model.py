@@ -90,6 +90,7 @@ def prepare_parameters(model_cfg, run_cfg):
     #   A, RF, NT, VP, P, HFL, HP, MFL, SDV -- unused, and every extra variable
     #         inflates the ODB and the write time.
     fo_variables = (
+        'COORD',    # nodal/intPt coordinates
         'EVF',      # Eulerian volume fraction -- material tracking (extracted)
         'TEMP',     # temperature (extracted)
         'V',        # velocity (extracted; the DIC comparison variable)
@@ -480,6 +481,7 @@ def create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p
     )
     assembly.Set(name='ROI_node', nodes=roi_nodes)
     assembly.Set(name='ROI_elem', elements=roi_elems)
+
     return RP, tool_elem
 
 

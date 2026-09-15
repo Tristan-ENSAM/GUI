@@ -31,7 +31,7 @@ import logging
 from gui.results.reader import ResultsBundle, ResultsLoadError
 from gui.results.export_txt import export_bundle
 from gui.widgets.field_viewer       import FieldViewer
-from gui.widgets.time_series_viewer import TimeSeriesViewer
+from gui.widgets.time_series_viewer import TimeSeriesViewer, _is_energy
 from gui.core.logging_util import log_swallowed
 
 
@@ -47,6 +47,12 @@ class ResultsTab(QWidget):
     # want to react (e.g. the future Optimization tab) can listen.
     runsChanged = Signal()
 
+    # Stable colour per run + linestyle per quantity for overlays.
+    _PALETTE = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+                "#bcbd22", "#17becf")
+    _LINESTYLES = ("-", "--", ":", "-.")
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -55,6 +61,7 @@ class ResultsTab(QWidget):
         # only addresses the most recently loaded run.
         self._runs: dict[str, ResultsBundle] = {}
         self._active_run: str | None = None
+        self._run_colors: dict[str, str] = {}
         self._frame_idx: int = 0
         # Cached per-frame (vmin, vmax) for the active field — computed
         # over all frames so the colormap stays stable while scrubbing.
@@ -107,6 +114,12 @@ class ResultsTab(QWidget):
         self.cb_run.setMinimumWidth(180)
         self.cb_run.currentTextChanged.connect(self._on_run_changed)
         bar.addWidget(self.cb_run)
+
+        self.btn_close = QPushButton("Close run")
+        self.btn_close.setToolTip(
+            "Remove the active run from the comparison.")
+        self.btn_close.clicked.connect(self._on_close_clicked)
+        bar.addWidget(self.btn_close)
 
         bar.addWidget(self._vline())
 
@@ -182,16 +195,15 @@ class ResultsTab(QWidget):
     # Load + run management
     # =====================================================================
     def _on_load_clicked(self):
-        """Open a file picker, then try to load the chosen bundle."""
-        path_str, _ = QFileDialog.getOpenFileName(
-            self, "Load results bundle",
-            "",  # start in cwd; could remember the last folder later
+        """Open a file picker (multiple selection), then load each bundle."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Load results bundle(s)",
+            "",
             "Results files (*.npz *.json);;NumPy archive (*.npz);;"
             "JSON metadata (*.json);;All files (*)"
         )
-        if not path_str:
-            return
-        self.load_bundle(path_str)
+        for path_str in paths:
+            self.load_bundle(path_str)
 
     def _on_export_clicked(self):
         """Export every field of the loaded run to .txt (one per quantity)."""
@@ -248,72 +260,112 @@ class ResultsTab(QWidget):
 
         self.runsChanged.emit()
 
+    def _run_color(self, name: str) -> str:
+        """A stable colour for a run (assigned once, by load order)."""
+        if name not in self._run_colors:
+            self._run_colors[name] = self._PALETTE[
+                len(self._run_colors) % len(self._PALETTE)]
+        return self._run_colors[name]
+
+    def _refresh_time_series(self):
+        """Overlay the history of EVERY loaded run: one stable colour per run,
+        a linestyle per quantity, and a run-prefixed legend when more than one
+        run is loaded."""
+        self.ts_viewer.clear()
+        multi = len(self._runs) > 1
+        for name, bundle in self._runs.items():
+            color = self._run_color(name)
+            try:
+                hist_t = bundle.history_time
+                variables = list(bundle.history_info.variables)
+            except Exception:
+                continue
+            for k, var in enumerate(variables):
+                try:
+                    y = bundle.history(var)
+                except KeyError:
+                    continue
+                label = ("%s\u00b7%s" % (name, var)) if multi else var
+                self.ts_viewer.add_series(
+                    label, hist_t, y, color=color,
+                    linestyle=self._LINESTYLES[k % len(self._LINESTYLES)],
+                    energy=_is_energy(var))
+
+    def _on_close_clicked(self):
+        """Remove the active run from the comparison."""
+        if self._active_run is None:
+            return
+        self._runs.pop(self._active_run, None)
+        self._run_colors.pop(self._active_run, None)
+        self.cb_run.blockSignals(True)
+        self.cb_run.clear()
+        for k in self._runs:
+            self.cb_run.addItem(k)
+        self.cb_run.blockSignals(False)
+        if self._runs:
+            new = self.cb_run.currentText() or next(iter(self._runs))
+            self.cb_run.setCurrentText(new)
+            self._on_run_changed(new)
+        else:
+            self._active_run = None
+            self.ts_viewer.clear()
+            self.field_viewer.clear()
+            self.cb_inst.clear()
+            self.cb_field.clear()
+        self.runsChanged.emit()
+
     def _on_run_changed(self, name: str):
-        """User picked a different run in the combobox (or load just
-        added a new one)."""
+        """User picked a different run (or a load added one). The time-series
+        panel overlays ALL loaded runs; the field viewer follows this active
+        run. Instance / field / colormap and the frame index are preserved
+        across the switch when the new run supports them."""
         if not name or name not in self._runs:
             return
+        prev_inst = self.cb_inst.currentText()
+        prev_field = self.cb_field.currentText()
+        prev_frame = self._frame_idx
         self._active_run = name
         bundle = self._runs[name]
 
-        # ----- Populate the field combobox -----
-        # We take the first instance's fields; multi-instance handling
-        # comes in phase 2.
+        # Time-series overlay (independent of the active run).
+        self._refresh_time_series()
+
         instances = bundle.instance_names
         if not instances:
-            QMessageBox.warning(
-                self, "No field data in this bundle",
-                "This results bundle contains no instance with field data "
-                "(0 elements were kept).\n\n"
-                "The most common cause is an ROI (bbox) that filters out "
-                "every element. Re-extract with no ROI, or set a bbox with "
-                "positive x/y extent that overlaps the workpiece.\n\n"
-                "History curves (RF1/RF2), if present, are still available."
-            )
-            # Still try to show history so the run isn't a total dead end.
-            self.ts_viewer.clear()
-            try:
-                hist_t = bundle.history_time
-                for var in bundle.history_info.variables:
-                    self.ts_viewer.add_series(var, hist_t, bundle.history(var))
-            except Exception:
-                log_swallowed("showing history after a load issue",
-                              level=logging.DEBUG)
+            # No field data: the overlaid history is still shown. Clear the
+            # field pickers rather than popping a modal on every switch.
+            self.cb_inst.blockSignals(True); self.cb_inst.clear()
+            self.cb_inst.blockSignals(False)
+            self.cb_field.blockSignals(True); self.cb_field.clear()
+            self.cb_field.blockSignals(False)
+            self.field_viewer.clear()
             return
-        # ----- Populate the instance picker, default to the Eulerian -----
+
+        # Instance picker: keep the previous choice if the new run has it.
         self.cb_inst.blockSignals(True)
         self.cb_inst.clear()
         for nm in instances:
             self.cb_inst.addItem(nm)
-        self.cb_inst.setCurrentText(self._default_instance(bundle))
+        self.cb_inst.setCurrentText(
+            prev_inst if prev_inst in instances
+            else self._default_instance(bundle))
         self.cb_inst.blockSignals(False)
 
-        # ----- Populate field combo + mesh for the selected instance -----
-        self._load_instance_fields()
+        # Field combo + mesh, keeping the previous field if available.
+        self._load_instance_fields(prefer=prev_field)
 
-        # ----- Populate the time-series viewer with history -----
-        self.ts_viewer.clear()
-        hist_t = bundle.history_time
-        for var in bundle.history_info.variables:
-            try:
-                y = bundle.history(var)
-                self.ts_viewer.add_series(var, hist_t, y)
-            except KeyError:
-                log_swallowed("adding history series %r" % var,
-                              level=logging.DEBUG)
-
-        # ----- Reset the slider for the new bundle -----
+        # Frame: keep the same index, clamped to this run's range.
         nf = bundle.n_frames
+        fi = max(0, min(prev_frame, nf - 1))
         self.slider.blockSignals(True)
         self.slider.setMaximum(max(0, nf - 1))
-        self.slider.setValue(0)
+        self.slider.setValue(fi)
         self.slider.setEnabled(nf > 1)
         self.slider.blockSignals(False)
-        self._frame_idx = 0
+        self._frame_idx = fi
 
-        # Draw the first frame
-        self._on_field_changed()  # uses current cb_field value
-
+        # Draw the frame (cb_cmap is untouched -> colormap preserved).
+        self._on_field_changed()
     # =====================================================================
     # Instance selection
     # =====================================================================
@@ -343,7 +395,7 @@ class ResultsTab(QWidget):
         sel = self.cb_inst.currentText()
         return sel if sel in names else names[0]
 
-    def _load_instance_fields(self):
+    def _load_instance_fields(self, prefer: str = None):
         """Populate the field combo and mesh for the selected instance."""
         if self._active_run is None:
             return
@@ -359,9 +411,10 @@ class ResultsTab(QWidget):
         # Default to a field that actually shows structure at frame 0
         # (PEEQ is zero everywhere initially and looks blank). Prefer EVF
         # (material vs void), then a temperature field.
-        for pref in ("EVF", "TEMP", "NT11", "V"):
+        prefs = ([prefer] if prefer else []) + ["EVF", "TEMP", "NT11", "V"]
+        for pref in prefs:
             i = self.cb_field.findText(pref)
-            if i >= 0:
+            if pref and i >= 0:
                 self.cb_field.setCurrentIndex(i)
                 break
         self.cb_field.blockSignals(False)

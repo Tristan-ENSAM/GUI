@@ -185,8 +185,17 @@ Aujourd'hui : placeholder "Inverse identification — coming later".
 
 - **Mass scaling** : scaler ρ ET Cp du même facteur ; ne pas double-scaler
   (pas de pré-scaling manuel + facteur GUI en même temps). `improvedDtMethod=ON`.
-- **ZOI** = la bbox ROI (éditée par le groupe "ROI" de l'onglet Geometry), pas
-  le Set interne 'ROI'. Réservée à l'instance EULER (type d'élément en "EC").
+- **ROI vs ZOI** — deux zones DISTINCTES, grilles différentes, à ne pas
+  confondre :
+  - **ROI** : set de sorties du modèle, édité dans l'onglet **Géométrie**
+    (groupe "ROI"), calé sur les champs de mesure réels (DIC/IRT) pour la
+    comparaison simulation↔essai. Matérialisé côté modèle par `ROI_node` /
+    `ROI_elem`, réservé à l'instance EULER (type d'élément en "EC").
+  - **ZOI** : zone de mesure définie par l'utilisateur dans l'onglet
+    **Optimization**, servant à l'optimisation des dimensions du domaine
+    eulérien. Grille propre, indépendante de la ROI, échantillonnée côté GUI
+    (pas de Set Abaqus). Par défaut peut coïncider avec la ROI, mais reste un
+    objet distinct.
 - **QoI** : `Fx = RF1 = Fc`, `Fy = RF2 = Ff`.
 - **Venv non portable** : recréer sur chaque machine ; venv issu d'Anaconda →
   ajouter `<base>\Library\bin` au PATH pour que pip ait SSL.

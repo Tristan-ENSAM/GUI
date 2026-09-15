@@ -413,35 +413,6 @@ class TestOptimizationTab:
         assert thr["T"] == pytest.approx(1.0)
         assert tab.thresholds_complete() is True
 
-    def test_per_variable_caps_are_minimums(self, qapp):
-        tab = self._tab()
-        # element caps are MINIMUMS (finest allowed), per variable
-        assert tab.wp_min() is None and tab.tool_min() is None
-        tab.le_wp_min.setText("0,0005")
-        tab.le_tool_min.setText("0.002")
-        assert tab.wp_min() == pytest.approx(0.0005)     # comma accepted
-        assert tab.tool_min() == pytest.approx(0.002)
-
-    def test_per_variable_factors(self, qapp):
-        tab = self._tab()
-        # each bracketing phase has its own factor + start
-        assert tab._float_or(tab.le_wp_factor, 0.0) == pytest.approx(0.5)
-        assert tab._float_or(tab.le_tool_factor, 0.0) == pytest.approx(0.5)
-        assert tab._float_or(tab.le_domain_factor, 0.0) == pytest.approx(2.0)
-        assert tab._float_or(tab.le_ms_factor, 0.0) == pytest.approx(2.0)
-        assert tab._float_or(tab.le_tool_start, 0.0) == pytest.approx(0.005)
-
-    def test_pipeline_controls_present(self, qapp):
-        tab = self._tab()
-        assert tab._float_or(tab.le_wp_start, 0.005) == pytest.approx(0.01)
-        assert tab._float_or(tab.le_tool_start, 0.001) == pytest.approx(0.005)
-        assert tab.cb_include_tool.isChecked() is True
-        # comma decimal + fallback on empty
-        tab.le_wp_start.setText("0,02")
-        assert tab._float_or(tab.le_wp_start, 0.005) == pytest.approx(0.02)
-        tab.le_wp_start.setText("")
-        assert tab._float_or(tab.le_wp_start, 0.007) == pytest.approx(0.007)
-
 
 # ---------------------------------------------------------------------------
 # Fc (cutting force) as a normalized criterion quantity
