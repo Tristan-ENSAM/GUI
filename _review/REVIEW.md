@@ -9,8 +9,8 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI jusqu'à ~30 s (les deux chemins) | Majeur | **OUVERT** — en attente d'arbitrage (voir Questions) |
-| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT** — constat établi sur ODB réel, cause à confirmer |
-| m5 | Le repli `dataDouble` de `_read_data` repose sur une prémisse contredite | Mineur | **OUVERT** |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT** — confirmé sur ODB réel, cause à confirmer |
+| m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | OUVERT |
@@ -108,10 +108,38 @@ des constats sur le projet — v3 les corrige :
 | `model.Material(...)` → `invalid name` | Abaqus refuse un nom commençant par `_`. Mon nom d'objet jetable était `_check_api_mat`. Les méthodes `Material` restent donc NON VÉRIFIÉES. |
 | `FieldValue.dataDouble` MISSING | Sondé sur `CPRESS General_Contact_Domain`, une sortie de contact que le projet n'extrait pas. Ne permet de conclure ni dans un sens ni dans l'autre (voir m5). |
 
-**Reste NON VÉRIFIÉ** : les méthodes de `Material` (défaut n°2 ci-dessus), et
-— inchangé — **tous les noms de mots-clés**. `hasattr` prouve qu'une méthode
-existe, pas que `secondOrderAccuracy=`, `improvedDtMethod=` ou
-`nodalOutputPrecision=` sont les bons noms d'arguments.
+### Résultats de `check_api.py` v3 — inventaire clos
+
+Exécuté avec le même ODB. Résumé du script : **`constants missing : 0`,
+`[MISSING] rows : 0`, `[ERROR] rows : 0` — « Every symbol checked exists on
+this installation. »**
+
+Les trois défauts de script sont confirmés comme tels : après l'ajout des
+imports CAE (`step`, `interaction`, `load`, …, tous `[OK]`),
+`Model.RigidBody`, `Model.FieldOutputRequest` et `Model.HistoryOutputRequest`
+passent en **FOUND**. Le diagnostic était le bon. Avec un nom d'objet valide,
+les 8 méthodes `Material` et la chaîne `Plastic(...).RateDependent`
+ressortent **toutes FOUND**.
+
+**Bilan de l'inventaire API : VÉRIFIÉ.** Tous les symboles employés par
+`cel_model.py` et `cel_results.py` — 44 constantes, 18 méthodes `Model`,
+17 méthodes `rootAssembly`, 10 de `ConstrainedSketch`, 8 de `Material`,
+3 de `ContactProperty`, 3 de `Part`, 5 de `Job`, et l'API d'extraction ODB —
+existent sur Abaqus 2022 HF8.
+
+**Reste NON VÉRIFIÉ — et ne le sera pas par cette voie : les noms de
+mots-clés.** `hasattr` prouve qu'une méthode existe, pas que
+`secondOrderAccuracy=`, `improvedDtMethod=` ou `nodalOutputPrecision=` sont
+les bons noms d'arguments. Cela dit, ces arguments-là sont indirectement
+attestés : le modèle se construit, tourne, et produit l'ODB examiné ici —
+un nom de mot-clé erroné ferait lever l'appel. La réserve porte donc sur les
+chemins non exercés par ce run précis (les branches `ROUGH`/`FRICTIONLESS`,
+les lois de contact autres que `HARD`, `HeatGeneration`, les types
+d'inflow/outflow non utilisés).
+
+**Et une réserve qui, elle, s'est matérialisée : `MASSEUL`/`VOLEUL`.** Un nom
+de VARIABLE DE SORTIE n'est vérifiable par aucun `hasattr` — seul l'ODB le
+dit. C'est précisément là qu'un défaut se cachait (M4).
 
 ---
 
@@ -463,25 +491,50 @@ de masse eulérienne n'existe pas dans les résultats.**
 
 ### Mineur
 
-**m5 — Le repli `dataDouble` de `_read_data` repose sur une prémisse que
-l'ODB contredit (au moins partiellement).**
+**m5 — INFIRMÉ. Mon hypothèse était fausse : le repli `dataDouble` est
+indispensable, pas du code mort.**
 - Fichier : `abaqus_scripts/cel_results.py:182-189`.
-- Statut : **fait** pour l'observation ; **non tranché** pour la portée.
-- Preuve : la docstring affirme « this model runs in double precision, so
-  `value.data` raises and we fall back to `value.dataDouble` ». Sur l'ODB
-  réel, pour la valeur sondée, `FieldValue.data` est **présent** et
-  `FieldValue.dataDouble` **absent** — l'inverse de ce que la docstring
-  décrit.
-- Nuance importante : la sonde de v2 portait sur `CPRESS`, une sortie de
-  contact que le pipeline n'extrait jamais. Il est possible que
-  `dataDouble` n'existe que sur les sorties nodales écrites en pleine
-  précision (`nodalOutputPrecision=FULL`, cel_model.py:805) et que les
-  champs réellement extraits se comportent autrement. **v3 sonde EVF, TEMP
-  et V sur l'instance eulérienne** pour trancher.
-- Risque si la prémisse est fausse partout : le repli est du code mort, et
-  s'il était un jour atteint (`v.data` levant pour une autre raison) il
-  lèverait `AttributeError` depuis l'intérieur du gestionnaire d'exception
-  — une panne plus obscure que celle qu'il prétend couvrir.
+- Ce que j'avais avancé (sur la base d'une sonde v2 portant sur `CPRESS`,
+  une sortie de contact que le pipeline n'extrait jamais) : `data`
+  fonctionne, `dataDouble` est absent, donc le repli serait du code mort.
+- **Ce que v3 mesure sur les variables réellement extraites, instance
+  eulérienne :**
+
+  ```
+  EVF (EVF_ASSEMBLY_EULER_EULER-1): data=True   dataDouble=False
+        v.data reads OK -> 1.0
+  V   (V_CAMERABAND)              : data=False  dataDouble=True
+  ```
+
+  Pour `V`, **`data` est ABSENT et `dataDouble` est PRÉSENT**. Le
+  `try: v.data / except: v.dataDouble` de `_read_data` est donc
+  effectivement emprunté, et c'est la seule branche qui permet de lire la
+  vitesse — le champ de comparaison avec la DIC. Sans ce repli, `V` ne
+  serait pas extractible.
+- La docstring dit vrai sur le fond, elle généralise seulement un peu trop
+  (« `value.data` raises » vaut pour les champs NODAUX écrits en pleine
+  précision — `nodalOutputPrecision=FULL`, cel_model.py:805 — et non pour
+  les champs élémentaires comme EVF, où `data` fonctionne). Les deux cas
+  sont correctement traités par le code tel qu'il est. **Aucune correction
+  nécessaire.**
+- Leçon pour cet audit : le constat initial venait d'une sonde non
+  représentative, que j'avais signalée comme telle. La vérification l'a
+  tranché contre moi — c'est le résultat attendu d'un tel processus.
+
+**VALIDATION SUPPLÉMENTAIRE — `_resolve_fo_name` est nécessaire, preuve à
+l'appui** (ce n'est pas un constat, c'est une confirmation que le code
+existant est bien fondé).
+- Fichier : `abaqus_scripts/cel_results.py:192-233`.
+- v3 montre que pour `TEMP`, deux clés coexistent dans l'ODB :
+  `['TEMP', 'TEMP_ASSEMBLY_EULER_EULER-1']`, et que la clé NUE `TEMP`
+  **ne porte aucune valeur sur l'instance eulérienne** (elle porte celles
+  de l'outil lagrangien). C'est exactement le cas décrit par la docstring
+  de `_resolve_fo_name`.
+- Conséquence : le test `_has_inst_values` appliqué aux correspondances
+  exactes AVANT de se rabattre sur les noms suffixés n'est pas une
+  précaution décorative. Une résolution naïve « nom exact d'abord »
+  choisirait `TEMP` et extrairait un champ de température entièrement
+  NaN pour la pièce, sans erreur visible.
 
 **m1 — Duplication de la construction de la commande Abaqus entre
 `JobTab._dry_run`/`_launch_abaqus` et `SensitivityRunWorker._abaqus_solve`.**
@@ -595,17 +648,16 @@ sur les points que la mission demandait de vérifier spécifiquement :
 
 ## Questions pour Tristan
 
-1. ~~Exécuter `check_api.py`~~ — **fait pour v1 et v2**. v2 a livré l'essentiel
-   (voir plus haut) et révélé M4. À relancer une dernière fois en **v3**, qui
-   corrige mes trois défauts de script (imports CAE manquants, nom d'objet
-   invalide, sonde `dataDouble` mal choisie) :
-   `abaqus cae noGUI=_review/check_api.py -- --odb <le même .odb>`.
-   Cela couvrira les méthodes `Material` et tranchera m5.
-1bis. **M4 — le test décisif, sans solveur** : onglet Job → **Write .inp
-   only**, puis chercher `MASSEUL` dans le `.inp`. Présent ou absent, la
-   réponse désigne la cause. Si tu as encore le log du run qui a produit
-   `GCI_run000.odb`, la ligne `[WARNING] MASSEUL/VOLEUL history not created:`
-   donnerait directement le message d'erreur d'Abaqus.
+1. ~~Exécuter `check_api.py`~~ — **CLOS**. v1, v2 et v3 exécutés.
+   L'inventaire API est vérifié (0 MISSING, 0 ERROR en v3), m5 est infirmé,
+   et M4 est confirmé. Plus rien à demander de ce côté.
+2bis. **M4 — le seul test qui reste, et il est gratuit** : onglet Job →
+   **Write .inp only**, puis chercher `MASSEUL` dans le `.inp` produit.
+   Présent → Abaqus a accepté la requête et l'a abandonnée au solve ;
+   absent → la requête lève à la construction, et le log du run porte alors
+   `[WARNING] MASSEUL/VOLEUL history not created:` suivi du message d'Abaqus,
+   qui nomme la cause exacte. Sans cette information je ne peux pas proposer
+   de correction sans inventer.
 2. ~~Version du Python embarqué~~ — **répondu** : **2.7.15** (MSC v.1928,
    64 bit). La contrainte 2.7 de `cel_common.py` est donc justifiée, ce
    n'est plus une hypothèse.

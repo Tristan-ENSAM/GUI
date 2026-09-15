@@ -370,18 +370,31 @@ def check_odb_side(odb_path):
                 if not hits:
                     log("  %-5s: no candidate key in this ODB" % base)
                     continue
-                key = hits[0]
+                # Try EVERY candidate, the way _resolve_fo_name does: the bare
+                # name can exist yet carry no values on the Eulerian instance
+                # (it holds the Lagrangian tool's). Taking hits[0] blindly
+                # reports "no values" and hides the candidate that works.
+                key, fo = None, None
+                for cand in hits:
+                    try:
+                        probe_fo = frame.fieldOutputs[cand]
+                        if eul is not None:
+                            try:
+                                probe_fo = probe_fo.getSubset(region=eul)
+                            except Exception:
+                                pass
+                        if len(probe_fo.values):
+                            key, fo = cand, probe_fo
+                            break
+                        log("  %-5s (%s): exists but NO values on the Eulerian"
+                            " instance -- _resolve_fo_name must skip it"
+                            % (base, cand))
+                    except Exception as exc:
+                        log("  %-5s (%s): probe failed: %s" % (base, cand, exc))
+                if fo is None:
+                    log("  %-5s: no candidate carries values here" % base)
+                    continue
                 try:
-                    fo = frame.fieldOutputs[key]
-                    if eul is not None:
-                        try:
-                            fo = fo.getSubset(region=eul)
-                        except Exception:
-                            pass
-                    if not len(fo.values):
-                        log("  %-5s (%s): no values on this instance"
-                            % (base, key))
-                        continue
                     v = fo.values[0]
                     has_data = hasattr(v, "data")
                     has_double = hasattr(v, "dataDouble")
