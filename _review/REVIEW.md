@@ -1,0 +1,400 @@
+# Revue de fiabilisation — GUI_Abaqus (Phase 1 : audit en lecture seule)
+
+Date : 2026-09-15
+Portée : `abaqus_scripts/`, `gui/`, `tests/`, `docs/abaqus_validation_checklist.md`.
+Aucune modification de code de production n'a été faite dans cette phase ; seuls
+`_review/REVIEW.md` et `_review/check_api.py` (nouveaux fichiers) ont été créés.
+
+**Limite majeure de cet audit, à lire avant tout le reste** : l'environnement
+dans lequel cette revue a été effectuée est un conteneur Linux **sans Abaqus
+installé** (`which abaqus` → introuvable, aucun `C:\SIMULIA`). Le point 3 de
+la mission ("Vérification contre l'installation réelle") n'a donc **pas pu
+être exécuté**. Tout ce qui concerne l'existence et la signature exacte des
+symboles de l'API Scripting Abaqus (`mdb.Model`, `ElemType`, `EulerianBC`,
+`odbAccess.openOdb`, etc.) est classé **NON VÉRIFIÉ** ci-dessous : c'est une
+lecture du code, pas une confirmation par introspection. Un script
+d'introspection prêt à l'emploi est fourni (`_review/check_api.py`) — voir
+section "Vérification introspective" plus bas pour la procédure à exécuter
+sur la machine Abaqus.
+
+Ce qui a en revanche pu être fait dans cet environnement, et l'a réellement
+été :
+- lecture complète de `cel_model.py`, `cel_results.py`, `cel_common.py`,
+  `run_simul.py`, `job_tab.py`, `run_worker.py`, `runner_core.py`,
+  `sta_parser.py`, `mass_scaling.py`, `model_config.py`, `qoi.py`, et une
+  revue ciblée (grep + lecture partielle) du reste de `gui/` ;
+- exécution réelle de la suite de tests, headless, en deux temps, après
+  installation de `requirements.txt` dans un venv dédié et des bibliothèques
+  système Qt manquantes (`libegl1` et dépendances) — sorties réelles
+  rapportées en fin de document, pas de simulation.
+
+## Résumé (5–10 lignes)
+
+Le pipeline GUI → `run_simul.py` → `cel_model.py`/`cel_results.py` → `.npz`/
+`.json` → viewers est cohérent et repose exclusivement sur l'API Scripting
+Abaqus « directe » (aucune réécriture texte du `.inp`, aucun `keywordBlock`,
+aucune réimportation CAE d'un `.inp` généré) : c'est le point le plus
+rassurant de cette revue. Deux problèmes concrets, reproduits localement,
+méritent une correction avant la phase 2 : (1) l'annulation d'un run lancé
+depuis l'onglet Job (`JobTab._cancel_run`) ne tue pas l'arbre de processus
+sur le fallback, contrairement à `SensitivityRunWorker.cancel()` qui le fait
+— risque de processus solveur orphelins documenté par le projet lui-même
+dans le checklist mais non implémenté dans ce chemin ; (2) la fonctionnalité
+« Domain sizing by Jacobian » a été livrée avec son moteur et ses tests mais
+sans câblage dans `OptimizationTab` — 6 tests échouent avec `AttributeError`
+sur le commit courant (`HEAD` = `79b66ad`). La suite de tests (597 tests,
+deux passes headless demandées) donne 588 réussites / 9 échecs ; 3 des 9
+échecs sont une dépendance de test optionnelle absente (`imageio`, non fautif
+côté production) et 6 sont le défaut ci-dessus. Aucune méthode Abaqus
+« inventée » n'a été trouvée ; le seul point ouvert est que rien n'a pu être
+confirmé contre une installation réelle dans cet environnement.
+
+## Cartographie (fait)
+
+- **Point d'entrée Abaqus** : `abaqus_scripts/run_simul.py`, lancé par
+  `abaqus cae noGUI=run_simul.py -- --model_cfg <repr> --run_cfg <repr>`
+  (`gui/tabs/job_tab.py:521-529`, `gui/sensitivity/run_worker.py:223-226`).
+  Exécuté sous l'interpréteur Python embarqué d'Abaqus (Python 2.7 pour
+  Abaqus 2022 HF8 — **NON VÉRIFIÉ** dans cet environnement, aucun accès à
+  `abaqus python -c "import sys; print(sys.version)"`; affirmation reprise
+  du commentaire du projet lui-même, `abaqus_scripts/cel_common.py:15-24`
+  et `requirements.txt:3-4`).
+- **Côté GUI (Python 3.x)** : `gui/tabs/*.py` (onglets), `gui/core/*.py`
+  (config, helpers), `gui/sensitivity/*.py` (campagnes multi-runs,
+  sizing, mass scaling), `gui/results/*.py` (lecture `.npz`/`.json`,
+  QoI), `gui/widgets/*.py` (viewers).
+- **Côté Abaqus (Python 2.7)** : `abaqus_scripts/cel_model.py` (construction
+  du modèle CEL + job), `abaqus_scripts/cel_results.py` (extraction ODB →
+  `.npz`/`.json`), `abaqus_scripts/cel_common.py` (helpers purs partagés,
+  volontairement sans dépendance 3.x — voir son docstring).
+- **Chemin complet paramètres → résultats** :
+  1. `ModelConfig.to_params_dict()` (`gui/core/model_config.py`) sérialise
+     l'état des onglets en un dict `model_cfg` (clés à points, ex.
+     `"geometry.bbox.xmin"`) ;
+  2. `JobTab._launch_abaqus` (ou `SensitivityRunWorker._abaqus_solve`)
+     construit `run_cfg` et lance `abaqus cae noGUI=run_simul.py -- ...` via
+     `QProcess` (Job tab) ou `subprocess.Popen` (campagnes) ;
+  3. `run_simul.py:parse_arguments` fait `ast.literal_eval` sur les deux
+     `repr()` reçus en argument ;
+  4. `cel_model.prepare_parameters` normalise, `build_model` construit le
+     modèle CEL, `create_job`+`run_job` écrit le `.inp` ou soumet et attend
+     la fin (`job.waitForCompletion()`), avec une vérification de succès
+     indépendante de `job.status` fondée sur le `.sta` (voir plus bas) ;
+  5. `cel_results.extract_results` ouvre le `.odb` et écrit
+     `<job>.results.npz` + `<job>.meta.json` ;
+  6. côté GUI, `gui/results/reader.py` (`ResultsBundle.load`) relit le
+     bundle, `gui/results/qoi.py` réduit aux QoI scalaires, les widgets
+     (`field_viewer.py`, `force_viewer.py`, `time_series_viewer.py`)
+     affichent.
+  7. En parallèle, `gui/core/sta_parser.py` lit le `.sta` pendant
+     l'exécution pour alimenter la barre de progression (`JobTab._poll_sta`,
+     timer 800 ms).
+
+## Tableau d'inventaire des appels API Abaqus
+
+Toutes les lignes ci-dessous ont le statut **NON VÉRIFIÉ** au sens strict
+demandé (aucune introspection possible dans cet environnement). La colonne
+« lecture » indique seulement que l'appel est cohérent avec ma connaissance
+générale de l'API Scripting Abaqus / Abaqus/CAE — ce n'est PAS une preuve.
+Utiliser `_review/check_api.py` pour obtenir un statut VÉRIFIÉ.
+
+### Construction du modèle — `abaqus_scripts/cel_model.py`
+
+| Appel | fichier:ligne | Usage | Statut |
+|---|---|---|---|
+| `mdb.Model(name=, absoluteZero=-273.15)` | cel_model.py:779 | crée le modèle | NON VÉRIFIÉ |
+| `model.ConstrainedSketch(...)` / `.rectangle` | cel_model.py:281-282, 287-288 | sketches Euler/WP | NON VÉRIFIÉ |
+| `model.Part(..., type=EULERIAN\|DEFORMABLE_BODY)` + `BaseSolidExtrude` | cel_model.py:283-315 | parts Euler/WP/Tool | NON VÉRIFIÉ |
+| `sketch.Spot/FixedConstraint/Line/HorizontalConstraint/VerticalConstraint/FilletByRadius/CoincidentConstraint/ObliqueDimension/AngularDimension` | cel_model.py:294-313 | sketch paramétrique de l'outil | NON VÉRIFIÉ |
+| `model.Material(...)` + `.Density/.Elastic/.Conductivity/.SpecificHeat/.Expansion/.InelasticHeatFraction/.Plastic(...).RateDependent(...)` | cel_model.py:326-353 | matériaux Euler/Tool | NON VÉRIFIÉ |
+| `Material.JohnsonCookDamageInitiation(...).DamageEvolution(...)` | cel_model.py:343-347 | **commenté / inactif** | non applicable |
+| `model.EulerianSection` / `model.HomogeneousSolidSection` / `Part.SectionAssignment(region=Region(cells=...))` | cel_model.py:360-363 | sections | NON VÉRIFIÉ |
+| `assembly = model.rootAssembly` ; `assembly.Instance(..., dependent=OFF)` ; `assembly.translate` ; `Instance.translateTo(movableList=, fixedList=, direction=, clearance=)` ; `assembly.excludeFromSimulation` | cel_model.py:376-389 | assemblage + positionnement | NON VÉRIFIÉ |
+| `assembly.seedPartInstance` ; `mesh.ElemType(elemCode=EC3D8RT\|C3D8RT, elemLibrary=EXPLICIT, secondOrderAccuracy=OFF, hourglassControl=DEFAULT)` ; `assembly.Set` ; `assembly.setElementType` ; `assembly.setMeshControls(elemShape=HEX, technique=STRUCTURED\|SWEEP)` ; `assembly.seedEdgeBySize/seedEdgeByNumber/seedEdgeByBias` ; `assembly.generateMesh` | cel_model.py:400-443 | maillage Euler + Tool | NON VÉRIFIÉ |
+| `assembly.ReferencePoint` ; `assembly.referencePoints[...]` ; `assembly.Set(referencePoints=...)` ; `assembly.DiscreteFieldByVolumeFraction` ; `Instance.nodes.getByBoundingBox` / `.elements.getByBoundingBox` | cel_model.py:456-483 | RP outil, VolFraction Eulérien, sets ROI_node/ROI_elem | NON VÉRIFIÉ |
+| `model.ContactProperty` + `.TangentialBehavior(formulation=PENALTY\|ROUGH\|FRICTIONLESS)` + `.NormalBehavior(pressureOverclosure=...)` + `.HeatGeneration` ; `model.ContactExp(contactPropertyAssignments=((GLOBAL, SELF, name),))` ; `model.RigidBody` | cel_model.py:500-535 | contact général + corps rigide outil | NON VÉRIFIÉ |
+| `model.TempDisplacementDynamicsStep(nlgeom=ON, linearBulkViscosity=0.06, quadBulkViscosity=1.2, improvedDtMethod=ON)` | cel_model.py:545-549 | step Explicit thermo-mécanique | NON VÉRIFIÉ |
+| `model.ButterworthFilter` ; `model.FieldOutputRequest(..., filter=)` ; `model.HistoryOutputRequest(..., filter=)` | cel_model.py:563-624 | filtres + sorties champ/historique | NON VÉRIFIÉ |
+| `HistoryOutputRequest(region=assembly.sets['Euler'], variables=('MASSEUL','VOLEUL'))` dans un `try/except Exception` non-fatal | cel_model.py:615-624 | garde-fou conservation masse | NON VÉRIFIÉ (nom de variable `MASSEUL`/`VOLEUL` en particulier) |
+| `Instance.faces.getByBoundingBox` ; `assembly.Surface(side1Faces=)` ; `model.EulerianBC(definition=INFLOW\|OUTFLOW\|BOTH, inflowType=, outflowType=)` ; addition de `FaceArray` (`+`) | cel_model.py:672-695, 707-724 | BC Eulériennes par face | NON VÉRIFIÉ |
+| `model.VelocityBC(v1=SET,...)` + `.setValuesInStep` ; `model.Velocity(distributionType=MAGNITUDE)` ; `model.MaterialAssignment(useFields=True, fieldList=...)` ; `model.Temperature` | cel_model.py:737-773 | vitesse de coupe, vitesse initiale, affectation matière par champ, température initiale | NON VÉRIFIÉ |
+| `mdb.Job(type=ANALYSIS, numCpus=, numDomains=, explicitPrecision=DOUBLE, nodalOutputPrecision=FULL)` | cel_model.py:798-806 | création du job | NON VÉRIFIÉ |
+| `job.writeInput(consistencyChecking=OFF)` | cel_model.py:958 | écriture `.inp` seule | NON VÉRIFIÉ |
+| `job.submit(consistencyChecking=OFF)` ; `job.waitForCompletion()` | cel_model.py:966-967 | soumission + attente | NON VÉRIFIÉ |
+| `job.status` / `job.messages` | **délibérément NON utilisé** — voir cel_model.py:810-824 | — | voir section "méthode la plus directe" |
+
+### Extraction ODB — `abaqus_scripts/cel_results.py`
+
+| Appel | fichier:ligne | Usage | Statut |
+|---|---|---|---|
+| `odbAccess.openOdb(path, readOnly=True)` | cel_results.py:13, 502 | ouverture ODB en lecture seule | NON VÉRIFIÉ |
+| `odb.steps[name]` ; `step.frames` ; `frame.frameValue` | cel_results.py:504-507 | pas de temps | NON VÉRIFIÉ |
+| `odb.rootAssembly.instances` ; `Instance.nodes`/`.elements` ; `Node.coordinates`/`.label` ; `Element.type`/`.connectivity`/`.label` | cel_results.py:70-95, 514-530 | géométrie par instance | NON VÉRIFIÉ |
+| `FieldOutput.getSubset(region=)` / `.getSubset(position=CENTROID\|NODAL)` / `.getScalarField(invariant=MISES\|PRESS)` / `.componentLabels` / `Value.data` / `Value.dataDouble` / `.elementLabel` / `.nodeLabel` | cel_results.py:210-408 | résolution et lecture des champs (EVF/TEMP/V) | NON VÉRIFIÉ |
+| `step.historyRegions` ; `HistoryRegion.historyOutputs` ; `HistoryOutput.data` | cel_results.py:444-477 | RF1/RF2, ALLKE/ALLIE | NON VÉRIFIÉ |
+| `odb.close()` | cel_results.py:692 (dans un `finally`) | fermeture propre | NON VÉRIFIÉ |
+
+### Commandes CLI Abaqus
+
+| Commande | fichier:ligne | Usage | Statut |
+|---|---|---|---|
+| `<abaqus_cmd> cae noGUI=<script> -- --model_cfg <repr> --run_cfg <repr>` | job_tab.py:521-529 ; run_worker.py:223-226 | lancement build+solve+extract, ou write-inp-only (`--run_cfg` porte `write_inp_only=True`) | NON VÉRIFIÉ (syntaxe `cae noGUI=` documentée publiquement mais non confirmée sur cette install) |
+| `<abaqus_cmd> job=<name> continue cpus=<n>` | job_tab.py:519 | reprise d'un job interrompu depuis ses fichiers de restart | NON VÉRIFIÉ |
+| `<abaqus_cmd> terminate job=<name>` (exécuté avec `cwd=workdir`, lit `<job>.cid`) | run_worker.py:43-74 (utilisé aussi par job_tab.py:745) | arrêt propre + libération des jetons de licence | NON VÉRIFIÉ |
+| `taskkill /F /T /PID <pid>` (fallback Windows, hors Abaqus) | run_worker.py:90-95 | tue l'arbre de process quand `terminate` échoue | commande Windows standard, pas Abaqus — NON VÉRIFIÉ en exécution (le projet le dit lui-même : "cannot be exercised in the Linux dev/CI environment", run_worker.py:86-87) |
+
+## Constats par sévérité
+
+### Critique
+
+Aucun constat classé Critique n'a été identifié dans le code — sous réserve
+que la vérification introspective (section suivante) ne révèle pas un
+symbole d'API mal nommé, ce qui reste possible tant qu'elle n'a pas été
+exécutée sur l'installation réelle.
+
+### Majeur
+
+**M1 — `JobTab._cancel_run` ne tue pas l'arbre de processus sur le chemin de
+repli, contrairement à `SensitivityRunWorker.cancel()`.**
+- Fichier : `gui/tabs/job_tab.py:711-757`.
+- Statut : **fait** (comparaison directe de deux implémentations dans le
+  même dépôt) + **interprétation** sur la conséquence côté OS (le
+  comportement de `QProcess.kill()`/`.terminate()` sur Windows — qu'il
+  n'agit que sur le process direct, pas sur ses enfants — est un fait
+  documenté par Qt en général, non vérifié spécifiquement ici).
+- Preuve : `_cancel_run` appelle d'abord `abaqus_terminate_job(...)` (la
+  route propre) puis, en repli, seulement
+  `self._proc.terminate()` / `self._proc.kill()` (job_tab.py:754-756) —
+  ce sont des méthodes `QProcess`, qui sur Windows envoient
+  `WM_CLOSE`/appellent `TerminateProcess` **uniquement sur le processus
+  fils direct** (`abaqus.bat`/`cae.exe`), pas sur les processus qu'il a
+  lui-même engendrés (pre/package/standard.exe/explicit.exe). À l'inverse,
+  `gui/sensitivity/run_worker.py:77-131`
+  (`_terminate_process_tree`) fait explicitement
+  `taskkill /F /T /PID <pid>` sur Windows — le `/T` tue l'arbre — et le
+  commentaire du fichier de checklist (`docs/abaqus_validation_checklist.md:80-83`)
+  décrit précisément ce comportement ("`taskkill /F /T`, no orphaned
+  standard.exe/explicit.exe") comme le comportement ATTENDU d'un Cancel,
+  mais seulement `SensitivityRunWorker` l'implémente. Il y a donc deux
+  mécanismes de cancel dans le dépôt, un correct (campagnes de
+  sensibilité), un incomplet (onglet Job, chemin le plus utilisé en usage
+  interactif).
+- Conséquence si confirmé : un Cancel depuis l'onglet Job peut laisser un
+  process solveur (standard.exe/explicit.exe) tourner en arrière-plan sur
+  Windows après que l'utilisateur croit l'avoir arrêté, avec jeton de
+  licence non libéré et fichiers `.odb`/`.lck` potentiellement encore
+  écrits.
+- Corrections possibles (alternatives, sans trancher) :
+  (a) faire appeler `_terminate_process_tree`-équivalent (ou une variante
+  utilisant `QProcess.processId()` + `taskkill /F /T`) depuis
+  `job_tab.py:754-756`, en réutilisant le PID exposé par `QProcess` ;
+  (b) factoriser un seul chemin de cancel partagé entre `JobTab` et
+  `SensitivityRunWorker` (actuellement dupliqué, cf. M2) pour éliminer le
+  risque de divergence future.
+- Ce point ne peut pas être testé en CI Linux (le projet le reconnaît
+  lui-même pour le chemin `taskkill`) ; le test qui existe
+  (`tests/test_abaqus_terminate.py`) couvre la fonction `abaqus_terminate_job`
+  et `_terminate_process_tree` (POSIX) isolément, mais pas
+  `JobTab._cancel_run` lui-même.
+
+**M2 — La fonctionnalité « Domain sizing by Jacobian » est livrée
+incomplète : moteur + tests présents, câblage GUI absent.**
+- Fichiers : `gui/tabs/optimization_tab.py` (aucune référence à
+  `domain_jacobian`/`DomainJacobianWorker`/`_on_run_domain_jacobian`/
+  `_on_domain_jacobian_done` — recherche exhaustive, zéro résultat) vs
+  `gui/sensitivity/domain_jacobian.py`, `gui/sensitivity/domain_jacobian_worker.py`
+  (classe `DomainJacobianWorker`, existe et est complète) et
+  `tests/test_domain_jacobian_ui.py` (teste `OptimizationTab._on_run_domain_jacobian`
+  et `._on_domain_jacobian_done` comme s'ils existaient).
+- Statut : **fait**, reproduit par l'exécution réelle de la suite de
+  tests (section "État des tests").
+- Preuve : `git show 79b66ad --stat` (dernier commit de la branche) montre
+  que `gui/tabs/optimization_tab.py` (+809/-… lignes) et
+  `gui/sensitivity/domain_jacobian_worker.py` (nouveau fichier, 48 lignes)
+  ont été modifiés/ajoutés dans le MÊME commit, mais le second n'est
+  importé nulle part dans le premier. Le seul mécanisme de "domain sizing"
+  câblé dans `OptimizationTab` est `_on_run_domain_convergence` /
+  `DomainConvergenceWorker` (gui/tabs/optimization_tab.py:44, 272, 853,
+  888) — une fonctionnalité voisine mais distincte.
+- Comparer avec `docs/abaqus_validation_checklist.md` section 8, qui documente
+  un "pending wiring" mais pour `run_domain_convergence` (ZOI), PAS pour
+  domain_jacobian — donc ce n'est pas un manque déjà connu/documenté, c'est
+  un point mort non signalé.
+- Correction : soit câbler `OptimizationTab` (bouton + handlers, sur le
+  modèle de `_on_run_domain_convergence`), soit — si la fonctionnalité est
+  volontairement mise en pause — marquer `tests/test_domain_jacobian_ui.py`
+  en `xfail`/`skip` explicite avec la raison, pour que la suite de tests
+  reflète l'état réel du produit plutôt qu'une régression silencieuse à
+  chaque exécution.
+
+### Mineur
+
+**m1 — Duplication de la construction de la commande Abaqus entre
+`JobTab._dry_run`/`_launch_abaqus` et `SensitivityRunWorker._abaqus_solve`.**
+- Fichiers : `gui/tabs/job_tab.py:326-335` et `:521-529`, vs
+  `gui/sensitivity/run_worker.py:223-226`.
+- Statut : fait (même séquence `[cmd, "cae", f"noGUI={script}", "--",
+  "--model_cfg", repr(...), "--run_cfg", repr(...)]` écrite deux fois,
+  indépendamment).
+- Risque : une évolution du contrat (ex. nouvel argument) faite dans un
+  seul des deux endroits romprait silencieusement l'autre chemin de
+  lancement — ce type de divergence s'est déjà produit sur le cancel (M1).
+- Correction possible : extraire un seul `build_abaqus_args(abaqus_cmd,
+  script, model_cfg, run_cfg)` partagé (ex. dans un module commun aux
+  deux, `gui/core/` ou `gui/sensitivity/`).
+
+**m2 — Code d'extraction mort dans le pipeline réel (`_TENSOR_REDUCERS`,
+`_STRESS_INVARIANT`, réduction von Mises).**
+- Fichier : `abaqus_scripts/cel_results.py:171-179, 236-326`.
+- Statut : fait + interprétation.
+- Preuve : `extract_results` fige `_field_vars = ["EVF", "TEMP", "V"]`
+  (cel_results.py:497), documenté comme intentionnel
+  ("the extraction pipeline only reads EVF, TEMP and V", cel_model.py:83-91).
+  Or `_extract_field` gère aussi `"MISES"`/`"S_VM"`/`"S_P"` via
+  `_TENSOR_REDUCERS`/`_STRESS_INVARIANT`/`_reduce_VM`, et ces chemins ne
+  sont exercés par aucun appelant réel (seul `gui/results/fake_builder.py`,
+  utilisé par les tests et le stub, produit du `S_VM` synthétique — grep
+  exhaustif du dépôt). Le commentaire de `results_tab.py:372-375` ("the
+  Eulerian [instance]... carries PEEQ/TEMP/MISES/EVF") est de ce fait
+  légèrement trompeur pour un run réel : PEEQ et MISES ne quittent jamais
+  l'ODB aujourd'hui.
+- Ce n'est pas un bug fonctionnel (rien ne dépend de ce chemin en usage
+  réel), mais une source de confusion pour la maintenance et un risque
+  latent si quelqu'un active `S_VM`/`PEEQ` côté GUI en pensant que
+  l'extraction suit.
+- Correction possible (alternatives) : soit documenter explicitement en
+  tête de `_extract_field`/`_TENSOR_REDUCERS` que ce chemin est prêt pour
+  une extension future mais inactif ; soit le supprimer si aucune
+  extension n'est prévue (le projet demande explicitement d'éviter le code
+  mort).
+
+**m3 — `try/except Exception: pass` autour d'une assignation qui ne peut
+pas échouer.**
+- Fichier : `gui/sensitivity/mass_scaling.py:289-293`.
+- Statut : fait.
+- Preuve : `cfg.step.output.ho_preselect = True` est entouré d'un
+  `try/except Exception: pass`, alors que `OutputCfg.ho_preselect` est un
+  champ de dataclass déclaré avec une valeur par défaut `True`
+  (`gui/core/model_config.py:109`) — l'assignation ne peut pas lever sauf
+  si `cfg.step.output` n'existe pas, ce qui n'arrive jamais avec
+  `ModelConfig()` standard. Inoffensif (et le défaut est déjà `True`), mais
+  un `except` sans commentaire sur CE qu'il est censé absorber est
+  difficile à auditer plus tard.
+- Correction : soit retirer le `try/except`, soit expliciter en commentaire
+  quel scénario précis il couvre.
+
+**m4 — Suite de tests non tolérante à l'absence d'`imageio`, une
+dépendance volontairement optionnelle côté production.**
+- Fichiers : `tests/test_experimental.py` (imports directs `import
+  imageio.v3 as iio` sans garde), vs `requirements.txt` qui ne liste PAS
+  `imageio` (contrairement à Pillow/opencv/scipy) et
+  `gui/core/sequence_io.py` qui implémente un repli explicite
+  Pillow → imageio → matplotlib précisément pour fonctionner SANS
+  imageio (TODO.md:350-353 : "Dépendance imageio retirée du chemin
+  critique").
+- Statut : fait, reproduit par l'exécution réelle
+  (`ModuleNotFoundError: No module named 'imageio'`, 3 tests de
+  `test_experimental.py`).
+- Ce n'est pas un défaut du produit — c'est un défaut de robustesse de la
+  suite de tests vis-à-vis d'un environnement conforme à
+  `requirements.txt`. Correction : `pytest.importorskip("imageio")` en
+  tête des tests concernés (ou dans `tests/conftest.py`).
+
+### Style
+
+Rien de notable au-delà des points ci-dessus. Le style du code Abaqus
+(`cel_model.py`, `cel_results.py`) est homogène, commenté sur le POURQUOI
+plutôt que le QUOI, et les fonctions sont bien découpées par responsabilité
+(`create_parts`, `create_materials`, `create_mesh`, ...), ce qui a
+considérablement facilité cette revue.
+
+## Méthodes Abaqus contournées ou inventées
+
+**Aucune méthode contournée ou inventée n'a été identifiée.** En particulier
+sur les points que la mission demandait de vérifier spécifiquement :
+
+- **Édition de mots-clés `.inp`** : le projet n'édite JAMAIS le texte du
+  `.inp` et n'utilise jamais `keywordBlock` (recherche exhaustive du dépôt,
+  zéro résultat). Le modèle est construit intégralement via l'API
+  Scripting (`mdb.Model`, `model.Part`, etc.) puis soit écrit directement
+  (`job.writeInput`), soit soumis (`job.submit`) — il n'y a à aucun moment
+  de réimport du `.inp` dans CAE. Le risque historique documenté par la
+  mission ("la réimportation du .inp dans CAE perd les Section Controls
+  (secondOrderAccuracy)") **ne peut donc pas se produire dans ce pipeline**,
+  puisque `secondOrderAccuracy=OFF` est fixé directement sur l'`ElemType`
+  au moment de la création du maillage (`cel_model.py:403, 436`) et n'est
+  jamais reperdu par un aller-retour CAE. C'est, à la lecture, la méthode
+  la plus directe et la plus robuste possible pour ce risque précis.
+- **Suivi de succès du job** : `_check_job_succeeded` (cel_model.py:810-849)
+  explique explicitement, en commentaire, pourquoi `job.status` /
+  `job.messages` sont écartés au profit d'une lecture du `.sta` — "Job
+  messages are not returned if a script is run without the Abaqus/CAE GUI"
+  et `job.status` documenté `NONE` dans ce cas. C'est un contournement
+  DOCUMENTÉ et justifié d'une limitation connue de l'API en mode `noGUI`,
+  pas un raccourci arbitraire — mais son fondement ("documented as NONE")
+  n'a pas pu être confirmé contre la doc Abaqus dans cet environnement
+  (NON VÉRIFIÉ, à confirmer via `_review/check_api.py` + doc Abaqus).
+- **Annulation** : `abaqus terminate job=<name>` est utilisé en premier
+  (route documentée pour libérer les jetons de licence), avec repli sur
+  kill process — c'est l'ordre attendu. Voir cependant M1 : le repli n'est
+  pas UNIFORME entre les deux implémentations du dépôt.
+
+## Questions pour Tristan
+
+1. `_review/check_api.py` doit être exécuté sur la machine Abaqus
+   (`abaqus cae noGUI=_review/check_api.py`) pour confirmer/infirmer tous
+   les statuts NON VÉRIFIÉ du tableau ci-dessus. Peux-tu le lancer et me
+   renvoyer `_review/check_api_report.txt` ?
+2. Le Python embarqué par Abaqus 2022 HF8 sur ta machine est-il bien 2.7
+   (comme l'affirme `cel_common.py:15-24`) ? `abaqus python -c "import
+   sys; print(sys.version)"` donne quoi chez toi ?
+3. M1 (cancel process tree) : confirmes-tu que le Cancel depuis l'onglet
+   Job a déjà laissé un `standard.exe`/`explicit.exe` orphelin dans le
+   Gestionnaire des tâches, ou est-ce un risque théorique jamais observé en
+   pratique chez toi ?
+4. M2 (domain_jacobian non câblé) : la fonctionnalité est-elle en cours de
+   développement (à finaliser en phase 2) ou son moteur a-t-il été laissé
+   de côté volontairement ? Je ne veux pas la câbler par erreur si c'est un
+   chantier en pause pour une raison que je ne connais pas.
+5. Le commentaire `docs/abaqus_validation_checklist.md` section 6 décrit le
+   Cancel comme tuant l'arbre via `taskkill /F /T` — est-ce la spécification
+   que tu veux voir appliquée uniformément (Job tab + campagnes), ou y a-t-il
+   une raison de vouloir un comportement différent entre les deux ?
+
+## État des tests
+
+Exécutés réellement dans cet environnement (Linux, headless,
+`QT_QPA_PLATFORM=offscreen`), après création d'un venv dédié
+(`.venv_review/`, non versionné) et `pip install -r requirements.txt`, plus
+installation des bibliothèques système Qt manquantes (`libegl1`,
+`libegl-mesa0`, `libxcb-cursor0`, `libxcb-image0`, `libxcb-render-util0`,
+`libxcb-util1` — absentes de l'image de base, sans rapport avec le code du
+projet).
+
+**Passe 1 — toute la suite sauf `test_mesh_pipeline.py`** :
+```
+577 passed, 9 failed in 213.37s (0:03:33)
+```
+Détail des 9 échecs :
+- 6× `tests/test_domain_jacobian_ui.py` — `AttributeError:
+  'OptimizationTab' object has no attribute '_on_run_domain_jacobian'` (ou
+  `_on_domain_jacobian_done`) → constat M2 ci-dessus.
+- 3× `tests/test_experimental.py` (`test_image_sequence_folder_standard_formats`,
+  `test_image_sequence_folder_jpeg`, `test_image_sequence_dir_natural_sort`)
+  — `ModuleNotFoundError: No module named 'imageio'` → constat m4 ci-dessus.
+
+**Passe 2 — `test_mesh_pipeline.py` seul** :
+```
+11 passed in 209.82s (0:03:29)
+```
+
+**Total réel : 588 réussis / 9 échoués sur 597 tests collectés.**
+
+Zones critiques non couvertes par la suite automatisée (le projet le
+documente déjà en grande partie dans `docs/abaqus_validation_checklist.md`) :
+tout ce qui nécessite un Abaqus réel — construction de modèle, solveur,
+lecture ODB réelle, `JobTab._cancel_run` en conditions réelles Windows (le
+test `tests/test_abaqus_terminate.py` couvre les fonctions unitaires
+`abaqus_terminate_job`/`_terminate_process_tree`, pas le code de
+`JobTab._cancel_run` lui-même — voir M1), et tout le chemin
+`_review/check_api.py` par construction.
