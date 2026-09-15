@@ -9,6 +9,8 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI jusqu'à ~30 s (les deux chemins) | Majeur | **OUVERT** — en attente d'arbitrage (voir Questions) |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT** — constat établi sur ODB réel, cause à confirmer |
+| m5 | Le repli `dataDouble` de `_read_data` repose sur une prémisse contredite | Mineur | **OUVERT** |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | OUVERT |
@@ -67,12 +69,49 @@ existait), `RF1`/`RF2` et `ALLKE`/`ALLIE`, ainsi que les noms suffixés par
 les filtres Butterworth (`RF1_SENSORBAND`, `V_CAMERABAND`) que
 `_find_history_key` et `_resolve_fo_name` tentent de résoudre.
 
-**Statut du reste de l'inventaire : toujours NON VÉRIFIÉ**, en attente de
-l'exécution de v2.
+### Résultats de `check_api.py` v2 (exécuté avec `--odb GCI_run000.odb`)
 
-Rappel qui n'a pas changé : une méthode trouvée ne prouve pas que les
-ARGUMENTS passés par `cel_model.py` sont corrects. `hasattr` ne valide pas
-un nom de mot-clé.
+**Désormais VÉRIFIÉ — l'essentiel de l'inventaire de construction du modèle :**
+
+| Groupe | Résultat |
+|---|---|
+| 14 méthodes `Model` (`ConstrainedSketch`, `Part`, `Material`, `EulerianSection`, `HomogeneousSolidSection`, `ContactProperty`, `ContactExp`, `TempDisplacementDynamicsStep`, `ButterworthFilter`, `EulerianBC`, `VelocityBC`, `Velocity`, `MaterialAssignment`, `Temperature`, `rootAssembly`) | **FOUND** |
+| **Les 17 méthodes de `rootAssembly`** — dont `seedEdgeByBias`, `DiscreteFieldByVolumeFraction`, `setElementType`, `setMeshControls`, `generateMesh`, `ReferencePoint`, `Surface` | **toutes FOUND** |
+| 10 méthodes `ConstrainedSketch` (dont `FilletByRadius`, `ObliqueDimension`, `AngularDimension`) | **toutes FOUND** |
+| 3 méthodes `ContactProperty` (`TangentialBehavior`, `NormalBehavior`, `HeatGeneration`) | **toutes FOUND** |
+| `Part.BaseSolidExtrude`, `Part.SectionAssignment`, `Part.cells` | **FOUND** |
+| `Job.writeInput`, `.submit`, `.waitForCompletion`, `.status`, `.messages` | **FOUND** |
+| `Odb.steps/.rootAssembly/.close`, `FieldOutput.getSubset/.getScalarField/.componentLabels/.values`, `FieldValue.data/.elementLabel/.nodeLabel` | **FOUND** |
+
+**La justification de `_check_job_succeeded` est VÉRIFIÉE.** Le script a lu, en
+mode `noGUI`, `job.status = None` et `job.messages = []` — exactement ce que
+décrit le commentaire de `cel_model.py:810-824`. Écarter `job.status` au
+profit du `.sta` n'était donc pas une superstition : c'était nécessaire.
+
+**Le mécanisme de suffixage par les filtres est VÉRIFIÉ**, et il valide le
+code de résolution :
+- `V` n'existe QUE sous `V_CAMERABAND` (le nom nu est absent) ;
+- `RF1`/`RF2` n'existent QUE sous `RF1_SENSORBAND`/`RF2_SENSORBAND` ;
+- `EVF` se résout en `['EVF_ASSEMBLY_EULER_EULER-1', 'EVF_VOID']` — exactement
+  la forme que décrit la docstring de `_resolve_fo_name` (cel_results.py:192-202).
+
+Sans `_resolve_fo_name` / `_find_history_key`, un `"RF1"` ou `"V"` codé en dur
+ne trouverait rien. Ces deux fonctions ne sont pas défensives « au cas où » :
+elles sont indispensables sur cet ODB.
+
+**Trois `[MISSING]` + un `[ERROR]` sont encore des DÉFAUTS DE MON SCRIPT**, pas
+des constats sur le projet — v3 les corrige :
+
+| Symptôme v2 | Cause réelle |
+|---|---|
+| `Model.RigidBody`, `Model.FieldOutputRequest`, `Model.HistoryOutputRequest` MISSING | v2 n'importait que `abaqus`. Ces méthodes ne sont greffées sur `Model` qu'en important les modules CAE (`step`, `interaction`…), ce que `cel_model.py:17-25` fait. **Preuve qu'elles marchent : l'ODB contient 501 frames de sortie de champ et `RF1`/`RF2` sur le point de référence du corps rigide.** |
+| `model.Material(...)` → `invalid name` | Abaqus refuse un nom commençant par `_`. Mon nom d'objet jetable était `_check_api_mat`. Les méthodes `Material` restent donc NON VÉRIFIÉES. |
+| `FieldValue.dataDouble` MISSING | Sondé sur `CPRESS General_Contact_Domain`, une sortie de contact que le projet n'extrait pas. Ne permet de conclure ni dans un sens ni dans l'autre (voir m5). |
+
+**Reste NON VÉRIFIÉ** : les méthodes de `Material` (défaut n°2 ci-dessus), et
+— inchangé — **tous les noms de mots-clés**. `hasattr` prouve qu'une méthode
+existe, pas que `secondOrderAccuracy=`, `improvedDtMethod=` ou
+`nodalOutputPrecision=` sont les bons noms d'arguments.
 
 ---
 
@@ -372,7 +411,77 @@ d'annulation.** (constat ajouté en phase 2, non présent dans l'audit initial)
   au lieu de l'appel direct (corrige uniquement le chemin (b) du constat,
   pas celui de l'onglet Job).
 
+**M4 — `MASSEUL`/`VOLEUL` sont absents de l'ODB : le contrôle de conservation
+de masse eulérienne n'existe pas dans les résultats.**
+- Fichier : `abaqus_scripts/cel_model.py:615-624`.
+- Statut : **fait** pour l'absence (constatée sur un ODB réel) ; **hypothèse**
+  pour la cause.
+- Preuve : `check_api.py v2 --odb C:\TEMP\ABQ_wd\GCI_run000.odb` liste
+  l'intégralité des régions d'historique du step `Cut` (501 frames) :
+
+  ```
+  region 'Assembly ASSEMBLY': ['ALLAE','ALLCD','ALLDMD','ALLFD','ALLHF',
+                               'ALLIE','ALLIHE','ALLKE','ALLPD','ALLSE',
+                               'ALLVD','ALLWK','ETOTAL']
+  region 'Node ASSEMBLY.1'  : ['RF1_SENSORBAND','RF2_SENSORBAND']
+  ```
+
+  Deux régions, aucune ne porte `MASSEUL` ni `VOLEUL`. `ALLKE`/`ALLIE`
+  (garde-fou énergétique) et `RF1`/`RF2` (efforts de coupe) sont bien là :
+  H-Output-1 et H-Output-2 fonctionnent, seul **H-Output-3 ne produit rien**.
+- **L'âge de l'ODB n'explique pas l'absence.** Vérifié par `git log -S` :
+  la requête `MASSEUL`/`VOLEUL` a été introduite en `e9e967f`, et son code est
+  identique (au `COORD` près, ajouté plus tard) entre `e9e967f` et HEAD. Or
+  cet ODB porte les sorties filtrées (`V_CAMERABAND`, `RF1_SENSORBAND`)
+  introduites par ce même commit `e9e967f`, et pas `COORD` (ajouté en
+  `79b66ad`) : il a donc été produit dans l'intervalle, par un code qui
+  **contenait déjà** la requête.
+- Conséquence : le projet croit disposer d'un indicateur de conservation
+  (« is material leaving the domain, or being lost numerically? »,
+  cel_model.py:610-614). Il n'en dispose pas. Ce n'est pas une erreur de
+  physique, mais un garde-fou de diagnostic silencieusement inopérant — et
+  le `try/except` qui l'entoure garantit que personne ne le remarque, la
+  mise en garde partant sur stdout au milieu d'un log de run.
+- Causes possibles (HYPOTHÈSES — je n'ai pas de quoi trancher, et je ne
+  veux pas inventer la bonne forme de l'appel) :
+  (a) la requête lève à la construction et le `try/except` l'avale — le
+  suspect principal étant `region=assembly.sets['Euler']` : `MASSEUL`/`VOLEUL`
+  sont des grandeurs par **instance de matériau eulérien**, et un set de
+  cellules d'assemblage n'est peut-être pas une région recevable ;
+  (b) la requête est acceptée à la construction mais Abaqus ne produit rien
+  au solve.
+- **Test décisif et gratuit pour départager, sans lancer de solveur** :
+  onglet Job → **Write .inp only**, puis chercher `MASSEUL` dans le `.inp`
+  produit. Présent → hypothèse (b) ; absent → hypothèse (a), et le log du
+  run porte alors la ligne `[WARNING] MASSEUL/VOLEUL history not created:`
+  suivie du message d'Abaqus, qui nomme la cause exacte.
+- Corrections possibles, à décider APRÈS ce test : corriger la région /
+  la forme de la requête si (a) ; ou retirer la requête et le `try/except`
+  si la conservation eulérienne ne s'obtient pas ainsi, plutôt que de
+  garder un garde-fou qui n'en est pas un. Dans les deux cas, remplacer
+  l'`except` muet par une trace que le pipeline remonte.
+
 ### Mineur
+
+**m5 — Le repli `dataDouble` de `_read_data` repose sur une prémisse que
+l'ODB contredit (au moins partiellement).**
+- Fichier : `abaqus_scripts/cel_results.py:182-189`.
+- Statut : **fait** pour l'observation ; **non tranché** pour la portée.
+- Preuve : la docstring affirme « this model runs in double precision, so
+  `value.data` raises and we fall back to `value.dataDouble` ». Sur l'ODB
+  réel, pour la valeur sondée, `FieldValue.data` est **présent** et
+  `FieldValue.dataDouble` **absent** — l'inverse de ce que la docstring
+  décrit.
+- Nuance importante : la sonde de v2 portait sur `CPRESS`, une sortie de
+  contact que le pipeline n'extrait jamais. Il est possible que
+  `dataDouble` n'existe que sur les sorties nodales écrites en pleine
+  précision (`nodalOutputPrecision=FULL`, cel_model.py:805) et que les
+  champs réellement extraits se comportent autrement. **v3 sonde EVF, TEMP
+  et V sur l'instance eulérienne** pour trancher.
+- Risque si la prémisse est fausse partout : le repli est du code mort, et
+  s'il était un jour atteint (`v.data` levant pour une autre raison) il
+  lèverait `AttributeError` depuis l'intérieur du gestionnaire d'exception
+  — une panne plus obscure que celle qu'il prétend couvrir.
 
 **m1 — Duplication de la construction de la commande Abaqus entre
 `JobTab._dry_run`/`_launch_abaqus` et `SensitivityRunWorker._abaqus_solve`.**
@@ -486,10 +595,17 @@ sur les points que la mission demandait de vérifier spécifiquement :
 
 ## Questions pour Tristan
 
-1. ~~Exécuter `check_api.py`~~ — **fait pour v1**. À relancer en **v2**, qui
-   couvre enfin les méthodes et l'ODB :
-   `abaqus cae noGUI=_review/check_api.py -- --odb <un .odb existant>`.
-   C'est le seul moyen de vérifier `MASSEUL`/`VOLEUL` et l'API d'extraction.
+1. ~~Exécuter `check_api.py`~~ — **fait pour v1 et v2**. v2 a livré l'essentiel
+   (voir plus haut) et révélé M4. À relancer une dernière fois en **v3**, qui
+   corrige mes trois défauts de script (imports CAE manquants, nom d'objet
+   invalide, sonde `dataDouble` mal choisie) :
+   `abaqus cae noGUI=_review/check_api.py -- --odb <le même .odb>`.
+   Cela couvrira les méthodes `Material` et tranchera m5.
+1bis. **M4 — le test décisif, sans solveur** : onglet Job → **Write .inp
+   only**, puis chercher `MASSEUL` dans le `.inp`. Présent ou absent, la
+   réponse désigne la cause. Si tu as encore le log du run qui a produit
+   `GCI_run000.odb`, la ligne `[WARNING] MASSEUL/VOLEUL history not created:`
+   donnerait directement le message d'erreur d'Abaqus.
 2. ~~Version du Python embarqué~~ — **répondu** : **2.7.15** (MSC v.1928,
    64 bit). La contrainte 2.7 de `cel_common.py` est donc justifiée, ce
    n'est plus une hypothèse.

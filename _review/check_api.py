@@ -20,8 +20,24 @@ It calls `model.ConstrainedSketch(...)`, `model.Part(...)`,
 checked the assembly, Material-instance, Job or ODB APIs at all, which is
 most of what the project actually uses.
 
-v2 therefore instantiates a THROWAWAY in-memory model and introspects the
-real objects, then deletes it. It still:
+v3 -- THREE DEFECTS THE FIRST v2 RUN EXPOSED
+---------------------------------------------
+1. It reported Model.RigidBody / FieldOutputRequest / HistoryOutputRequest
+   MISSING because it imported only `abaqus`. Those methods are grafted onto
+   Model by importing the CAE modules, which cel_model.py does at its top
+   (`from step import *`, `from interaction import *`, ...). v3 replicates
+   those imports before introspecting. The ODB proves all three work: it
+   carries 501 field-output frames, RF1/RF2 on the rigid-body reference node.
+2. `model.Material(name="_check_api_mat")` raised "invalid name" -- Abaqus
+   rejects a leading underscore. All throwaway names now start with a letter.
+3. The FieldValue probe used `keys[0]`, which landed on a contact output
+   (CPRESS) rather than on anything the project extracts. v3 probes the
+   variables cel_results.py actually reads (EVF/TEMP/V on the Eulerian
+   instance), which is the only way to settle whether `_read_data`'s
+   `data` -> `dataDouble` fallback is sound.
+
+v2/v3 instantiate a THROWAWAY in-memory model and introspect the real
+objects, then delete it. They still:
   * builds no geometry, meshes nothing, submits nothing,
   * writes exactly one file (the report),
   * deletes the temporary model and job from the mdb before exiting.
@@ -55,8 +71,10 @@ import sys
 
 REPORT_LINES = []
 
-_TMP_MODEL = "_check_api_tmp_model"
-_TMP_JOB = "_check_api_tmp_job"
+# Abaqus rejects names with a leading underscore ("invalid name"), which is
+# what broke the Material check on the first v2 run. Letters only.
+_TMP_MODEL = "CheckApiTmpModel"
+_TMP_JOB = "CheckApiTmpJob"
 
 
 def log(line=""):
@@ -182,6 +200,28 @@ def check_constants():
     return missing
 
 
+def import_cae_modules():
+    """Import exactly what cel_model.py imports.
+
+    This is not cosmetic. Abaqus grafts Model methods onto the Model object as
+    these modules load: without `step`, `model.FieldOutputRequest` does not
+    exist; without `interaction`, neither does `model.RigidBody`. The first v2
+    run reported all three MISSING for exactly this reason -- a defect in the
+    check, not in the project.
+    """
+    section("Importing the CAE modules cel_model.py imports")
+    for name in ("step", "sketch", "load", "part", "mesh", "interaction",
+                 "regionToolset", "material", "section", "assembly",
+                 "connectorBehavior"):
+        try:
+            __import__(name)
+            log("  [OK]      import %s" % name)
+        except Exception as exc:
+            # Only the first seven are imported by cel_model.py; the rest are
+            # opportunistic, so a failure here is informational.
+            log("  [SKIP]    import %s -- %s" % (name, exc))
+
+
 def check_model_side(mdb):
     """Instantiate a throwaway model and introspect the objects the project
     really talks to. Everything is removed again in the finally block."""
@@ -206,7 +246,7 @@ def check_model_side(mdb):
 
         section("Material methods (material.<X>)")
         try:
-            mat = model.Material(name="_check_api_mat")
+            mat = model.Material(name="CheckApiMat")
             for name in MATERIAL_METHODS:
                 check_attr(mat, "Material", name)
             # .Plastic(...).RateDependent(...) is chained in create_materials:
@@ -223,7 +263,7 @@ def check_model_side(mdb):
 
         section("ContactProperty methods (IntProp.<X>)")
         try:
-            prop = model.ContactProperty(name="_check_api_prop")
+            prop = model.ContactProperty(name="CheckApiProp")
             for name in CONTACT_PROP_METHODS:
                 check_attr(prop, "ContactProperty", name)
         except Exception as exc:
@@ -231,7 +271,7 @@ def check_model_side(mdb):
 
         section("ConstrainedSketch methods (sketch.<X>)")
         try:
-            sk = model.ConstrainedSketch(name="_check_api_sketch", sheetSize=5)
+            sk = model.ConstrainedSketch(name="CheckApiSketch", sheetSize=5)
             for name in SKETCH_METHODS:
                 check_attr(sk, "ConstrainedSketch", name)
         except Exception as exc:
@@ -239,7 +279,7 @@ def check_model_side(mdb):
 
         section("Part methods (part.<X>)")
         try:
-            prt = model.Part(name="_check_api_part", dimensionality=THREE_D,
+            prt = model.Part(name="CheckApiPart", dimensionality=THREE_D,
                              type=DEFORMABLE_BODY)
             for name in ("BaseSolidExtrude", "SectionAssignment", "cells"):
                 check_attr(prt, "Part", name)
@@ -306,27 +346,85 @@ def check_odb_side(odb_path):
             for base in ("EVF", "TEMP", "V"):
                 hits = [k for k in keys if k == base or k.startswith(base + "_")]
                 log("  resolver candidates for %-4s : %r" % (base, hits))
+
+            # Probe the variables cel_results.py ACTUALLY extracts, on the
+            # Eulerian instance. The first v2 run probed keys[0] -- a contact
+            # output -- and concluded nothing useful about _read_data().
+            eul = None
+            for iname in odb.rootAssembly.instances.keys():
+                inst = odb.rootAssembly.instances[iname]
+                if len(inst.elements) and inst.elements[0].type.startswith("EC"):
+                    eul = inst
+                    break
+            log("")
+            log("-- FieldValue.data vs .dataDouble on the EXTRACTED variables --")
+            log("   cel_results._read_data() does `try: v.data / except:")
+            log("   v.dataDouble`, on the premise that a double-precision ODB")
+            log("   makes .data raise. If .data works and .dataDouble is")
+            log("   absent, that premise is wrong and the fallback is dead")
+            log("   code that would raise AttributeError if ever reached.")
+            if eul is None:
+                log("   [SKIP] no Eulerian (EC*) instance found in this ODB")
+            for base in ("EVF", "TEMP", "V"):
+                hits = [k for k in keys if k == base or k.startswith(base + "_")]
+                if not hits:
+                    log("  %-5s: no candidate key in this ODB" % base)
+                    continue
+                key = hits[0]
+                try:
+                    fo = frame.fieldOutputs[key]
+                    if eul is not None:
+                        try:
+                            fo = fo.getSubset(region=eul)
+                        except Exception:
+                            pass
+                    if not len(fo.values):
+                        log("  %-5s (%s): no values on this instance"
+                            % (base, key))
+                        continue
+                    v = fo.values[0]
+                    has_data = hasattr(v, "data")
+                    has_double = hasattr(v, "dataDouble")
+                    log("  %-5s (%s): data=%s  dataDouble=%s"
+                        % (base, key, has_data, has_double))
+                    if has_data:
+                        try:
+                            log("        v.data reads OK -> %r" % (v.data,))
+                        except Exception as exc:
+                            log("        v.data RAISES: %s -- the fallback is"
+                                " load-bearing here" % exc)
+                except Exception as exc:
+                    log("  %-5s (%s): probe failed: %s" % (base, key, exc))
+
             if keys:
-                fo = frame.fieldOutputs[keys[0]]
+                fo0 = frame.fieldOutputs[keys[0]]
                 log("")
                 log("-- FieldOutput methods (on %r) --" % keys[0])
                 for name in ("getSubset", "getScalarField", "componentLabels",
                              "values"):
-                    check_attr(fo, "FieldOutput", name)
-                if len(fo.values):
-                    v = fo.values[0]
-                    for name in ("data", "dataDouble", "elementLabel",
-                                 "nodeLabel"):
-                        check_attr(v, "FieldValue", name)
+                    check_attr(fo0, "FieldOutput", name)
 
         log("")
         log("-- historyRegions: verifies RF1/RF2, ALLKE/ALLIE, MASSEUL/VOLEUL --")
         log("   (these are OUTPUT VARIABLE NAMES -- no hasattr can check them;")
         log("    only a real ODB shows whether Abaqus accepted the request)")
+        all_hist = []
         for rkey in step.historyRegions.keys():
             region = step.historyRegions[rkey]
-            log("  region %r: %r"
-                % (rkey, sorted(region.historyOutputs.keys())))
+            names = sorted(region.historyOutputs.keys())
+            all_hist.extend(names)
+            log("  region %r: %r" % (rkey, names))
+        log("")
+        log("  VERDICT on the history variables the model requests:")
+        for base in ("RF1", "RF2", "ALLKE", "ALLIE", "MASSEUL", "VOLEUL"):
+            hits = [n for n in all_hist
+                    if n == base or n.startswith(base + "_")]
+            log("    %-8s : %s" % (base, hits if hits else "ABSENT"))
+        log("")
+        log("  MASSEUL/VOLEUL are requested by cel_model.py:615-624 inside a")
+        log("  try/except that only prints a warning. If they read ABSENT")
+        log("  above, the Eulerian mass/volume conservation check does not")
+        log("  exist in the results, whatever the model script intended.")
     finally:
         odb.close()
         log("")
@@ -345,6 +443,10 @@ def main():
         return
 
     missing_consts = check_constants()
+
+    # MUST come before check_model_side: Model methods only exist once the
+    # CAE modules that define them are imported.
+    import_cae_modules()
 
     try:
         check_model_side(mdb)
