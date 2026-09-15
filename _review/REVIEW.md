@@ -8,7 +8,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 |---|---|---|---|
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
-| M3 | Le Cancel gèle l'UI jusqu'à ~30 s (les deux chemins) | Majeur | **OUVERT** — en attente d'arbitrage (voir Questions) |
+| M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **OUVERT** — mécanisme établi, durée encore non mesurée |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT** — confirmé sur ODB réel, cause à confirmer |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
@@ -425,6 +425,30 @@ d'annulation.** (constat ajouté en phase 2, non présent dans l'audit initial)
   Windows peut afficher « ne répond pas », alors même que l'annulation se
   déroule correctement. L'utilisateur peut croire à un plantage et tuer la
   GUI — ce qui le ramène précisément au problème d'orphelins de M1.
+
+**RÉVISION de l'ampleur (mesures réelles sur la machine de Tristan).**
+Le « ~32 s » initial était la somme de tous les timeouts en supposant que
+chacun atteigne son plafond. Deux mesures le rendent improbable :
+
+| Commande | Durée mesurée |
+|---|---|
+| `abaqus.bat information=release` | **4,90 s** |
+| `abaqus.bat terminate job=<job inexistant>` | **0,63 s** |
+
+La seconde **n'est pas** le coût d'un vrai terminate (aucun job ne tournait,
+la commande a échoué vite), mais elle établit que `abaqus.bat` peut démarrer
+et rendre la main en 0,63 s. Les 4,90 s de `information=release` sont donc le
+coût PROPRE de cette commande, pas un surcoût de lanceur : le plancher que
+j'avais supposé à ~5 s ne tient pas, et mon étape de mesure était un mauvais
+proxy.
+
+Le terme dominant est donc vraisemblablement **`waitForFinished(10000)`**
+(job_tab.py:750), pendant lequel la GUI attend que le solveur se déroule et
+ferme l'ODB — pas l'appel `subprocess.run`. Borne réaliste révisée :
+**~11-12 s au pire** (terminate + 10 s d'attente + taskkill), plutôt 2-5 s en
+pratique. **Durée réelle toujours NON MESURÉE** : il faut annuler pendant que
+le solveur tourne (`<job>.cid` présent), seul cas où ce chemin est emprunté.
+Cela ne change pas le mécanisme, seulement son ampleur — et donc l'urgence.
 - Corrections possibles (alternatives, à arbitrer) :
   (a) **Minimal** : réduire les timeouts (ex. 20 s → 5 s pour
   `abaqus terminate`, qui rend la main en général en moins d'une seconde
