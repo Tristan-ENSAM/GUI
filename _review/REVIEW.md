@@ -14,9 +14,65 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | OUVERT |
 | m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | OUVERT |
 
-Tous les statuts NON VÉRIFIÉ du tableau d'inventaire API restent NON VÉRIFIÉ :
-`_review/check_api.py` n'a toujours pas pu être exécuté (aucune installation
-Abaqus dans cet environnement).
+## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
+
+`_review/check_api.py` v1 a été exécuté sur l'installation réelle
+(`abaqus cae noGUI=_review/check_api.py`). Sortie complète :
+`_review/check_api_report.txt` côté machine Abaqus.
+
+**VÉRIFIÉ (preuve = sortie du script) :**
+
+| Élément | Résultat |
+|---|---|
+| Interpréteur Abaqus | **Python 2.7.15** (MSC v.1928, 64 bit) — confirme la contrainte 2.7 de `cel_common.py:15-24`, qui n'était qu'une hypothèse jusqu'ici |
+| Les 44 constantes `abaqusConstants` utilisées | **toutes FOUND**, sans exception (`EC3D8RT`, `C3D8RT`, `NON_REFLECTING`, `ZERO_PRESSURE`, `EQUILIBRIUM`, `INFLOW`/`OUTFLOW`/`BOTH`, `JOHNSON_COOK`, `CONSTANTPRESSURE`, `MISES`, `PRESS`, `PRESELECT`, …) |
+| `abaqus.mdb`, `mdb.Model`, `mdb.Job` | FOUND |
+| `regionToolset.Region`, `mesh.ElemType`, `odbAccess.openOdb` | FOUND |
+
+C'est la confirmation la plus utile de l'audit : **aucune constante symbolique
+inventée ou mal nommée** dans tout le modèle CEL.
+
+**Les trois `[MISSING]` du rapport sont un DÉFAUT DU SCRIPT DE VÉRIFICATION,
+pas un constat sur le projet.** `sketch.ConstrainedSketch`, `part.Part` et
+`material.Material` sont signalés absents parce que v1 testait des noms au
+niveau MODULE que le code de production n'utilise jamais : `cel_model.py`
+appelle `model.ConstrainedSketch(...)`, `model.Part(...)`,
+`model.Material(...)` — des **méthodes de l'objet Model**. v1 vérifiait une
+façade inexistante au lieu de l'API réellement employée. Aucune conclusion
+sur le projet ne peut être tirée de ces trois lignes.
+
+**Ce que v1 n'a PAS couvert du tout** (il se contentait d'imprimer une note
+« à vérifier à la main ») — c'est-à-dire l'essentiel de l'inventaire :
+les 18 méthodes de `Model`, toutes les méthodes de `rootAssembly`
+(`seedEdgeByBias`, `DiscreteFieldByVolumeFraction`, `generateMesh`,
+`setElementType`…), les méthodes de `Material`, celles de `ContactProperty`,
+de `Job` (`writeInput`/`submit`/`waitForCompletion`), et **toute l'API
+d'extraction ODB** de `cel_results.py`.
+
+**`check_api.py` v2** corrige les deux problèmes : il instancie un modèle
+jetable en mémoire et introspecte les objets réels (puis le supprime ; il ne
+construit aucune géométrie, ne maille rien, ne soumet rien), et accepte un
+`.odb` existant pour couvrir `cel_results.py` :
+
+```
+abaqus cae noGUI=_review/check_api.py -- --odb C:\TEMP\ABQ_wd\<job>.odb
+```
+
+La branche ODB est celle qui compte le plus pour les points restants : elle
+seule peut confirmer `getSubset` / `getScalarField` / `dataDouble`, et
+surtout lister les `historyOutputs` réels — ce qui vérifie d'un coup
+**`MASSEUL`/`VOLEUL`** (cel_model.py:615-624, le point le plus risqué de
+l'inventaire, entouré d'un `try/except` justement parce que le doute
+existait), `RF1`/`RF2` et `ALLKE`/`ALLIE`, ainsi que les noms suffixés par
+les filtres Butterworth (`RF1_SENSORBAND`, `V_CAMERABAND`) que
+`_find_history_key` et `_resolve_fo_name` tentent de résoudre.
+
+**Statut du reste de l'inventaire : toujours NON VÉRIFIÉ**, en attente de
+l'exécution de v2.
+
+Rappel qui n'a pas changé : une méthode trouvée ne prouve pas que les
+ARGUMENTS passés par `cel_model.py` sont corrects. `hasattr` ne valide pas
+un nom de mot-clé.
 
 ---
 
@@ -114,11 +170,21 @@ confirmé contre une installation réelle dans cet environnement.
 
 ## Tableau d'inventaire des appels API Abaqus
 
-Toutes les lignes ci-dessous ont le statut **NON VÉRIFIÉ** au sens strict
-demandé (aucune introspection possible dans cet environnement). La colonne
-« lecture » indique seulement que l'appel est cohérent avec ma connaissance
-générale de l'API Scripting Abaqus / Abaqus/CAE — ce n'est PAS une preuve.
-Utiliser `_review/check_api.py` pour obtenir un statut VÉRIFIÉ.
+Le statut **NON VÉRIFIÉ** des lignes ci-dessous date de la phase 1. Il a été
+**partiellement levé depuis** — voir la section « Vérification introspective
+— résultats réels » en tête de document :
+- les **constantes symboliques** de toutes ces lignes (`EULERIAN`, `EC3D8RT`,
+  `JOHNSON_COOK`, `NON_REFLECTING`, `PRESELECT`, `MISES`, …) sont désormais
+  **VÉRIFIÉES** : les 44 existent sur l'installation de Tristan ;
+- les points d'entrée `mdb.Model`, `mdb.Job`, `regionToolset.Region`,
+  `mesh.ElemType`, `odbAccess.openOdb` sont **VÉRIFIÉS** ;
+- les **méthodes** (`model.EulerianBC`, `assembly.seedEdgeByBias`,
+  `job.writeInput`, `FieldOutput.getScalarField`, …) et surtout les **noms
+  de mots-clés** restent **NON VÉRIFIÉS** : `check_api.py` v1 ne les
+  couvrait pas. v2 le fait, il reste à l'exécuter.
+
+La colonne « lecture » n'indique que la cohérence apparente avec l'API
+Scripting — ce n'est pas une preuve.
 
 ### Construction du modèle — `abaqus_scripts/cel_model.py`
 
@@ -420,13 +486,13 @@ sur les points que la mission demandait de vérifier spécifiquement :
 
 ## Questions pour Tristan
 
-1. `_review/check_api.py` doit être exécuté sur la machine Abaqus
-   (`abaqus cae noGUI=_review/check_api.py`) pour confirmer/infirmer tous
-   les statuts NON VÉRIFIÉ du tableau ci-dessus. Peux-tu le lancer et me
-   renvoyer `_review/check_api_report.txt` ?
-2. Le Python embarqué par Abaqus 2022 HF8 sur ta machine est-il bien 2.7
-   (comme l'affirme `cel_common.py:15-24`) ? `abaqus python -c "import
-   sys; print(sys.version)"` donne quoi chez toi ?
+1. ~~Exécuter `check_api.py`~~ — **fait pour v1**. À relancer en **v2**, qui
+   couvre enfin les méthodes et l'ODB :
+   `abaqus cae noGUI=_review/check_api.py -- --odb <un .odb existant>`.
+   C'est le seul moyen de vérifier `MASSEUL`/`VOLEUL` et l'API d'extraction.
+2. ~~Version du Python embarqué~~ — **répondu** : **2.7.15** (MSC v.1928,
+   64 bit). La contrainte 2.7 de `cel_common.py` est donc justifiée, ce
+   n'est plus une hypothèse.
 3. M1 (cancel process tree) : confirmes-tu que le Cancel depuis l'onglet
    Job a déjà laissé un `standard.exe`/`explicit.exe` orphelin dans le
    Gestionnaire des tâches, ou est-ce un risque théorique jamais observé en
