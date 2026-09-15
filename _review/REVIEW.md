@@ -9,7 +9,9 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **OUVERT** — mécanisme établi, durée encore non mesurée |
-| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT** — confirmé sur ODB réel, cause à confirmer |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
+| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **OUVERT** — établi par les avertissements `.sta` + noms de clés ODB |
+| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **OUVERT** |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
@@ -442,13 +444,32 @@ coût PROPRE de cette commande, pas un surcoût de lanceur : le plancher que
 j'avais supposé à ~5 s ne tient pas, et mon étape de mesure était un mauvais
 proxy.
 
-Le terme dominant est donc vraisemblablement **`waitForFinished(10000)`**
-(job_tab.py:750), pendant lequel la GUI attend que le solveur se déroule et
-ferme l'ODB — pas l'appel `subprocess.run`. Borne réaliste révisée :
-**~11-12 s au pire** (terminate + 10 s d'attente + taskkill), plutôt 2-5 s en
-pratique. **Durée réelle toujours NON MESURÉE** : il faut annuler pendant que
-le solveur tourne (`<job>.cid` présent), seul cas où ce chemin est emprunté.
-Cela ne change pas le mécanisme, seulement son ampleur — et donc l'urgence.
+**SECONDE RÉVISION — le `waitForFinished` n'est pas non plus le coupable.**
+Le run `cancel_test` du 15/09/2026 le montre. Chronologie tirée du `.log` et
+du `.sta` :
+
+| Horodatage | Événement |
+|---|---|
+| 18:07:48 | `explicit_dp.exe` démarre |
+| 18:07:54 | `Terminate request received from 2019-0357 on CL-CHENEVEZ-01` |
+| 18:07:54 | `job aborted` — **même seconde** |
+
+Le `.sta` s'arrête sur `***ERROR: Process terminated by external request`
+après la frame 39/500. Le solveur meurt donc **en moins d'une seconde** après
+réception de la demande. `waitForFinished(10000)` rend la main presque
+immédiatement : il n'atteindra jamais son plafond de 10 s dans ce scénario.
+
+Il ne reste donc qu'un seul terme au gel : la durée du sous-processus
+`abaqus.bat terminate` lui-même — toujours non mesurée contre un job vivant
+(la mesure à 0,63 s portait sur un job inexistant). **Ampleur probable de M3 :
+quelques secondes, pas quelques dizaines.** Le mécanisme (appel bloquant sur
+le thread GUI) reste établi ; son coût réel est vraisemblablement modeste.
+À confirmer par l'observation directe du gel, seule donnée encore manquante.
+
+**Au passage, ce run VALIDE la route propre d'annulation** : `abaqus
+terminate job=` a bien été reçu par le solveur, qui s'est arrêté proprement
+et a libéré ses 8 jetons de licence. C'est exactement le comportement que
+Tristan décrivait comme le bon.
 - Corrections possibles (alternatives, à arbitrer) :
   (a) **Minimal** : réduire les timeouts (ex. 20 s → 5 s pour
   `abaqus terminate`, qui rend la main en général en moins d'une seconde
@@ -502,18 +523,108 @@ de masse eulérienne n'existe pas dans les résultats.**
   cellules d'assemblage n'est peut-être pas une région recevable ;
   (b) la requête est acceptée à la construction mais Abaqus ne produit rien
   au solve.
-- **Test décisif et gratuit pour départager, sans lancer de solveur** :
-  onglet Job → **Write .inp only**, puis chercher `MASSEUL` dans le `.inp`
-  produit. Présent → hypothèse (b) ; absent → hypothèse (a), et le log du
-  run porte alors la ligne `[WARNING] MASSEUL/VOLEUL history not created:`
-  suivie du message d'Abaqus, qui nomme la cause exacte.
+- **CAUSE CONFIRMÉE — hypothèse (a).** Le `.dat` du job `cancel_test`
+  (15/09/2026 18:07) le prouve sans ambiguïté :
+  - `grep -i "masseul\|voleul"` sur le `.dat` → **aucune occurrence** ;
+  - le deck ne contient que **deux** blocs `*output, history` dans le step :
+    `*output, history, filter=SENSORBAND` (avec `*nodeoutput,
+    nset=ASSEMBLY_RP` → RF1/RF2) et `*output, history, variable=PRESELECT`.
+
+  H-Output-3 n'a donc jamais été écrit dans l'input deck : l'appel
+  `model.HistoryOutputRequest(...)` de cel_model.py:616-620 **lève à la
+  construction du modèle**, et le `try/except` de la ligne 621 l'avale. Le
+  solveur n'est pas en cause, il n'a jamais reçu la demande.
+- **Ce qui manque encore pour corriger** : le message d'exception exact. Il a
+  été imprimé pendant ce run-là sous la forme
+  `[WARNING] MASSEUL/VOLEUL history not created: <message>` dans le panneau
+  de sortie de l'onglet Job. Le récupérer coûte quelques secondes : un
+  **Write .inp only** (construction seule, pas de solveur) puis le bouton
+  **Copy output**, et chercher `MASSEUL` dans le texte collé. Sans ce
+  message je ne peux pas proposer la bonne forme d'appel sans l'inventer.
 - Corrections possibles, à décider APRÈS ce test : corriger la région /
   la forme de la requête si (a) ; ou retirer la requête et le `try/except`
   si la conservation eulérienne ne s'obtient pas ainsi, plutôt que de
   garder un garde-fou qui n'en est pas un. Dans les deux cas, remplacer
   l'`except` muet par une trace que le pipeline remonte.
 
+**M5 — Le filtre Butterworth de sortie de champ ne s'applique PAS à `TEMP`
+ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
+- Fichiers : `abaqus_scripts/cel_model.py:111-127` (l'intention),
+  `:551-585` (la requête filtrée), `cel_results.py:497` (les champs extraits).
+- Statut : **fait** — Abaqus le dit lui-même, et l'ODB le confirme.
+- Preuve n°1, le `.sta` du job `cancel_test` :
+
+  ```
+  ***WARNING: Nodal Output for coordinates and temperatures are not
+              (digitally) filtered.
+  ***WARNING: Element Output for Equivalent plastic strains, Status, ...,
+              Coordinates, Temperatures and Field Variables are not
+              (digitally) filtered.
+  ```
+
+- Preuve n°2, les clés de l'ODB : `V_CAMERABAND`, `U_CAMERABAND`,
+  `UR_CAMERABAND`, `VR_CAMERABAND`, `ERV_CAMERABAND` portent le suffixe du
+  filtre — mais `TEMP`, `TEMP_ASSEMBLY_EULER_EULER-1`,
+  `EVF_ASSEMBLY_EULER_EULER-1` et `EVF_VOID` **ne le portent pas**.
+- Le pipeline extrait exactement trois champs (`cel_results.py:497`) :
+  `EVF`, `TEMP`, `V`. **Un seul des trois est effectivement filtré.**
+- Pourquoi c'est un vrai constat et pas un détail : le commentaire de
+  `create_step` (cel_model.py:551-558) justifie le filtre en disant qu'Abaqus
+  filtre « at the SOLVER increment, BEFORE writing to the ODB -- the only
+  stage where aliasing can still be prevented (once aliased data is written,
+  no post-processing recovers it) ». Cette protection est réelle pour `V`.
+  Elle est **inexistante pour `TEMP`**, alors que la température est
+  précisément l'observable comparée aux mesures IRT.
+- Nuance à ne pas écraser : pour `EVF` (fraction volumique, indicateur de
+  matière), filtrer ne serait sans doute même pas souhaitable — un lissage
+  de l'interface matière/vide n'a pas de sens physique. Le point porte
+  surtout sur `TEMP`.
+- Ce que je ne tranche pas : si l'absence de filtrage sur `TEMP` est
+  acceptable dépend de la bande passante réelle de ta chaîne IRT et du taux
+  d'échantillonnage (500 frames ici) — c'est ton arbitrage, pas le mien.
+- Corrections possibles : soit corriger le COMMENTAIRE pour qu'il dise ce
+  qui est réellement filtré (correction minimale, honnête, sans changement
+  de comportement) ; soit, si le filtrage de `TEMP` est requis
+  physiquement, traiter l'anti-repliement de la température en
+  post-traitement en sachant qu'il ne peut pas récupérer ce qui est déjà
+  replié — ce qui rendrait alors nécessaire d'augmenter `n_frames`.
+
 ### Mineur
+
+**m6 — `COORD` est demandé alors qu'il n'existe pas pour `EC3D8RT`.**
+- Fichier : `abaqus_scripts/cel_model.py:92-104` (ajouté en `79b66ad`).
+- Statut : **fait**.
+- Preuve, `.dat` :
+  `***WARNING: OUTPUT REQUEST COORD IS NOT AVAILABLE FOR ELEMENT TYPE EC3D8RT`.
+  `EC3D8RT` est le type d'élément de TOUT le domaine eulérien, c'est-à-dire
+  de la pièce. La demande est donc sans effet là où elle aurait servi, et
+  génère un avertissement à chaque run.
+- À noter, le même `.dat` porte deux messages voisins mais LÉGITIMES, qu'il
+  ne faut pas confondre avec celui-ci : `EVF IS NOT AVAILABLE FOR ELEMENT
+  TYPE C3D8RT` (EVF n'a pas de sens sur l'outil lagrangien) et les `NOTE`
+  sur `DMICRT`/`SDEG` (pas de modèle d'endommagement actif — cohérent avec
+  `JohnsonCookDamageInitiation` commenté en cel_model.py:343-347). Ceux-là
+  sont le prix normal d'une liste de variables unique pour deux corps.
+- Correction : retirer `COORD` de `fo_variables`, ou documenter pourquoi il
+  est demandé malgré tout.
+
+**Note sans conséquence — `order=2` n'apparaît pas dans le deck.**
+`ButterworthFilter(..., order=2)` (cel_model.py:563-570) produit
+`*filter, name=CAMERABAND, type=BUTTERWORTH` sans paramètre d'ordre, et
+Abaqus avertit : « NO VALUE WAS SPECIFIED FOR THE ORDER OF FILTER CAMERABAND.
+A DEFAULT SECOND ORDER WILL BE USED. » Le résultat est donc **identique à
+l'intention** (l'ordre 2 est le défaut), la couche CAE omettant simplement
+les paramètres égaux au défaut. Consigné ici pour que personne ne « corrige »
+un comportement qui est déjà le bon.
+
+**Observation de configuration (pas un défaut de code) — BC eulérienne
+écrasée par la BC de vitesse.** Le `.sta` porte :
+`***WARNING: Both the *EULERIAN BOUNDARY, INFLOW=NONE option and the
+*BOUNDARY option are specified at the same nodes. In case of conflict
+*BOUNDARY will override the Eulerian boundary condition.` Sur cette
+configuration, une face portait à la fois une `EulerianBC` et la BC de
+vitesse de coupe ; c'est la seconde qui gagne. Cela dépend des cases cochées
+dans l'onglet BCs, pas du code — mais rien dans la GUI ne le signale.
 
 **m5 — INFIRMÉ. Mon hypothèse était fausse : le repli `dataDouble` est
 indispensable, pas du code mort.**
@@ -669,6 +780,27 @@ sur les points que la mission demandait de vérifier spécifiquement :
   (route documentée pour libérer les jetons de licence), avec repli sur
   kill process — c'est l'ordre attendu. Voir cependant M1 : le repli n'est
   pas UNIFORME entre les deux implémentations du dépôt.
+
+## Constat transversal — les avertissements `.dat`/`.sta` ne sont lus par personne
+
+M4, M5 et m6 ont tous les trois été trouvés en lisant les avertissements
+qu'Abaqus écrit lui-même dans le `.dat` et le `.sta` d'un run ordinaire. Le
+pipeline **conserve** délibérément ces deux fichiers
+(`_DIAGNOSTIC_EXTENSIONS`, cel_model.py:876-877, avec un commentaire qui dit
+qu'ils sont « the files that actually let you find out WHY a run
+misbehaved »), mais **aucun code ne les lit jamais**, et la GUI ne les
+affiche nulle part.
+
+Conséquence mesurable : trois défauts — dont un garde-fou de conservation
+inopérant et une protection anti-repliement absente sur la température —
+étaient annoncés noir sur blanc par Abaqus à chaque exécution depuis
+`e9e967f`, sans que rien ne les remonte.
+
+Piste (c'est une fonctionnalité, donc hors du périmètre « fiabiliser sans
+ajouter » de cette mission — à toi de dire si tu la veux) : après un run,
+balayer `<job>.dat` et `<job>.sta` pour les lignes `***WARNING` / `***ERROR`
+et les afficher dans l'onglet Job ou Results. Une quinzaine de lignes de
+code auraient fait remonter M4, M5 et m6 automatiquement, le jour même.
 
 ## Questions pour Tristan
 
