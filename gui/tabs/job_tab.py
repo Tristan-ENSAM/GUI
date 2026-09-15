@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
-from gui.sensitivity.run_worker import abaqus_terminate_job
+from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        kill_process_tree_by_pid)
 
 
 def _section_header(title: str) -> QLabel:
@@ -716,8 +717,10 @@ class JobTab(QWidget):
              analysis executable AND RELEASES ITS LICENCE TOKENS. A hard kill
              leaves them checked out until the FlexNet server reclaims them,
              which on a shared pool penalises everyone else.
-          2. terminate/kill the process -- the fallback, when Abaqus does not
-             answer (no .cid yet, solver already exiting, hung job).
+          2. kill the process TREE -- the fallback, when Abaqus does not
+             answer (no .cid yet, solver already exiting, hung job). It must
+             be the tree, not just our direct child: Abaqus spawns the solver
+             as a separate process that outlives a kill aimed at the launcher.
 
         Either way the .odb may be left incomplete.
         """
@@ -748,12 +751,17 @@ class JobTab(QWidget):
                     self._append_output("\n[CANCELLED by user]\n")
                     return
 
-        # On Windows, terminate() sends WM_CLOSE which Abaqus may ignore;
-        # kill() is more reliable. Try terminate first, then kill if it
-        # hasn't exited within 2 seconds.
-        self._proc.terminate()
-        if not self._proc.waitForFinished(2000):
-            self._proc.kill()
+        # Fallback. `abaqus terminate` only works once the solver has written
+        # <job>.cid, so Cancel during the model build (or during extraction)
+        # always lands here. QProcess.terminate()/kill() reach only the direct
+        # child, which on Windows leaves the solver processes Abaqus spawned
+        # alive; kill the whole tree by PID there instead.
+        if not kill_process_tree_by_pid(self._proc.processId()):
+            # POSIX, or taskkill unavailable: terminate() sends WM_CLOSE which
+            # Abaqus may ignore, so escalate to kill() after 2 seconds.
+            self._proc.terminate()
+            if not self._proc.waitForFinished(2000):
+                self._proc.kill()
         self._append_output("\n\n[CANCELLED by user]\n")
 
     def _on_proc_output(self):

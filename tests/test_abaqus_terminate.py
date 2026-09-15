@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from gui.sensitivity.run_worker import abaqus_terminate_job
+from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        kill_process_tree_by_pid)
 
 
 def _script(path: Path, body: str) -> Path:
@@ -54,6 +55,50 @@ class TestAbaqusTerminateJob:
         (tmp_path / "J.cid").write_text("host:1\n")
         exe = _script(tmp_path / "fail.sh", "#!/bin/sh\nexit 1\n")
         assert abaqus_terminate_job(str(exe), "J", tmp_path) is False
+
+
+class TestKillProcessTreeByPid:
+    """The Job tab's fallback when `abaqus terminate` cannot answer.
+
+    Abaqus spawns the solver as its own process, so killing only the launcher
+    leaves standard.exe/explicit.exe orphaned with their licence tokens held.
+    """
+
+    def test_refuses_a_null_pid(self):
+        assert kill_process_tree_by_pid(0) is False
+
+    def test_posix_declines_so_the_caller_falls_back(self, monkeypatch):
+        # os.getpgid() on a QProcess child returns the GUI's OWN group (Qt
+        # does not put it in a new one), so killpg would kill the GUI. The
+        # function must decline rather than guess.
+        monkeypatch.setattr(os, "name", "posix")
+        called = []
+        monkeypatch.setattr("subprocess.run",
+                            lambda *a, **k: called.append(a))
+        assert kill_process_tree_by_pid(4321) is False
+        assert called == []
+
+    def test_windows_issues_taskkill_with_the_tree_flag(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen["args"] = args
+            return None
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+        assert kill_process_tree_by_pid(4321) is True
+        # /T is what makes it a TREE kill -- without it the solver survives.
+        assert seen["args"] == ["taskkill", "/F", "/T", "/PID", "4321"]
+
+    def test_a_failing_taskkill_reports_false(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+
+        def _boom(*a, **k):
+            raise OSError("taskkill missing")
+
+        monkeypatch.setattr("subprocess.run", _boom)
+        assert kill_process_tree_by_pid(4321) is False
 
 
 class TestWorkerTracksCurrentJob:

@@ -74,6 +74,35 @@ def abaqus_terminate_job(abaqus_cmd: str, job_name: str, workdir,
         return False
 
 
+def kill_process_tree_by_pid(pid: int) -> bool:
+    """Kill `pid` AND every process it spawned, addressing it by PID only.
+
+    For callers holding a QProcess rather than a Popen: QProcess.terminate()
+    and .kill() reach only the direct child, so on Windows they stop
+    `abaqus.bat`/`cae.exe` and leave the solver processes it spawned
+    (pre, standard.exe, explicit.exe, package) running.
+
+    Windows only -- returns False everywhere else, and the caller must then
+    fall back to its own single-process kill. The POSIX kill-a-whole-group
+    route used by `_terminate_process_tree` is NOT reusable here: it relies on
+    Popen(start_new_session=True) having put the child in its own process
+    group, which QProcess does not do. os.getpgid() on a QProcess child
+    returns the GUI's OWN group, so killpg would take the GUI down with it.
+    """
+    if not pid:
+        return False
+    if os.name != "nt":
+        return False
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                       capture_output=True, check=False)
+        return True
+    except Exception:
+        log_swallowed("killing the process tree of pid %r" % pid,
+                      level=logging.DEBUG)
+        return False
+
+
 def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> None:
     """Terminate `proc` and every process it spawned. Best-effort and
     cross-platform.
