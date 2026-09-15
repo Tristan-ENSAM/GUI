@@ -189,7 +189,14 @@ def _read_data(v):
         return v.dataDouble
 
 
-def _resolve_fo_name(step, abq_var, inst_name, root_assembly, max_probe=3):
+# Filter names created by cel_model.create_step. Abaqus upper-cases them when
+# it suffixes an output series: 'CameraBand' -> V_CAMERABAND.
+_FIELD_FILTER_SUFFIX = "CAMERABAND"
+_HISTORY_FILTER_SUFFIX = "SENSORBAND"
+
+
+def _resolve_fo_name(step, abq_var, inst_name, root_assembly, max_probe=3,
+                     filter_suffix=None):
     """Find the real fieldOutputs key for `abq_var` on `inst_name`.
 
     Abaqus/CEL stores per-material results on an Eulerian instance under a
@@ -215,6 +222,17 @@ def _resolve_fo_name(step, abq_var, inst_name, root_assembly, max_probe=3):
 
     for fi in probe[:max_probe]:
         keys = list(step.frames[fi].fieldOutputs.keys())
+        # A filtered request was asked for: that series is the one to extract.
+        # This MUST be tested before the exact name, because the unfiltered
+        # request is now always emitted too (cel_model.create_step), so the
+        # bare name exists as well and would otherwise win below -- silently
+        # handing back data that was never band-limited.
+        if filter_suffix:
+            for k in [k for k in keys if k.startswith(abq_var + "_")
+                      and filter_suffix in k.upper()]:
+                if inst_name in k or _has_inst_values(
+                        step.frames[fi].fieldOutputs[k]):
+                    return k
         exact     = [k for k in keys if k == abq_var]
         suffixed  = [k for k in keys if k.startswith(abq_var + "_")]
         suff_mat  = [k for k in suffixed if not k.endswith("_VOID")]
@@ -233,14 +251,16 @@ def _resolve_fo_name(step, abq_var, inst_name, root_assembly, max_probe=3):
     return None
 
 
-def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly):
+def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
+                   filter_suffix=None):
     if var in _TENSOR_REDUCERS:
         abq_var, reducer = _TENSOR_REDUCERS[var]
     else:
         abq_var, reducer = var, _reduce_identity
     inv_name = _STRESS_INVARIANT.get(var)
 
-    key = _resolve_fo_name(step, abq_var, inst_name, root_assembly)
+    key = _resolve_fo_name(step, abq_var, inst_name, root_assembly,
+                           filter_suffix=filter_suffix)
     if key is None:
         # Not present on this instance (e.g. PEEQ/S/EVF on the rigid tool).
         raise KeyError(abq_var)
@@ -358,7 +378,8 @@ _NODAL_VECTOR_VARS = ("V",)
 
 
 def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
-                                  elements, root_assembly):
+                                  elements, root_assembly,
+                                  filter_suffix=None):
     """Read a NODAL vector field (e.g. V); return per-element fields
     {var+'1': Vx, var+'2': Vy, var: magnitude}, each (n_frames, n_elem),
     by averaging each signed component over an element's nodes. Raises
@@ -368,7 +389,8 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     except Exception:
         NODAL = None
     inst = root_assembly.instances[inst_name]
-    key = _resolve_fo_name(step, var, inst_name, root_assembly)
+    key = _resolve_fo_name(step, var, inst_name, root_assembly,
+                           filter_suffix=filter_suffix)
     if key is None:
         raise KeyError(var)
     label_to_local = {}
@@ -409,7 +431,7 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     return {var + "1": v1_out, var + "2": v2_out, var: mag}
 
 
-def _find_history_key(outputs, base):
+def _find_history_key(outputs, base, filter_suffix=None):
     """Resolve the ``historyOutputs`` key that actually holds ``base``.
 
     A FILTERED history request is written to the ODB under a SUFFIXED name:
@@ -426,9 +448,19 @@ def _find_history_key(outputs, base):
 
     Returns the key, or None when no candidate exists.
     """
+    prefix = base + "_"
+    # Prefer the filtered series when one was requested. Must come before the
+    # exact-name test: cel_model.create_step now always emits the unfiltered
+    # request as well, so 'RF1' and 'RF1_SENSORBAND' coexist and the bare name
+    # would otherwise win, silently extracting unfiltered forces.
+    if filter_suffix:
+        filtered = sorted(k for k in outputs.keys()
+                          if k.startswith(prefix)
+                          and filter_suffix in k.upper())
+        if filtered:
+            return filtered[0]
     if base in outputs:
         return base
-    prefix = base + "_"
     candidates = [k for k in outputs.keys() if k.startswith(prefix)]
     if not candidates:
         return None
@@ -439,12 +471,12 @@ def _find_history_key(outputs, base):
     return candidates[0]
 
 
-def _extract_history_rf(step):
+def _extract_history_rf(step, filter_suffix=None):
     """Return (time, rf1, rf2) or (None, None, None)."""
     for region_key, region in step.historyRegions.items():
         outputs = region.historyOutputs
-        k_rf1 = _find_history_key(outputs, "RF1")
-        k_rf2 = _find_history_key(outputs, "RF2")
+        k_rf1 = _find_history_key(outputs, "RF1", filter_suffix)
+        k_rf2 = _find_history_key(outputs, "RF2", filter_suffix)
         if k_rf1 is not None and k_rf2 is not None:
             rf1_pairs = outputs[k_rf1].data
             rf2_pairs = outputs[k_rf2].data
@@ -496,6 +528,25 @@ def extract_results(job_name, model_cfg):
 
     _field_vars = ["EVF", "TEMP", "V"]
     _vprint("Fields requested: " + ", ".join(_field_vars))
+
+    # Which series to extract when both exist. cel_model.create_step always
+    # emits the unfiltered request and ADDS a filtered one when a cutoff is
+    # set, so the ODB can hold V and V_CAMERABAND side by side. The filtered
+    # one is what the model asked to measure; the raw one is there for the
+    # numericist to compare against by hand in Abaqus/Viewer.
+    # Mirrors the two conditions under which create_step builds each filter.
+    _filter_on = bool(cfg_get(model_cfg, "step.output_filter_enabled", False))
+    _fo_filter_suffix = None
+    _ho_filter_suffix = None
+    if _filter_on:
+        if float(cfg_get(model_cfg,
+                         "step.output_filter_cutoff_hz", 0.0) or 0.0) > 0:
+            _fo_filter_suffix = _FIELD_FILTER_SUFFIX
+        if float(cfg_get(model_cfg,
+                         "step.output_filter_cutoff_history_hz", 0.0) or 0.0) > 0:
+            _ho_filter_suffix = _HISTORY_FILTER_SUFFIX
+    _vprint("Filtered series preferred: field=%s history=%s"
+            % (_fo_filter_suffix or "no", _ho_filter_suffix or "no"))
 
     _odb_path = job_name + ".odb"
     _vprint("Opening ODB: " + _odb_path)
@@ -579,7 +630,8 @@ def extract_results(job_name, model_cfg):
                     try:
                         _vf = _extract_nodal_vector_to_elem(
                             _step, _var, _inst_name, _kept_node_ids,
-                            _elements, _odb.rootAssembly)
+                            _elements, _odb.rootAssembly,
+                            filter_suffix=_fo_filter_suffix)
                     except KeyError:
                         _vprint("    not available, skipping.")
                         continue
@@ -589,7 +641,8 @@ def extract_results(job_name, model_cfg):
                     continue
                 try:
                     _arr = _extract_field(_step, _var, _inst_name,
-                                           _kept_elem_ids, _odb.rootAssembly)
+                                           _kept_elem_ids, _odb.rootAssembly,
+                                           filter_suffix=_fo_filter_suffix)
                 except KeyError:
                     _vprint("    not available, skipping.")
                     continue
@@ -618,7 +671,7 @@ def extract_results(job_name, model_cfg):
             }
 
         _vprint("\nExtracting history...")
-        _h_t, _rf1, _rf2 = _extract_history_rf(_step)
+        _h_t, _rf1, _rf2 = _extract_history_rf(_step, _ho_filter_suffix)
         _history_vars = []
         if _h_t is not None:
             _npz_payload["history__time"] = _h_t

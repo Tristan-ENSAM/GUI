@@ -10,8 +10,8 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **OUVERT** — mécanisme établi, durée encore non mesurée |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
-| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **OUVERT** — établi par les avertissements `.sta` + noms de clés ODB |
-| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **OUVERT** |
+| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ** — requêtes filtrée/non filtrée séparées + extraction rendue explicite (à vérifier par un `Write .inp only`) |
+| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CONSERVÉ** sur décision de Tristan (inspection manuelle) — reste à vérifier que la sortie NODALE arrive bien dans l'ODB |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
@@ -582,12 +582,39 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
 - Ce que je ne tranche pas : si l'absence de filtrage sur `TEMP` est
   acceptable dépend de la bande passante réelle de ta chaîne IRT et du taux
   d'échantillonnage (500 frames ici) — c'est ton arbitrage, pas le mien.
-- Corrections possibles : soit corriger le COMMENTAIRE pour qu'il dise ce
-  qui est réellement filtré (correction minimale, honnête, sans changement
-  de comportement) ; soit, si le filtrage de `TEMP` est requis
-  physiquement, traiter l'anti-repliement de la température en
-  post-traitement en sachant qu'il ne peut pas récupérer ce qui est déjà
-  replié — ce qui rendrait alors nécessaire d'augmenter `n_frames`.
+- **CORRIGÉ** — décision de Tristan : garder TOUJOURS les sorties non
+  filtrées dans l'ODB, et ajouter les filtrées par-dessus quand un filtre
+  est demandé ; la comparaison filtré/brut se fait à la main dans
+  Abaqus/Viewer, et l'extraction prend la série filtrée si elle existe.
+  Deux changements, indissociables :
+  1. `cel_model.create_step` émet désormais **deux** requêtes de champ :
+     `F-Output-1` (toutes les variables, jamais filtrée, toujours émise) et
+     `F-Output-Filtered` (uniquement `_FILTERABLE_FO_VARIABLES = ('V','ERV')`,
+     avec le filtre, seulement si un cutoff est réglé). Même forme pour
+     l'historique : `H-Output-1` brut toujours émis, `H-Output-1-Filtered`
+     en plus. Le code ne prétend donc plus filtrer ce qu'Abaqus ne filtre
+     pas, et les avertissements « not (digitally) filtered » doivent
+     disparaître du `.sta`.
+  2. **Conséquence non évidente qu'il fallait traiter en même temps** :
+     `_resolve_fo_name` et `_find_history_key` testaient le nom EXACT en
+     premier. Tant que `V` nu n'existait pas, ils tombaient sur
+     `V_CAMERABAND`. Dès que la série brute coexiste, ils auraient choisi la
+     série NON filtrée — l'inverse de l'intention, et en silence. Les deux
+     fonctions prennent maintenant un `filter_suffix` et préfèrent la série
+     filtrée quand le modèle en a demandé une, avec repli sur le nom nu.
+     `extract_results` dérive ce suffixe de `model_cfg`, en miroir exact des
+     conditions sous lesquelles `create_step` crée chaque filtre.
+  4 tests de non-régression ajoutés (`tests/test_cel_results_history.py`),
+  dont celui qui garde précisément la bascule silencieuse ci-dessus.
+- **Reste à vérifier côté Abaqus** (je ne peux pas le faire d'ici) : un
+  `Write .inp only` doit montrer **deux** blocs `*output, field` et deux
+  `*output, history` sur le RP ; et un run court doit faire coexister `V` et
+  `V_CAMERABAND` dans l'ODB. C'est une HYPOTHÈSE tant que ce n'est pas
+  constaté : je n'ai aucune preuve qu'Abaqus accepte deux requêtes portant
+  la même variable, l'une filtrée et l'autre non.
+- Ce que cette correction NE tranche pas : savoir si `TEMP` devrait être
+  band-limitée physiquement. Elle rend seulement l'ODB complet et le code
+  honnête ; l'arbitrage sur la bande passante IRT reste ouvert.
 
 ### Mineur
 
@@ -605,8 +632,22 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
   sur `DMICRT`/`SDEG` (pas de modèle d'endommagement actif — cohérent avec
   `JohnsonCookDamageInitiation` commenté en cel_model.py:343-347). Ceux-là
   sont le prix normal d'une liste de variables unique pour deux corps.
-- Correction : retirer `COORD` de `fo_variables`, ou documenter pourquoi il
-  est demandé malgré tout.
+- **CONSERVÉ sur décision de Tristan** : `COORD` sert à l'inspection manuelle
+  de l'ODB — construire des display groups à partir des coordonnées de
+  nœuds dans Abaqus/Viewer. Le retirer coûterait cet usage.
+- **Nuance qui change la lecture de l'avertissement** : il porte sur
+  `ELEMENT TYPE EC3D8RT`, donc sur la variante aux POINTS D'INTÉGRATION. Le
+  `.sta` parle par ailleurs de « **Nodal** Output for coordinates », ce qui
+  implique que la sortie NODALE de `COORD` existe — et c'est celle dont
+  l'usage ci-dessus a besoin. **HYPOTHÈSE non vérifiée** : aucun ODB
+  disponible ne permet de le confirmer (`COORD` a été ajouté en `79b66ad`,
+  après l'ODB `GCI_run000` examiné ici).
+- Vérification gratuite qui trancherait : relancer `check_api.py` sur un ODB
+  produit depuis, par exemple `cancel_test.odb`, et regarder si une clé
+  `COORD` figure dans la liste des `fieldOutputs` et sur quelle instance.
+  Si elle y est, l'usage est servi et l'avertissement est cosmétique. Si
+  elle n'y est pas, `COORD` ne sert pas l'objectif visé et il faudra
+  trouver un autre moyen de porter les coordonnées dans l'ODB.
 
 **Note sans conséquence — `order=2` n'apparaît pas dans le deck.**
 `ButterworthFilter(..., order=2)` (cel_model.py:563-570) produit

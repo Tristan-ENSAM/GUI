@@ -110,9 +110,36 @@ def _energy_region(ke_key="ALLKE", ie_key="ALLIE"):
 # _find_history_key
 # ---------------------------------------------------------------------------
 class TestFindHistoryKey:
-    def test_exact_name_wins(self, cel_results):
+    def test_exact_name_wins_when_no_filter_was_requested(self, cel_results):
+        """Both series now coexist in every filtered run (create_step always
+        emits the unfiltered request too). With no filter asked for, the bare
+        name is the one to read."""
         outputs = {"RF1": _FakeOutput([]), "RF1_SENSORBAND": _FakeOutput([])}
         assert cel_results._find_history_key(outputs, "RF1") == "RF1"
+
+    def test_filtered_series_wins_when_a_filter_was_requested(self, cel_results):
+        """THE REGRESSION THIS GUARDS: once the unfiltered request is always
+        emitted, 'RF1' and 'RF1_SENSORBAND' sit side by side. Preferring the
+        exact name would silently extract forces that were never
+        band-limited -- the opposite of what enabling the filter asks for."""
+        outputs = {"RF1": _FakeOutput([]), "RF1_SENSORBAND": _FakeOutput([])}
+        assert (cel_results._find_history_key(outputs, "RF1", "SENSORBAND")
+                == "RF1_SENSORBAND")
+
+    def test_filter_requested_but_absent_falls_back_to_the_bare_name(
+            self, cel_results):
+        """A filter configured for the FIELD outputs only leaves the history
+        unsuffixed; extraction must still find it rather than return None."""
+        outputs = {"RF1": _FakeOutput([])}
+        assert (cel_results._find_history_key(outputs, "RF1", "SENSORBAND")
+                == "RF1")
+
+    def test_a_foreign_suffix_is_not_mistaken_for_the_filtered_series(
+            self, cel_results):
+        """Only a suffix carrying the filter's name counts."""
+        outputs = {"RF1": _FakeOutput([]), "RF1_SOMETHINGELSE": _FakeOutput([])}
+        assert (cel_results._find_history_key(outputs, "RF1", "SENSORBAND")
+                == "RF1")
 
     def test_suffixed_name_is_resolved(self, cel_results):
         outputs = {"RF1_SENSORBAND": _FakeOutput([])}
