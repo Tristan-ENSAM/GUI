@@ -1,4 +1,26 @@
-# Revue de fiabilisation — GUI_Abaqus (Phase 1 : audit en lecture seule)
+# Revue de fiabilisation — GUI_Abaqus
+
+Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
+
+## Statut des constats
+
+| ID | Constat | Sévérité | Statut |
+|---|---|---|---|
+| M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
+| M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
+| M3 | Le Cancel gèle l'UI jusqu'à ~30 s (les deux chemins) | Majeur | **OUVERT** — en attente d'arbitrage (voir Questions) |
+| m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
+| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
+| m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | OUVERT |
+| m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | OUVERT |
+
+Tous les statuts NON VÉRIFIÉ du tableau d'inventaire API restent NON VÉRIFIÉ :
+`_review/check_api.py` n'a toujours pas pu être exécuté (aucune installation
+Abaqus dans cet environnement).
+
+---
+
+## Phase 1 — audit en lecture seule
 
 Date : 2026-09-15
 Portée : `abaqus_scripts/`, `gui/`, `tests/`, `docs/abaqus_validation_checklist.md`.
@@ -155,7 +177,15 @@ exécutée sur l'installation réelle.
 ### Majeur
 
 **M1 — `JobTab._cancel_run` ne tue pas l'arbre de processus sur le chemin de
-repli, contrairement à `SensitivityRunWorker.cancel()`.**
+repli, contrairement à `SensitivityRunWorker.cancel()`.** — **CORRIGÉ**,
+commit `7a7631c` : ajout de `kill_process_tree_by_pid()`
+(`gui/sensitivity/run_worker.py`), appelée par `JobTab._cancel_run` avant le
+repli `terminate()`/`kill()`. `abaqus terminate job=<name>` reste la première
+route, conformément à la confirmation de Tristan. La fonction est
+volontairement Windows-only : sur POSIX un enfant `QProcess` partage le
+groupe de processus de la GUI, donc `killpg` tuerait la GUI elle-même — elle
+renvoie `False` et l'appelant retombe sur son kill mono-processus. 4 tests de
+non-régression ajoutés dans `tests/test_abaqus_terminate.py`.
 - Fichier : `gui/tabs/job_tab.py:711-757`.
 - Statut : **fait** (comparaison directe de deux implémentations dans le
   même dépôt) + **interprétation** sur la conséquence côté OS (le
@@ -198,7 +228,16 @@ repli, contrairement à `SensitivityRunWorker.cancel()`.**
   `JobTab._cancel_run` lui-même.
 
 **M2 — La fonctionnalité « Domain sizing by Jacobian » est livrée
-incomplète : moteur + tests présents, câblage GUI absent.**
+incomplète : moteur + tests présents, câblage GUI absent.** — **CORRIGÉ**,
+commit `70b43c0` : Tristan a confirmé que l'étude est ABANDONNÉE et qu'aucun
+câblage n'est envisagé. `gui/sensitivity/domain_jacobian.py`,
+`gui/sensitivity/domain_jacobian_worker.py`, `tests/test_domain_jacobian.py`
+et `tests/test_domain_jacobian_ui.py` ont donc été supprimés (26 tests
+retirés), ce qui achève un nettoyage déjà entamé — `gui/core/domain_sizing.py:160`
+portait déjà la mention « Relocated from domain_jacobian (now removed) ».
+Les docstrings de `domain_convergence.py` / `domain_convergence_worker.py`
+conservent la justification du choix de la méthode par convergence mais ne
+renvoient plus vers un module inexistant.
 - Fichiers : `gui/tabs/optimization_tab.py` (aucune référence à
   `domain_jacobian`/`DomainJacobianWorker`/`_on_run_domain_jacobian`/
   `_on_domain_jacobian_done` — recherche exhaustive, zéro résultat) vs
@@ -226,6 +265,46 @@ incomplète : moteur + tests présents, câblage GUI absent.**
   en `xfail`/`skip` explicite avec la raison, pour que la suite de tests
   reflète l'état réel du produit plutôt qu'une régression silencieuse à
   chaque exécution.
+
+**M3 — Le Cancel bloque le thread GUI jusqu'à ~30 s, sur les DEUX chemins
+d'annulation.** (constat ajouté en phase 2, non présent dans l'audit initial)
+- Fichiers : `gui/sensitivity/run_worker.py:67-69` (la fonction bloquante),
+  appelée depuis `gui/tabs/job_tab.py:745` et depuis
+  `gui/sensitivity/run_worker.py:181` via
+  `gui/tabs/sensitivity_tab.py:783-785`.
+- Statut : **fait** pour le caractère bloquant et le thread d'exécution ;
+  **calcul** (et non mesure) pour la borne de ~30 s, obtenue en sommant les
+  timeouts écrits dans le code.
+- Preuve : `abaqus_terminate_job` fait
+  `subprocess.run(..., timeout=20.0)` — un appel synchrone. Il est atteint :
+  (a) depuis `JobTab._cancel_run`, qui est le slot de `btn_cancel.clicked`
+  (`job_tab.py:211`) donc s'exécute dans le thread GUI, suivi de
+  `waitForFinished(10000)` puis, en repli, `waitForFinished(2000)` →
+  20 + 10 + 2 = **~32 s** ;
+  (b) depuis `SensitivityTab._on_cancel` (`sensitivity_tab.py:783-785`) qui
+  appelle `self._worker.cancel()` en **appel de méthode direct**. Bien que
+  `SensitivityRunWorker` vive dans un QThread (`moveToThread`), un appel
+  direct s'exécute dans le thread de l'APPELANT, donc le thread GUI ici
+  aussi : 20 s (`subprocess.run`) + 10 s (`p.wait(timeout=10.0)`,
+  run_worker.py:186) + la boucle de grâce de `_terminate_process_tree`
+  (2 s) → même ordre de grandeur.
+- Conséquence : après un clic sur Cancel, la fenêtre ne se redessine plus et
+  Windows peut afficher « ne répond pas », alors même que l'annulation se
+  déroule correctement. L'utilisateur peut croire à un plantage et tuer la
+  GUI — ce qui le ramène précisément au problème d'orphelins de M1.
+- Corrections possibles (alternatives, à arbitrer) :
+  (a) **Minimal** : réduire les timeouts (ex. 20 s → 5 s pour
+  `abaqus terminate`, qui rend la main en général en moins d'une seconde
+  puisqu'il se contente d'écrire un fichier de signal). Ne supprime pas le
+  gel, le raccourcit.
+  (b) **Correct mais plus invasif** : exécuter `abaqus terminate` dans un
+  QThread / `QProcess` asynchrone et faire du Cancel une machine à états
+  (bouton passe en « Cancelling… », le repli est armé par un `QTimer`
+  plutôt que par un `waitForFinished`). Supprime réellement le gel, mais
+  change la structure des deux chemins d'annulation.
+  (c) Faire émettre à `SensitivityTab._on_cancel` un signal vers le worker
+  au lieu de l'appel direct (corrige uniquement le chemin (b) du constat,
+  pas celui de l'onglet Job).
 
 ### Mineur
 
@@ -352,14 +431,27 @@ sur les points que la mission demandait de vérifier spécifiquement :
    Job a déjà laissé un `standard.exe`/`explicit.exe` orphelin dans le
    Gestionnaire des tâches, ou est-ce un risque théorique jamais observé en
    pratique chez toi ?
-4. M2 (domain_jacobian non câblé) : la fonctionnalité est-elle en cours de
-   développement (à finaliser en phase 2) ou son moteur a-t-il été laissé
-   de côté volontairement ? Je ne veux pas la câbler par erreur si c'est un
-   chantier en pause pour une raison que je ne connais pas.
-5. Le commentaire `docs/abaqus_validation_checklist.md` section 6 décrit le
-   Cancel comme tuant l'arbre via `taskkill /F /T` — est-ce la spécification
-   que tu veux voir appliquée uniformément (Job tab + campagnes), ou y a-t-il
-   une raison de vouloir un comportement différent entre les deux ?
+4. ~~M2 (domain_jacobian non câblé)~~ — **répondu** : abandonné, aucun
+   câblage envisagé. Code supprimé (commit `70b43c0`).
+5. ~~Cancel : `taskkill /F /T` est-il la spécification voulue ?~~ —
+   **répondu** : la meilleure route est `abaqus terminate job=<name>`
+   exécutée dans le dossier de travail du job. C'était déjà l'étape 1 des
+   deux implémentations ; seul le repli a été corrigé (M1, commit `7a7631c`),
+   car `abaqus terminate` ne peut répondre qu'une fois le `<job>.cid` écrit
+   par le solveur — un Cancel pendant la construction du modèle ou pendant
+   l'extraction n'a pas d'autre recours.
+6. **M3 (gel de l'UI pendant le Cancel)** : quelle option préfères-tu ?
+   (a) réduire simplement les timeouts (correction de quelques lignes, le
+   gel passe de ~30 s à ~7 s mais ne disparaît pas) ; (b) rendre le Cancel
+   asynchrone (supprime le gel, mais restructure les deux chemins
+   d'annulation) ; (c) ne rien faire si un gel de quelques secondes au
+   Cancel ne te gêne pas en pratique. Je n'ai pas tranché seul : c'est un
+   compromis ergonomie / risque de régression sur un chemin que je ne peux
+   pas tester sous Windows.
+7. Reste-t-il des constats mineurs (m1 à m4) que tu veux voir corrigés dans
+   cette passe ? m4 (`pytest.importorskip("imageio")`) est le moins risqué :
+   3 lignes, il rend la suite verte dans un environnement conforme à
+   `requirements.txt`.
 
 ## État des tests
 
@@ -389,6 +481,32 @@ Détail des 9 échecs :
 ```
 
 **Total réel : 588 réussis / 9 échoués sur 597 tests collectés.**
+
+### Après les corrections de phase 2 (M1 + M2)
+
+Mêmes conditions (venv `requirements.txt`, headless, deux passes).
+
+**Passe 1 — toute la suite sauf `test_mesh_pipeline.py`** :
+```
+3 failed, 561 passed in 189.06s (0:03:09)
+```
+Les 3 échecs restants sont ceux d'`imageio` (constat m4, non corrigé à ce
+stade). Les 6 échecs `AttributeError` de `test_domain_jacobian_ui.py` ont
+disparu avec la suppression de la fonctionnalité.
+
+**Passe 2 — `test_mesh_pipeline.py` seul** :
+```
+11 passed in 212.08s (0:03:32)
+```
+
+**Total après phase 2 : 572 réussis / 3 échoués sur 575 tests collectés.**
+
+Réconciliation du nombre de tests (pour vérifier qu'aucun test n'a été perdu
+silencieusement) : 586 collectés en passe 1 avant, moins 26 tests supprimés
+avec la fonctionnalité abandonnée (19 dans `test_domain_jacobian.py` + 7 dans
+`test_domain_jacobian_ui.py`, comptés sur les fichiers via `git show`), plus
+4 tests de non-régression ajoutés pour M1 = 564 collectés, ce qui correspond
+exactement aux 561 + 3 observés.
 
 Zones critiques non couvertes par la suite automatisée (le projet le
 documente déjà en grande partie dans `docs/abaqus_validation_checklist.md`) :
