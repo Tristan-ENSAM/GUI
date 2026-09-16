@@ -732,13 +732,27 @@ Toute la couche de diagnostic du projet est écrite pour personne.**
 - **Conséquence sur M4** : le message d'exception de `MASSEUL`/`VOLEUL`
   emprunte ce canal perdu. Son absence ne prouve toujours pas que la requête
   ne lève pas.
-- **Point encore à confirmer avant de choisir une correction** : la sonde
-  écrit aussi `probe_marker.txt` dans le répertoire courant. Si ce fichier
-  EXISTE, le script s'est bien exécuté et seule la sortie est perdue. S'il
-  est ABSENT, le script n'a pas tourné du tout et toute l'analyse ci-dessus
-  est à refaire sur une autre base. Le code retour valant 0 (« Abaqus
-  reported success » côté GUI) plaide pour la première hypothèse, mais ce
-  n'est qu'un indice.
+- **CONFIRMÉ : le script s'exécute bel et bien, seule sa sortie est perdue.**
+  `probe_marker.txt` a été produit, avec :
+
+  ```
+  the probe ran
+  cwd: C:\GUI_Abaqus
+  python: 2.7.15 (default, Oct 16 2021) [MSC v.1928 64 bit (AMD64)]
+  argv: ['C:\\SIMULIA\\EstProducts\\2022\\win_b64\\code\\bin\\ABQcaeK.exe',
+         '-cae', '-noGUI', 'C:\\GUI_Abaqus\\_review\\stdout_probe.py',
+         '-lmlog', 'ON', '-tmpdir', '...', '-academic', 'TEACHING']
+  ```
+
+  L'`argv` explique le mécanisme : `abaqus.bat cae noGUI=<script>` se résout
+  en un lancement de **`ABQcaeK.exe`, le noyau CAE, comme processus
+  distinct**. C'est la sortie de CE processus qui n'est raccordée à rien de
+  lisible — ni par la GUI, ni par une redirection console. Le script, lui,
+  tourne normalement : bon interpréteur, bon répertoire courant, et il écrit
+  ses fichiers sans difficulté.
+- **Corollaire opérationnel** : le canal FICHIER fonctionne parfaitement,
+  puisque c'est ainsi que la sonde a rendu son verdict. La correction (a)
+  ci-dessous n'est donc pas une hypothèse, elle est déjà démontrée.
 - **Corrections possibles, à arbitrer une fois ce point levé** :
   (a) écrire les diagnostics dans un fichier à côté du job (par exemple
   `<job>.gui.log`) et le suivre depuis la GUI — le projet possède DÉJÀ ce
