@@ -10,8 +10,8 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
-| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ** — requêtes filtrée/non filtrée séparées + extraction rendue explicite (à vérifier par un `Write .inp only`) |
-| M7 | La sortie standard du script Abaqus ne semble PAS remonter dans le panneau de l'onglet Job | Majeur | **À CONFIRMER** — bloque le diagnostic de M4 |
+| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
+| M7 | La sortie standard du script Abaqus ne remonte PAS dans le panneau de l'onglet Job | Majeur | **CONFIRMÉ** — bloque le diagnostic de M4 |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
@@ -618,12 +618,44 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
      conditions sous lesquelles `create_step` crée chaque filtre.
   4 tests de non-régression ajoutés (`tests/test_cel_results_history.py`),
   dont celui qui garde précisément la bascule silencieuse ci-dessus.
-- **Reste à vérifier côté Abaqus** (je ne peux pas le faire d'ici) : un
-  `Write .inp only` doit montrer **deux** blocs `*output, field` et deux
-  `*output, history` sur le RP ; et un run court doit faire coexister `V` et
-  `V_CAMERABAND` dans l'ODB. C'est une HYPOTHÈSE tant que ce n'est pas
-  constaté : je n'ai aucune preuve qu'Abaqus accepte deux requêtes portant
-  la même variable, l'une filtrée et l'autre non.
+- **VÉRIFIÉ sur un deck réel** (`TEST_0.inp`, 16/09, après récupération de la
+  branche). L'hypothèse tenait : Abaqus accepte bien la même variable dans
+  une requête filtrée ET dans une non filtrée. Le deck produit :
+
+  ```
+  ** FIELD OUTPUT: F-Output-1
+  *Output, field, number interval=500
+  *Node Output
+  COORD, V
+  *Element Output, directions=YES
+  COORD, DMICRT, ERV, EVF, PEEQ, S, SDEG, STATUS, TEMP
+  *Contact Output
+  CSTRESS,
+  ** FIELD OUTPUT: F-Output-Filtered
+  *Output, field, filter=CameraBand, number interval=500
+  *Node Output
+  V,
+  *Element Output, directions=YES
+  ERV,
+  ** HISTORY OUTPUT: H-Output-1
+  *Output, history, time interval=6e-07
+  *Node Output, nset=RP
+  RF1, RF2
+  ** HISTORY OUTPUT: H-Output-1-Filtered
+  *Output, history, filter=SensorBand, time interval=6e-07
+  *Node Output, nset=RP
+  RF1, RF2
+  ```
+
+  Exactement la forme visée : série brute complète d'un côté, série filtrée
+  restreinte à `V`/`ERV` de l'autre, et les deux historiques RF. Le
+  `V_CAMERABAND` attendu dans l'ODB découle de cette requête.
+- Ce deck confirme aussi l'analyse de m6 : `COORD` apparaît à la fois sous
+  `*Node Output` (la variante qui sert les display groups de Tristan) et sous
+  `*Element Output` (celle qui déclenche l'avertissement `EC3D8RT`).
+- **Reste à vérifier au prochain run réel** : que `V` et `V_CAMERABAND`
+  coexistent bien dans l'ODB, et que l'extraction retienne le second — c'est
+  ce que garantit la préférence ajoutée à `_resolve_fo_name`.
 - Ce que cette correction NE tranche pas : savoir si `TEMP` devrait être
   band-limitée physiquement. Elle rend seulement l'ODB complet et le code
   honnête ; l'arbitrage sur la bande passante IRT reste ouvert.
@@ -632,9 +664,14 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
 panneau de l'onglet Job. À CONFIRMER.**
 - Fichiers : `gui/tabs/job_tab.py:559` (`setProcessChannelMode(MergedChannels)`),
   `:562` (`readyReadStandardOutput` → `_on_proc_output`).
-- Statut : **hypothèse forte**, pas encore un fait — elle repose sur un
-  panneau de sortie collé par Tristan dont je ne sais pas s'il était complet.
-- Observation : sur un **Write .inp only** du 16/09, le panneau ne contenait
+- Statut : **fait**, confirmé par deux exécutions indépendantes.
+- **Preuve décisive** : deux `Write .inp only` successifs, l'un AVANT la
+  récupération de la branche, l'autre APRÈS. Les decks produits DIFFÈRENT
+  (le second porte les requêtes scindées de M5, donc le nouveau code a bien
+  tourné), mais **les deux panneaux de sortie sont identiques** et ne
+  contiennent aucune ligne du script. Ce n'est donc ni une troncature de
+  copie ni un hasard : le canal ne transporte rien.
+- Observation : sur ces **Write .inp only**, le panneau ne contenait
   que la ligne du gestionnaire de licences (émise par `abaqus.bat`) entre
   l'en-tête et le pied écrits par la GUI elle-même. Or `run_job`
   (cel_model.py) imprime, dans ce mode, `[META] job_name=`, `[META] sim_time=`,
@@ -655,9 +692,29 @@ panneau de l'onglet Job. À CONFIRMER.**
   tuyau ouvert par `QProcess` sur le lanceur. La ligne de licence, elle, est
   émise par le lanceur lui-même — ce qui expliquerait qu'elle passe et pas le
   reste.
-- Comment trancher, sans rien changer au code : relancer un **Write .inp
-  only** et me renvoyer le panneau **entier** via *Copy output*. S'il ne
-  contient toujours aucun `[META]`, le constat est établi.
+- **Ce qui reste à départager, et c'est ce qui débloquera M4** : le script
+  n'imprime-t-il rien, ou imprime-t-il dans un canal que la GUI ne lit pas ?
+  Test sans aucune modification de code : onglet Job →
+  **Generate command (dry-run)**, copier la ligne « Equivalent shell
+  command », l'exécuter dans une fenêtre `cmd` depuis `C:\TEMP\ABQ_wd` en
+  redirigeant tout vers un fichier :
+
+  ```
+  <la commande copiée> > C:\TEMP\ABQ_wd\stdout_test.txt 2>&1
+  ```
+
+  Attention : ce lancement-là exécute le SOLVEUR (le dry-run ne porte pas
+  `write_inp_only`). Pour rester gratuit, ajouter `--run_cfg` avec
+  `'write_inp_only': True`, ou simplement interrompre après l'apparition des
+  lignes `[META]`.
+  - Si `stdout_test.txt` contient les `[META]`/`[STAGE]` et, le cas échéant,
+    `[WARNING] MASSEUL/VOLEUL history not created: …` → le script parle, et
+    c'est la capture côté `QProcess` qui est en cause. M4 est diagnostiqué du
+    même coup.
+  - S'il ne contient rien non plus → le problème est en amont, dans la façon
+    dont `abaqus cae noGUI=` achemine la sortie de son interpréteur, et il
+    faudra une autre voie (écrire le diagnostic dans un fichier à côté du
+    job plutôt que sur stdout).
 
 ### Mineur
 
