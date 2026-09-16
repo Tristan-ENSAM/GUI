@@ -13,10 +13,10 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ** — requêtes filtrée/non filtrée séparées + extraction rendue explicite (à vérifier par un `Write .inp only`) |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CONSERVÉ** sur décision de Tristan (inspection manuelle) — reste à vérifier que la sortie NODALE arrive bien dans l'ODB |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
-| m1 | Duplication de la construction de la commande Abaqus | Mineur | OUVERT |
-| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT |
-| m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | OUVERT |
-| m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | OUVERT |
+| m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
+| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT — en attente d'arbitrage (supprimer ou documenter) |
+| m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | **CORRIGÉ** (`bb31f67`) |
+| m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | **CORRIGÉ** (`5ac4255`) — `importorskip`, suite verte |
 
 ## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
 
@@ -931,6 +931,19 @@ disparu avec la suppression de la fonctionnalité.
 ```
 
 **Total après phase 2 : 572 réussis / 3 échoués sur 575 tests collectés.**
+
+### Après les correctifs m1 / m3 / m4
+
+```
+567 passed, 3 skipped in 138.55s   (passe 1, hors test_mesh_pipeline)
+11 passed in 172.87s               (passe 2, test_mesh_pipeline seul)
+```
+
+**578 réussis, 3 ignorés, ZÉRO échec.** La suite est verte pour la première
+fois de cette revue : les 3 « échecs » restants étaient les tests `imageio`
+de m4, qui sont désormais correctement IGNORÉS dans un environnement conforme
+à `requirements.txt` au lieu d'échouer. (+3 tests par rapport au relevé
+précédent : ceux ajoutés pour `build_abaqus_args`.)
 
 Réconciliation du nombre de tests (pour vérifier qu'aucun test n'a été perdu
 silencieusement) : 586 collectés en passe 1 avant, moins 26 tests supprimés
