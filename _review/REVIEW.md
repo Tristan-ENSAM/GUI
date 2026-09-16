@@ -11,6 +11,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ** — requêtes filtrée/non filtrée séparées + extraction rendue explicite (à vérifier par un `Write .inp only`) |
+| M7 | La sortie standard du script Abaqus ne semble PAS remonter dans le panneau de l'onglet Job | Majeur | **À CONFIRMER** — bloque le diagnostic de M4 |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
@@ -627,6 +628,37 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
   band-limitée physiquement. Elle rend seulement l'ODB complet et le code
   honnête ; l'arbitrage sur la bande passante IRT reste ouvert.
 
+**M7 — La sortie standard de `run_simul.py` ne paraît pas atteindre le
+panneau de l'onglet Job. À CONFIRMER.**
+- Fichiers : `gui/tabs/job_tab.py:559` (`setProcessChannelMode(MergedChannels)`),
+  `:562` (`readyReadStandardOutput` → `_on_proc_output`).
+- Statut : **hypothèse forte**, pas encore un fait — elle repose sur un
+  panneau de sortie collé par Tristan dont je ne sais pas s'il était complet.
+- Observation : sur un **Write .inp only** du 16/09, le panneau ne contenait
+  que la ligne du gestionnaire de licences (émise par `abaqus.bat`) entre
+  l'en-tête et le pied écrits par la GUI elle-même. Or `run_job`
+  (cel_model.py) imprime, dans ce mode, `[META] job_name=`, `[META] sim_time=`,
+  `[META] n_frames=`, `[STAGE] WRITE_INP_START`, `[STAGE] INP_WRITTEN` et
+  `[OK] Wrote <job>.inp`, avec un `sys.stdout.flush()` explicite. **Aucune de
+  ces lignes n'apparaissait**, alors que le `.inp` a bien été écrit.
+- Si confirmé, la portée dépasse largement M4 : tout le journal de
+  progression de l'extraction (`_vprint` dans cel_results.py), les
+  `[META] field_filter=…`, les `[WARNING]` — rien de ce que le script dit ne
+  parviendrait à l'utilisateur. Le panneau annonce pourtant « Live output ».
+- **Conséquence immédiate : cela bloque M4.** Le message d'exception de
+  `MASSEUL`/`VOLEUL` passe précisément par ce canal. Tant qu'on ne sait pas
+  s'il est capturé, l'absence d'avertissement dans le panneau ne permet pas
+  de distinguer « la requête n'a pas levé » de « elle a levé mais personne
+  ne l'a vu ».
+- Piste d'explication (NON VÉRIFIÉE) : le script tourne dans un sous-processus
+  de `abaqus.bat` (`cae.exe`), et son stdout peut ne pas être hérité par le
+  tuyau ouvert par `QProcess` sur le lanceur. La ligne de licence, elle, est
+  émise par le lanceur lui-même — ce qui expliquerait qu'elle passe et pas le
+  reste.
+- Comment trancher, sans rien changer au code : relancer un **Write .inp
+  only** et me renvoyer le panneau **entier** via *Copy output*. S'il ne
+  contient toujours aucun `[META]`, le constat est établi.
+
 ### Mineur
 
 **m6 — `COORD` est demandé alors qu'il n'existe pas pour `EC3D8RT`.**
@@ -841,6 +873,43 @@ sur les points que la mission demandait de vérifier spécifiquement :
   (route documentée pour libérer les jetons de licence), avec repli sur
   kill process — c'est l'ordre attendu. Voir cependant M1 : le repli n'est
   pas UNIFORME entre les deux implémentations du dépôt.
+
+## Vérifications sur un `.inp` réel (job `cancel_test`, 16/09)
+
+Un deck produit par **Write .inp only** a permis de confirmer plusieurs
+points de l'inventaire qui n'étaient jusque-là que de la lecture de code.
+
+**Mass scaling — convention VÉRIFIÉE de bout en bout.** C'était la première
+convention du cahier des charges (« ρ ET Cp mis à l'échelle du même facteur,
+sans double scaling »). Comparaison des profils matériaux du dépôt avec les
+cartes réellement écrites :
+
+| | ρ physique (profil) | ρ dans le `.inp` | Cp physique | Cp dans le `.inp` |
+|---|---|---|---|---|
+| Ti6Al4V (pièce) | 4.43e-09 | **4.43e-06** | 5.80e+08 | **5.80e+05** |
+| Carbure (outil) | 1.50e-08 | **1.50e-05** | 2.03e+08 | **2.03e+05** |
+
+Soit ρ × 1000 et Cp ÷ 1000, **exactement**, sur les DEUX matériaux. Le
+produit ρ·Cp est donc préservé, il n'y a pas de double application, et le
+facteur unique de la GUI est bien propagé aux deux matériaux
+(model_config.py:365-367 → cel_model.py:327/330 et 350/353). Le facteur 1000
+est déduit du rapport, pas lu dans la config du run.
+
+**Types d'éléments — VÉRIFIÉ** : `*Element, type=EC3D8RT` pour le domaine
+eulérien et `*Element, type=C3D8RT` pour l'outil, conformes aux `ElemType()`
+de `create_mesh`. Le step est bien `*Dynamic Temperature-displacement,
+Explicit` avec `*Bulk Viscosity`.
+
+**`*Section Controls` ABSENT du deck — et c'est normal.** C'est le point que
+la mission signalait comme historiquement risqué (« la réimportation du .inp
+dans CAE perd les Section Controls (secondOrderAccuracy) »). Le code passe
+`secondOrderAccuracy=OFF, hourglassControl=DEFAULT` à `ElemType`, et aucune
+carte `*Section Controls` n'apparaît. INTERPRÉTATION : la couche CAE omet les
+paramètres égaux au défaut lors de l'écriture du deck — le même mécanisme que
+pour `order=2` du filtre Butterworth, où Abaqus a confirmé « A DEFAULT SECOND
+ORDER WILL BE USED ». `OFF` étant le défaut, l'absence de carte est cohérente
+avec l'intention. Et comme ce pipeline ne réimporte JAMAIS un `.inp` dans CAE,
+le risque historique ne peut pas se matérialiser ici.
 
 ## Constat transversal — les avertissements `.dat`/`.sta` ne sont lus par personne
 
