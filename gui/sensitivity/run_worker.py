@@ -40,6 +40,29 @@ def _popen_group_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+def build_abaqus_args(abaqus_cmd: str, abaqus_script: str,
+                      model_params: dict, run_params: dict) -> list:
+    """The exact argv that runs `run_simul.py` under Abaqus/CAE.
+
+    Single source of truth for the launch contract, which three call sites
+    used to spell out independently: the Job tab's dry-run preview, the Job
+    tab's real launch, and the sensitivity worker. They cannot be allowed to
+    drift -- a change made in one of them would silently break the others,
+    which is exactly how the two cancel paths ended up behaving differently.
+
+    Both dicts cross the process boundary as `repr()` and are read back with
+    `ast.literal_eval` (run_simul.parse_arguments), so they must contain
+    literals only -- see ModelConfig.to_params_dict.
+
+    Returns the FULL argv, `abaqus_cmd` included at index 0. QProcess takes
+    the program separately from its arguments, so that caller passes
+    `args[0]` and `args[1:]`.
+    """
+    return [abaqus_cmd, "cae", "noGUI=%s" % abaqus_script, "--",
+            "--model_cfg", repr(model_params),
+            "--run_cfg", repr(run_params)]
+
+
 def abaqus_terminate_job(abaqus_cmd: str, job_name: str, workdir,
                          timeout: float = 20.0) -> bool:
     """Ask Abaqus to stop `job_name` cleanly: ``abaqus terminate job=<name>``.
@@ -249,10 +272,8 @@ class SensitivityRunWorker(QObject):
 
         model_params = cfg.to_params_dict()
         run_params = {"cpus": self._cpus, "job_name": job_name}
-        args = [self._abaqus_cmd, "cae",
-                "noGUI=%s" % self._abaqus_script, "--",
-                "--model_cfg", repr(model_params),
-                "--run_cfg", repr(run_params)]
+        args = build_abaqus_args(self._abaqus_cmd, self._abaqus_script,
+                                 model_params, run_params)
 
         self.log.emit("\n%s\n[run %d] %s\n%s\n"
                       % ("-" * 60, i + 1, job_name, "-" * 60))

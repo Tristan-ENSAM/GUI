@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        build_abaqus_args,
                                         kill_process_tree_by_pid)
 
 
@@ -55,6 +56,36 @@ class TestAbaqusTerminateJob:
         (tmp_path / "J.cid").write_text("host:1\n")
         exe = _script(tmp_path / "fail.sh", "#!/bin/sh\nexit 1\n")
         assert abaqus_terminate_job(str(exe), "J", tmp_path) is False
+
+
+class TestBuildAbaqusArgs:
+    """The launch contract, shared by the Job tab (preview AND real launch)
+    and the sensitivity worker. Three call sites used to spell it out
+    separately; this pins the shape so they cannot drift apart again."""
+
+    def test_the_documented_command_shape(self):
+        args = build_abaqus_args("abq.bat", "run_simul.py",
+                                 {"a": 1}, {"job_name": "J"})
+        assert args == ["abq.bat", "cae", "noGUI=run_simul.py", "--",
+                        "--model_cfg", "{'a': 1}",
+                        "--run_cfg", "{'job_name': 'J'}"]
+
+    def test_the_program_is_index_zero(self):
+        # QProcess.start() wants program and arguments separately, so the Job
+        # tab passes args[0] and args[1:]. Guard that split staying valid.
+        args = build_abaqus_args("abq.bat", "s.py", {}, {})
+        assert args[0] == "abq.bat"
+        assert args[1] == "cae"
+
+    def test_config_crosses_as_a_literal_repr(self):
+        """run_simul.parse_arguments reads both dicts back with
+        ast.literal_eval, so what is written must survive that round trip."""
+        import ast
+        model = {"geometry": {"bbox": {"xmin": -0.5}}, "flag": True}
+        run = {"cpus": 4, "job_name": "J", "write_inp_only": False}
+        args = build_abaqus_args("abq", "s.py", model, run)
+        assert ast.literal_eval(args[args.index("--model_cfg") + 1]) == model
+        assert ast.literal_eval(args[args.index("--run_cfg") + 1]) == run
 
 
 class TestKillProcessTreeByPid:

@@ -28,6 +28,7 @@ from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        build_abaqus_args,
                                         kill_process_tree_by_pid)
 
 
@@ -323,17 +324,10 @@ class JobTab(QWidget):
         # loop parallel etc.) on its own for now.
         run_params = {"cpus": cpus, "job_name": job_name}
 
-        # Reproduce ABQ.run_simul's command list literally.
-        cmd = [
-            prefs.abaqus_cmd,
-            "cae",
-            f"noGUI={prefs.abaqus_script}",
-            "--",
-            "--model_cfg",
-            repr(model_params),
-            "--run_cfg",
-            repr(run_params),
-        ]
+        # The same builder the real launch uses, so the preview cannot drift
+        # from what would actually be executed.
+        cmd = build_abaqus_args(prefs.abaqus_cmd, prefs.abaqus_script,
+                                model_params, run_params)
 
         # Pretty-print the output panel with clearly separated blocks.
         lines = []
@@ -519,15 +513,9 @@ class JobTab(QWidget):
             # bundle is written -- the user was warned in the dialog.
             args = ["job=%s" % job_name, "continue", "cpus=%d" % cpus]
         else:
-            args = [
-                "cae",
-                f"noGUI={prefs.abaqus_script}",
-                "--",
-                "--model_cfg",
-                repr(model_params),
-                "--run_cfg",
-                repr(run_params),
-            ]
+            # [1:] because QProcess.start() takes the program separately.
+            args = build_abaqus_args(prefs.abaqus_cmd, prefs.abaqus_script,
+                                     model_params, run_params)[1:]
 
         # Header in the output panel — replaces the dry-run text.
         if resume:
