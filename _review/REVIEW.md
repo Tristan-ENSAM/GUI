@@ -11,7 +11,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
-| M7 | La sortie standard du script Abaqus ne remonte PAS dans le panneau de l'onglet Job | Majeur | **CONFIRMÉ** — bloque le diagnostic de M4 |
+| M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CONFIRMÉ, cause corrigée** : ce n'est pas la GUI. Bloque M4 |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
@@ -660,10 +660,22 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
   band-limitée physiquement. Elle rend seulement l'ODB complet et le code
   honnête ; l'arbitrage sur la bande passante IRT reste ouvert.
 
-**M7 — La sortie standard de `run_simul.py` ne paraît pas atteindre le
-panneau de l'onglet Job. À CONFIRMER.**
-- Fichiers : `gui/tabs/job_tab.py:559` (`setProcessChannelMode(MergedChannels)`),
-  `:562` (`readyReadStandardOutput` → `_on_proc_output`).
+**M7 — `abaqus cae noGUI=` ne propage pas la sortie standard du script.
+Toute la couche de diagnostic du projet est écrite pour personne.**
+
+> **CORRECTION D'UNE ERREUR DE MA PART.** J'avais d'abord formulé ce constat
+> comme « la GUI ne capture pas la sortie », en soupçonnant le `QProcess`.
+> C'était faux, et la sonde le prouve : lancée directement depuis `cmd` avec
+> `> probe_console.txt 2>&1`, **sans GUI du tout**, la sortie ne contient
+> toujours que la ligne du gestionnaire de licences. Ni `[PROBE] stdout`, ni
+> `[PROBE] stderr`. Le problème est en amont d'Abaqus, pas dans le code de
+> l'onglet Job — lequel est donc hors de cause, et qu'il ne faut surtout pas
+> « corriger ».
+
+- Fichiers concernés par la CONSÉQUENCE (pas par la cause) :
+  `gui/tabs/job_tab.py:559-562`, et tous les `print()` /
+  `sys.stdout.flush()` de `abaqus_scripts/cel_model.py` et
+  `abaqus_scripts/cel_results.py`.
 - Statut : **fait**, confirmé par deux exécutions indépendantes.
 - **Preuve décisive** : deux `Write .inp only` successifs, l'un AVANT la
   récupération de la branche, l'autre APRÈS. Les decks produits DIFFÈRENT
@@ -692,29 +704,56 @@ panneau de l'onglet Job. À CONFIRMER.**
   tuyau ouvert par `QProcess` sur le lanceur. La ligne de licence, elle, est
   émise par le lanceur lui-même — ce qui expliquerait qu'elle passe et pas le
   reste.
-- **Ce qui reste à départager, et c'est ce qui débloquera M4** : le script
-  n'imprime-t-il rien, ou imprime-t-il dans un canal que la GUI ne lit pas ?
-  Test sans aucune modification de code : onglet Job →
-  **Generate command (dry-run)**, copier la ligne « Equivalent shell
-  command », l'exécuter dans une fenêtre `cmd` depuis `C:\TEMP\ABQ_wd` en
-  redirigeant tout vers un fichier :
+- **Preuve, `_review/stdout_probe.py` (16/09).** La sonde écrit le même
+  marqueur sur trois canaux. Résultats :
 
-  ```
-  <la commande copiée> > C:\TEMP\ABQ_wd\stdout_test.txt 2>&1
-  ```
+  | Lancement | `[PROBE] stdout` | `[PROBE] stderr` |
+  |---|---|---|
+  | `cmd`, redirection directe `> probe_console.txt 2>&1` | **absent** | **absent** |
+  | GUI, onglet Job | **absent** | **absent** |
 
-  Attention : ce lancement-là exécute le SOLVEUR (le dry-run ne porte pas
-  `write_inp_only`). Pour rester gratuit, ajouter `--run_cfg` avec
-  `'write_inp_only': True`, ou simplement interrompre après l'apparition des
-  lignes `[META]`.
-  - Si `stdout_test.txt` contient les `[META]`/`[STAGE]` et, le cas échéant,
-    `[WARNING] MASSEUL/VOLEUL history not created: …` → le script parle, et
-    c'est la capture côté `QProcess` qui est en cause. M4 est diagnostiqué du
-    même coup.
-  - S'il ne contient rien non plus → le problème est en amont, dans la façon
-    dont `abaqus cae noGUI=` achemine la sortie de son interpréteur, et il
-    faudra une autre voie (écrire le diagnostic dans un fichier à côté du
-    job plutôt que sur stdout).
+  Les deux fichiers ne contiennent que la ligne du gestionnaire de licences,
+  émise par `abaqus.bat` lui-même. Le lancement en console **n'implique
+  aucun code du projet** : la perte est donc imputable à
+  `abaqus cae noGUI=`, pas à la GUI.
+
+- **Ampleur.** Sont concernés **69 messages** : 54 dans `cel_results.py`
+  (33 `_vprint` + les `print` directs) et 15 dans `cel_model.py`. Cela
+  comprend le journal complet de l'extraction, les bbox de maillage, le
+  compte `ROI_node`/`ROI_elem`, le message d'erreur détaillé qui précède le
+  `sys.exit(2)` quand la ROI ne sélectionne rien (« Increase the ROI
+  (Geometry tab) so it overlaps the mesh, then re-run »), le récapitulatif de
+  nettoyage, et les `[WARNING]`.
+- **Le protocole `[STAGE]` / `[META]` n'est lu par personne non plus** :
+  aucune occurrence dans `gui/` (recherche exhaustive). Ces marqueurs ont été
+  conçus pour un lecteur — humain via le panneau, ou machine via un parseur —
+  qui n'a jamais existé côté GUI et qui, de toute façon, ne pouvait pas les
+  recevoir.
+- **Conséquence sur M4** : le message d'exception de `MASSEUL`/`VOLEUL`
+  emprunte ce canal perdu. Son absence ne prouve toujours pas que la requête
+  ne lève pas.
+- **Point encore à confirmer avant de choisir une correction** : la sonde
+  écrit aussi `probe_marker.txt` dans le répertoire courant. Si ce fichier
+  EXISTE, le script s'est bien exécuté et seule la sortie est perdue. S'il
+  est ABSENT, le script n'a pas tourné du tout et toute l'analyse ci-dessus
+  est à refaire sur une autre base. Le code retour valant 0 (« Abaqus
+  reported success » côté GUI) plaide pour la première hypothèse, mais ce
+  n'est qu'un indice.
+- **Corrections possibles, à arbitrer une fois ce point levé** :
+  (a) écrire les diagnostics dans un fichier à côté du job (par exemple
+  `<job>.gui.log`) et le suivre depuis la GUI — le projet possède DÉJÀ ce
+  mécanisme, `JobTab._poll_sta` scrute le `.sta` toutes les 800 ms, il
+  suffirait de le doubler ; robuste, indépendant du comportement d'Abaqus ;
+  (b) chercher une forme d'invocation d'Abaqus qui propage la sortie —
+  je ne peux ni la deviner ni la vérifier d'ici, cela demande la doc ou un
+  essai ; `abaqus python` n'est pas une option, il n'embarque pas le noyau
+  CAE dont `mdb` a besoin ;
+  (c) constater que cette couche ne sert à rien et la supprimer, plutôt que
+  d'entretenir 69 messages que personne ne lira jamais.
+  Ne rien faire est la seule option que je déconseille : l'onglet annonce
+  « Live output », et un utilisateur dont la ROI ne sélectionne rien reçoit
+  aujourd'hui un échec sans la moindre explication, alors que le script en a
+  écrit une, précise et actionnable.
 
 ### Mineur
 
