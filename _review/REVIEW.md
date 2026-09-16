@@ -9,9 +9,9 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
-| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **DIAGNOSTIQUÉ** — Abaqus rejette les NOMS de variables. Correction en attente d'un nom valide |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
-| M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CONFIRMÉ, cause corrigée** : ce n'est pas la GUI. Bloque M4 |
+| M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CORRIGÉ** — journal fichier `<job>.gui.log` suivi par la GUI |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
@@ -546,13 +546,31 @@ de masse eulérienne n'existe pas dans les résultats.**
   `model.HistoryOutputRequest(...)` de cel_model.py:616-620 **lève à la
   construction du modèle**, et le `try/except` de la ligne 621 l'avale. Le
   solveur n'est pas en cause, il n'a jamais reçu la demande.
-- **Ce qui manque encore pour corriger** : le message d'exception exact. Il a
-  été imprimé pendant ce run-là sous la forme
-  `[WARNING] MASSEUL/VOLEUL history not created: <message>` dans le panneau
-  de sortie de l'onglet Job. Le récupérer coûte quelques secondes : un
-  **Write .inp only** (construction seule, pas de solveur) puis le bouton
-  **Copy output**, et chercher `MASSEUL` dans le texte collé. Sans ce
-  message je ne peux pas proposer la bonne forme d'appel sans l'inventer.
+- **DIAGNOSTIQUÉ (16/09).** Le message a été capturé via
+  `_review/run_simul_logged.py`, une fois M7 contourné :
+
+  ```
+  [WARNING] MASSEUL/VOLEUL history not created: Invalid variables are
+  specified in an output request.  An output request cannot be created in a
+  step where some variables are invalid.
+  ```
+
+  **Ce n'est donc PAS un problème de région.** L'hypothèse (a) que je
+  privilégiais — `region=assembly.sets['Euler']` inadaptée — est écartée :
+  Abaqus rejette les **noms de variables** eux-mêmes. `MASSEUL` et/ou
+  `VOLEUL` ne sont pas des variables de sortie valides dans ce contexte.
+  C'est précisément le cas de figure que la mission cherchait : une API
+  mal nommée, jamais détectée parce que l'erreur partait dans le vide.
+- **Ce qui manque pour corriger : le ou les noms VALIDES.** Je ne les
+  proposerai pas de mémoire — ce serait exactement l'erreur qui a créé ce
+  constat. Deux voies :
+  (a) la doc Abaqus (Output Variable Identifiers, sorties eulériennes) ;
+  (b) un essai empirique : tester des candidats un par un dans un script
+  jetable et relever ceux qu'Abaqus accepte. Le message ci-dessus est
+  levé à la CONSTRUCTION, donc un tel test ne coûte aucun solveur.
+- En attendant, la requête reste en place, entourée de son `try/except` —
+  mais l'avertissement est désormais VISIBLE (M7 corrigé), donc l'échec
+  n'est plus silencieux.
 - Corrections possibles, à décider APRÈS ce test : corriger la région /
   la forme de la requête si (a) ; ou retirer la requête et le `try/except`
   si la conservation eulérienne ne s'obtient pas ainsi, plutôt que de
@@ -768,6 +786,34 @@ Toute la couche de diagnostic du projet est écrite pour personne.**
   « Live output », et un utilisateur dont la ROI ne sélectionne rien reçoit
   aujourd'hui un échec sans la moindre explication, alors que le script en a
   écrit une, précise et actionnable.
+- **CORRIGÉ — voie (a) retenue par Tristan : journal fichier suivi.**
+  - `run_simul.py` redirige `stdout`/`stderr` vers `<job>.gui.log` dans le
+    répertoire de travail, **en un seul point** plutôt qu'en modifiant les
+    69 appels : un `_Tee` écrit dans le fichier ET dans le flux d'origine,
+    avec `flush()` à chaque écriture (la GUI lit pendant que ça tourne). Le
+    flux d'origine est conservé pour ne rien perdre là où stdout fonctionne,
+    et une écriture qui échoue de son côté ne fait pas tomber le fichier.
+  - Un `try/except` autour du corps de `main()` enregistre désormais la
+    **trace d'exception**, la chose la plus précieuse que ce script puisse
+    imprimer, avant de re-lever pour que le code retour reste juste.
+  - `log_path_for()` définit la règle de nommage **d'un seul côté** ; un test
+    vérifie que la GUI en dérive exactement la même.
+  - `JobTab._poll_script_log()` suit le fichier depuis un offset d'octets
+    (pas de relecture, donc pas de doublons), décode en latin-1 (un message
+    non-ASCII ne doit pas tuer la boucle), et le timer existant de 800 ms est
+    désormais démarré **aussi en mode Write .inp only** — c'est là que se
+    voient les diagnostics de construction. `_finish_pipeline` vide le
+    journal une dernière fois AVANT d'arrêter le timer, sans quoi les
+    dernières lignes, celles qui expliquent un échec, seraient perdues.
+  - Le fichier est supprimé au lancement : un journal d'un run précédent du
+    même job serait sinon rejoué comme s'il était en cours.
+  - 10 tests de non-régression (`tests/test_script_log.py`), sur les deux
+    moitiés du contrat.
+- **Reste hors périmètre de cette correction** : `SensitivityRunWorker` lit
+  toujours `proc.stdout` (run_worker.py:246-249), qui est vide pour la même
+  raison. Les campagnes de sensibilité n'affichent donc rien du script. Le
+  même `log_path_for()` s'y appliquerait ; je ne l'ai pas fait pour garder ce
+  lot circonscrit à l'onglet Job.
 
 ### Mineur
 
