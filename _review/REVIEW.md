@@ -563,11 +563,33 @@ de masse eulérienne n'existe pas dans les résultats.**
   mal nommée, jamais détectée parce que l'erreur partait dans le vide.
 - **Ce qui manque pour corriger : le ou les noms VALIDES.** Je ne les
   proposerai pas de mémoire — ce serait exactement l'erreur qui a créé ce
-  constat. Deux voies :
-  (a) la doc Abaqus (Output Variable Identifiers, sorties eulériennes) ;
-  (b) un essai empirique : tester des candidats un par un dans un script
-  jetable et relever ceux qu'Abaqus accepte. Le message ci-dessus est
-  levé à la CONSTRUCTION, donc un tel test ne coûte aucun solveur.
+  constat.
+- **Piste examinée et ÉCARTÉE en l'état.** Tristan a fourni deux pages de la
+  doc 2022 (`IntegratedOutputSection object`, `Integrated Output Section
+  Definition`) en suggérant que `MASSEUL`/`VOLEUL` relèveraient de
+  l'*integrated output*, « un objet différent ». Vérification faite sur le
+  texte des deux PDF :
+  - **ni `MASSEUL` ni `VOLEUL` n'y figurent**, pas une occurrence ; ces pages
+    ne peuvent donc pas étayer la conclusion ;
+  - elles décrivent une fonctionnalité orientée **force et moment transmis à
+    travers une surface**, plus le suivi du mouvement moyen d'une surface —
+    rien sur la masse ou le volume de matière ;
+  - et surtout, elles contredisent le « objet différent » : la correspondance
+    CAE qu'elles donnent est *« **History output request editor**: Domain:
+    Integrated output section »*. L'integrated output est donc la MÊME
+    requête d'historique avec un domaine différent, pas une autre classe.
+  La page qui trancherait est celle que ces documents citent eux-mêmes
+  (« see **Integrated Output** ») et/ou la liste des *Output Variable
+  Identifiers* pour les analyses eulériennes.
+- **Voie empirique fournie** : `_review/masseul_probe.py` construit le VRAI
+  modèle via `cel_model.build_model` puis soumet une liste de candidats à
+  Abaqus un par un, en consignant lesquels sont acceptés. Il inclut `EVF`
+  comme témoin : si même lui est rejeté sur cette région, alors le problème
+  n'est pas le nom de variable et toute cette analyse est à refaire. Il teste
+  aussi si `integratedOutputSection=` est un argument recevable de
+  `HistoryOutputRequest`. Aucun solveur, quelques secondes. La liste de
+  candidats qu'il contient est une liste de CHOSES À TESTER, pas de
+  recommandations.
 - En attendant, la requête reste en place, entourée de son `try/except` —
   mais l'avertissement est désormais VISIBLE (M7 corrigé), donc l'échec
   n'est plus silencieux.
