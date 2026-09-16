@@ -149,34 +149,10 @@ def _extract_instance_geometry(inst, roi):
             kept_node_ids, kept_elem_ids, full_bbox)
 
 
-def _reduce_VM(vals, comp_labels):
-    """von Mises reduction of a stress tensor (missing comps treated 0)."""
-    idx = dict(zip(comp_labels, range(len(comp_labels))))
-    def col(name):
-        return vals[:, idx[name]] if name in idx else 0.0
-    s11, s22, s33 = col("S11"), col("S22"), col("S33")
-    s12, s13, s23 = col("S12"), col("S13"), col("S23")
-    return _np.sqrt(0.5 * (
-        (s11 - s22) ** 2 + (s22 - s33) ** 2 + (s33 - s11) ** 2
-        + 6.0 * (s12 ** 2 + s13 ** 2 + s23 ** 2)
-    )).astype(_np.float32)
-
-
 def _reduce_identity(vals, comp_labels):
     if vals.ndim == 2 and vals.shape[1] == 1:
         return vals[:, 0].astype(_np.float32)
     return vals.astype(_np.float32)
-
-
-_TENSOR_REDUCERS = {
-    "MISES": ("S", _reduce_VM),
-    "S_VM":  ("S", _reduce_VM),   # S_VM is the canonical field name used by
-                                   # the results format (see FORMAT.md) —
-                                   # NOT a legacy alias, kept intentionally.
-}
-
-# Native stress invariants (preferred over recombining components).
-_STRESS_INVARIANT = {"MISES": "MISES", "S_VM": "MISES", "S_P": "PRESS"}
 
 
 def _read_data(v):
@@ -253,17 +229,11 @@ def _resolve_fo_name(step, abq_var, inst_name, root_assembly, max_probe=3,
 
 def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
                    filter_suffix=None):
-    if var in _TENSOR_REDUCERS:
-        abq_var, reducer = _TENSOR_REDUCERS[var]
-    else:
-        abq_var, reducer = var, _reduce_identity
-    inv_name = _STRESS_INVARIANT.get(var)
-
-    key = _resolve_fo_name(step, abq_var, inst_name, root_assembly,
+    key = _resolve_fo_name(step, var, inst_name, root_assembly,
                            filter_suffix=filter_suffix)
     if key is None:
-        # Not present on this instance (e.g. PEEQ/S/EVF on the rigid tool).
-        raise KeyError(abq_var)
+        # Not present on this instance (e.g. EVF on the rigid tool).
+        raise KeyError(var)
 
     kept_set = set(kept_elem_ids)
     elem_id_to_pos = {}
@@ -275,19 +245,11 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
     # element absent) stay distinguishable from a genuine physical zero.
     out = _np.full((n_frames, n_elems), _np.nan, dtype=_np.float32)
 
-    invariant = None
-    if inv_name is not None:
-        try:
-            import abaqusConstants as _abqc
-            invariant = getattr(_abqc, inv_name, None)
-        except Exception:
-            invariant = None
-
     inst = root_assembly.instances[inst_name]
-    # Decide once whether restricting to the instance yields values; some
-    # CEL tensor fields (S) don't subset by instance cleanly, so fall back
-    # to the full field + element-label filtering (the suffixed field only
-    # carries this instance's elements anyway).
+    # Decide once whether restricting to the instance yields values; some CEL
+    # fields don't subset by instance cleanly, so fall back to the full field
+    # + element-label filtering (the suffixed field only carries this
+    # instance's elements anyway).
     use_region = False
     probe_fi = (n_frames // 2) if n_frames > 1 else 0
     try:
@@ -306,22 +268,12 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
                 fo = fo.getSubset(region=inst)
             except (AttributeError, KeyError):
                 pass
-        # von Mises / pressure: prefer the native scalar invariant.
         src = fo
-        used_invariant = False
-        if invariant is not None:
-            try:
-                src = fo.getScalarField(invariant=invariant)
-                used_invariant = True
-            except Exception:
-                src, used_invariant = fo, False
-        if not used_invariant:
-            try:
-                src = src.getSubset(position=_CENTROID)
-            except Exception:
-                pass
-        comp_labels = [] if used_invariant else (
-            list(src.componentLabels) if src.componentLabels else [])
+        try:
+            src = src.getSubset(position=_CENTROID)
+        except Exception:
+            pass
+        comp_labels = list(src.componentLabels) if src.componentLabels else []
         vals_list = []
         labels_list = []
         for v in src.values:
@@ -335,10 +287,7 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
         if not vals_list:
             continue
         vals = _np.asarray(vals_list, dtype=_np.float32)
-        if comp_labels:
-            scalars = reducer(vals, comp_labels)
-        else:
-            scalars = _reduce_identity(vals, comp_labels)
+        scalars = _reduce_identity(vals, comp_labels)
         for k, lbl in enumerate(labels_list):
             pos = elem_id_to_pos.get(lbl)
             if pos is not None:

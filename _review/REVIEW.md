@@ -8,13 +8,13 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 |---|---|---|---|
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
-| M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **OUVERT** — mécanisme établi, durée encore non mesurée |
+| M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **OUVERT — cause CONFIRMÉE** : la requête lève à la construction, message d'Abaqus encore à récupérer |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ** — requêtes filtrée/non filtrée séparées + extraction rendue explicite (à vérifier par un `Write .inp only`) |
-| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CONSERVÉ** sur décision de Tristan (inspection manuelle) — reste à vérifier que la sortie NODALE arrive bien dans l'ODB |
+| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
 | m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
 | m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
-| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | OUVERT — en attente d'arbitrage (supprimer ou documenter) |
+| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | **CORRIGÉ** — supprimé sur décision de Tristan |
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | **CORRIGÉ** (`bb31f67`) |
 | m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | **CORRIGÉ** (`5ac4255`) — `importorskip`, suite verte |
 
@@ -470,6 +470,17 @@ le thread GUI) reste établi ; son coût réel est vraisemblablement modeste.
 terminate job=` a bien été reçu par le solveur, qui s'est arrêté proprement
 et a libéré ses 8 jetons de licence. C'est exactement le comportement que
 Tristan décrivait comme le bon.
+
+**CLOS SANS CORRECTION.** Décision de Tristan : « la commande terminate
+s'exécute vite en effet donc ça me semble une bonne solution pour cancel un
+job en cours, notamment lorsqu'un pipeline entier doit être cancel ». Le
+mécanisme (appel bloquant sur le thread GUI) reste réel et documenté
+ci-dessus, mais son coût est jugé acceptable en usage. Réserve d'honnêteté :
+la durée exacte du `terminate` contre un job VIVANT n'a jamais été
+chronométrée — le 0,63 s mesuré portait sur un job inexistant (chemin
+d'erreur). Ce qui est établi, c'est que le solveur meurt dans la seconde
+(log du run `cancel_test`), donc que le `waitForFinished(10000)` n'est pas le
+terme dominant. Rien à corriger tant que l'usage ne remonte pas de gêne.
 - Corrections possibles (alternatives, à arbitrer) :
   (a) **Minimal** : réduire les timeouts (ex. 20 s → 5 s pour
   `abaqus terminate`, qui rend la main en général en moins d'une seconde
@@ -642,12 +653,16 @@ ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
   l'usage ci-dessus a besoin. **HYPOTHÈSE non vérifiée** : aucun ODB
   disponible ne permet de le confirmer (`COORD` a été ajouté en `79b66ad`,
   après l'ODB `GCI_run000` examiné ici).
-- Vérification gratuite qui trancherait : relancer `check_api.py` sur un ODB
-  produit depuis, par exemple `cancel_test.odb`, et regarder si une clé
-  `COORD` figure dans la liste des `fieldOutputs` et sur quelle instance.
-  Si elle y est, l'usage est servi et l'avertissement est cosmétique. Si
-  elle n'y est pas, `COORD` ne sert pas l'objectif visé et il faudra
-  trouver un autre moyen de porter les coordonnées dans l'ODB.
+- **CLOS — NON-PROBLÈME, vérifié par Tristan** : « COORD est bien dans
+  `cancel_test.odb`, je peux donc faire des display groups pour inspecter
+  les résultats. » L'hypothèse était la bonne : l'avertissement ne porte
+  que sur la variante aux points d'intégration, la sortie NODALE arrive
+  bien et sert son usage.
+- **Aucune correction.** Retirer `COORD` supprimerait un usage réel ; lui
+  dédier une requête scindée ajouterait de la complexité pour faire taire
+  un avertissement sur une variante dont personne ne se sert. L'entrée est
+  conservée ici pour documenter pourquoi cet avertissement du `.dat` est
+  attendu et n'a pas à être « corrigé ».
 
 **Note sans conséquence — `order=2` n'apparaît pas dans le deck.**
 `ButterworthFilter(..., order=2)` (cel_model.py:563-570) produit
@@ -745,11 +760,16 @@ existant est bien fondé).
   réel), mais une source de confusion pour la maintenance et un risque
   latent si quelqu'un active `S_VM`/`PEEQ` côté GUI en pensant que
   l'extraction suit.
-- Correction possible (alternatives) : soit documenter explicitement en
-  tête de `_extract_field`/`_TENSOR_REDUCERS` que ce chemin est prêt pour
-  une extension future mais inactif ; soit le supprimer si aucune
-  extension n'est prévue (le projet demande explicitement d'éviter le code
-  mort).
+- **CORRIGÉ** — Tristan : « je ne me sers en effet pas de ça, je regarde
+  juste les contraintes dans l'ODB en mode inspection, c'est du code mort
+  que tu peux nettoyer. » Supprimés : `_reduce_VM`, `_TENSOR_REDUCERS`,
+  `_STRESS_INVARIANT`, et dans `_extract_field` la résolution d'invariant
+  et l'appel `getScalarField`.
+- **`'S'` reste demandé dans `fo_variables`** (cel_model.py:111) : c'est
+  précisément ce qui alimente l'inspection manuelle des contraintes dans
+  l'ODB. Seul le code d'EXTRACTION vers le `.npz` était mort, pas la sortie
+  elle-même. Le chemin réellement emprunté (`EVF`, `TEMP` via
+  `_reduce_identity`) est inchangé.
 
 **m3 — `try/except Exception: pass` autour d'une assignation qui ne peut
 pas échouer.**
