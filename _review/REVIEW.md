@@ -9,7 +9,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
-| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **DIAGNOSTIQUÉ** — Abaqus rejette les NOMS de variables. Correction en attente d'un nom valide |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CORRIGÉ** — remplacés par `MASS`/`EVOL`, noms établis empiriquement. Forme de la sortie à vérifier au premier run |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
 | M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CORRIGÉ** — journal fichier `<job>.gui.log` suivi par la GUI |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
@@ -581,6 +581,50 @@ de masse eulérienne n'existe pas dans les résultats.**
   La page qui trancherait est celle que ces documents citent eux-mêmes
   (« see **Integrated Output** ») et/ou la liste des *Output Variable
   Identifiers* pour les analyses eulériennes.
+- **CORRIGÉ — noms établis par l'expérience, pas par mémoire.** Sortie du
+  probe sur le vrai modèle (`TEST_masseul`, région `assembly.sets['Euler']`) :
+
+  ```
+  [REJECTED] ('MASSEUL', 'VOLEUL')    Invalid variables are specified ...
+  [REJECTED] ('MASSEUL',)             Invalid variables are specified ...
+  [REJECTED] ('VOLEUL',)              Invalid variables are specified ...
+  [ACCEPTED] ('EVOL',)
+  [ACCEPTED] ('MASS',)
+  [ACCEPTED] ('EVF',)                 <- témoin
+  ```
+
+  Trois enseignements, tous factuels :
+  1. **Le témoin `EVF` passe.** La région et la forme de la requête n'ont
+     donc JAMAIS été en cause — mon hypothèse (a) initiale, qui soupçonnait
+     `assembly.sets['Euler']`, est définitivement écartée. Sans ce témoin, le
+     test n'aurait pas pu me contredire.
+  2. `MASSEUL` et `VOLEUL` sont invalides **chacun séparément** : ce n'est pas
+     l'un qui entraînait l'autre.
+  3. `MASS` et `EVOL` sont acceptés sur cette région exacte.
+
+  `cel_model.create_step` demande désormais `variables=('MASS', 'EVOL')`.
+- **Ce qui reste NON VÉRIFIÉ, et je ne le masque pas** : qu'Abaqus accepte
+  ces noms ne dit pas ce qu'il écrira. Deux inconnues :
+  - **la forme** : une série unique pour le set, ou **une par élément** ? Le
+    set eulérien compte ~10 000 éléments ; à 500 intervalles, la forme
+    par-élément représenterait des millions de valeurs et il faudrait
+    restreindre la requête, voire y renoncer. À lire dans le bloc
+    `*Output, history` du prochain `Write .inp only` — coût nul ;
+  - **le contenu physique** : `EVOL` est le volume d'élément, or le maillage
+    eulérien est FIXE — cette série pourrait être constante et donc sans
+    valeur comme indicateur. `MASS` est le candidat qui porte réellement le
+    sens recherché. À juger sur les valeurs d'un premier run.
+- **Limite de portée à connaître** : rien dans `cel_results.py` n'extrait
+  `MASS`/`EVOL` vers le `.npz` — seuls `RF1`/`RF2` et `ALLKE`/`ALLIE` le
+  sont. Le contrôle de conservation sera donc présent dans l'**ODB**, pour
+  inspection manuelle dans le Viewer, mais absent du bundle et de la GUI.
+  Cohérent avec l'usage décrit par Tristan (il inspecte l'ODB à la main),
+  mais c'est un choix à confirmer, pas un oubli de ma part.
+- **Note sur la piste integrated output** : le probe montre que
+  `mdb.models[...].IntegratedOutputSection` existe bien, et que l'appel avec
+  `integratedOutputSection=` échoue sur les VARIABLES (`SOF`) et non sur le
+  mot-clé — l'argument semble donc recevable. Cette voie reste ouverte mais
+  devient sans objet, `MASS`/`EVOL` répondant directement au besoin.
 - **Voie empirique fournie** : `_review/masseul_probe.py` construit le VRAI
   modèle via `cel_model.build_model` puis soumet une liste de candidats à
   Abaqus un par un, en consignant lesquels sont acceptés. Il inclut `EVF`

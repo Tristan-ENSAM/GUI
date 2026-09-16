@@ -643,20 +643,36 @@ def create_step(model, assembly, RP, p):
         name='H-Output-2', createStepName='Cut',
         variables=PRESELECT, numIntervals=ho_n_intervals)
 
-    # Eulerian mass/volume per material instance, over the whole Eulerian
-    # domain: a conservation check (is material leaving the domain, or being
-    # lost numerically?) that the model had no indicator for. Cheap: two
-    # scalars per sample. Not filtered -- a conservation check must see the
+    # Mass and volume over the Eulerian domain: a conservation check (is
+    # material leaving the domain, or being lost numerically?) that the model
+    # had no indicator for. Not filtered -- a conservation check must see the
     # raw balance.
+    # MASS and EVOL -- NOT MASSEUL/VOLEUL. Those two names were never valid:
+    # from e9e967f onwards Abaqus rejected this request outright with
+    # "Invalid variables are specified in an output request", so the
+    # conservation check has never existed in a single ODB. The failure went
+    # unnoticed because the warning below travelled on a stdout that
+    # `abaqus cae noGUI=` discards (see run_simul._Tee).
+    #
+    # The replacement is measured, not guessed. _review/masseul_probe.py put
+    # candidates to the real model one at a time: MASSEUL and VOLEUL are each
+    # invalid alone, MASS and EVOL are both accepted on this exact region, and
+    # an EVF control passed -- proving the region and the request shape were
+    # never at fault.
+    #
+    # STILL UNVERIFIED, to check on the first real run: whether these arrive
+    # as ONE series for the set or one PER ELEMENT. The Eulerian set holds
+    # ~10^4 elements, so the per-element form would bloat the ODB and this
+    # request should then be narrowed or dropped rather than kept.
     try:
         model.HistoryOutputRequest(
             name='H-Output-3', createStepName='Cut',
             region=assembly.sets['Euler'],
-            variables=('MASSEUL', 'VOLEUL'),
+            variables=('MASS', 'EVOL'),
             numIntervals=ho_n_intervals)
     except Exception as exc:
         # Non-fatal: losing the conservation check must not lose the run.
-        print("[WARNING] MASSEUL/VOLEUL history not created: %s" % exc)
+        print("[WARNING] MASS/EVOL history not created: %s" % exc)
         sys.stdout.flush()
 
 
