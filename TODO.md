@@ -46,6 +46,39 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
   - **Export CSV** (`gui/sensitivity/export_results.py` + bouton « Save
     results… ») : une ligne par (QoI, paramètre), triée par
     |sensibilité| décroissante (= tableau + classement field-SSD).
+- **Cartographie de sensibilité (par élément)** : l'onglet *Maps* de
+  Sensitivity affiche la sensibilité **élément par élément** au lieu de la
+  seule valeur moyennée sur la ROI. La carte utilise **le schéma de l'étude
+  qui l'a produite** — les deux ne sont pas interchangeables :
+  - *Jacobien* → `dF/dθ` signée par élément, même schéma FD que l'étude
+    (central / forward / backward) —
+    `field_metrics.elementwise_signed_sensitivity`.
+  - *Morris* → `μ*`, `σ`, `μ` **par élément**, formés à partir des effets
+    élémentaires champ par champ, avec la même définition et le même pas de
+    grille adimensionnel `Δ = p/(2(p−1))` que SALib : la carte et le tableau
+    scalaire sont donc à la même échelle
+    (`field_metrics.elementwise_morris_stats` ; égalité avec SALib vérifiée
+    sur un modèle scalaire dans `tests/test_field_maps.py`). Le calcul des
+    cartes n'appelle pas SALib (accumulateurs numpy), seul le tableau
+    scalaire en dépend.
+  - Sélecteurs dans la fenêtre matplotlib/Qt : **sortie évaluée**
+    (EVF / V / TEMP), **paramètre perturbé** (A, B, n, C, m, µ, vitesse…),
+    **quantité** affichée, puis frame unique ou agrégation temporelle
+    (moyenne si signé, RMS si magnitude). Bouton « Open in a window » pour
+    détacher la vue ; export de l'image par la barre d'outils matplotlib.
+  - **Export / rechargement `.npz`** : « Save maps (.npz) » écrit toute
+    l'étude (toutes les cartes, le maillage, les temps de frame et les
+    métadonnées du run) dans un fichier ; « Load maps (.npz) » la rouvre
+    depuis l'onglet Maps, sans Abaqus et sans les bundles d'origine
+    (`gui/sensitivity/map_io.py`, `format_version` 1, `allow_pickle=False`).
+  - Cocher un champ ROI conserve désormais les bundles pour **les deux**
+    méthodes. Sous Morris le champ n'est pas promu en QoI scalaire (la
+    construction SSD reste jacobien-only) : il est cartographié.
+  - **Limite factuelle** : les champs du bundle sont **par élément** —
+    `abaqus_scripts/cel_results.py` extrait EVF/TEMP/S/PEEQ au CENTROID et
+    moyenne V (nodal) sur les nœuds de chaque élément. Une cartographie
+    réellement **nodale** demanderait de modifier l'extracteur ODB et le
+    format du bundle ; ce n'est pas fait.
 - **Ajouts UI (session courante)** :
   - Onglet Sensitivity : la colonne **Ref** est resynchronisée avec le
     Numerical Model courant. `showEvent` n'étant pas fiable pour une page
@@ -209,7 +242,11 @@ Aujourd'hui : placeholder "Inverse identification — coming later".
 
 - `gui/sensitivity/` : `param_registry.py`, `jacobian_plan.py`,
   `field_metrics.py`, `runner_core.py`, `run_worker.py`, `morris_plan.py`,
-  `export_results.py`.
+  `export_results.py`, `map_io.py` (cartes : conteneur, réduction pour
+  l'affichage, format `.npz`).
+- `gui/widgets/sensitivity_map_panel.py` : viewer des cartographies
+  (sélecteurs sortie / paramètre / quantité, frame ou agrégation,
+  save/load `.npz`, fenêtre détachée).
 - `gui/results/` : `qoi.py`, lecture `ResultsBundle` (`reader.py`),
   `fake_builder.py` (option `field_scale` pour le dry-run).
 - `gui/core/sta_parser.py` (parseur du `.sta` ; était listé à tort sous

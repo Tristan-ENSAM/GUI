@@ -29,6 +29,7 @@ import numpy as np
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import field_metrics as fm
+from gui.sensitivity import map_io as mio
 from gui.core.logging_util import log_swallowed
 
 
@@ -165,6 +166,122 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None):
     return out
 
 
+def morris_field_maps(plan, bundles, field_vars, instance=None):
+    """Per-element, per-frame MORRIS maps for a Morris plan.
+
+    The map counterpart of the scalar mu*/sigma: instead of reducing each
+    run to one number and screening that, the elementary effects are formed
+    element by element, so every element carries its own indices.
+
+    Returns {var: {param_path: {"mu_star": S, "sigma": S, "mu": S}}} where
+    each S is a (n_frames, n_elements) array. Definitions and the grid step
+    follow SALib, so a map and the scalar table are on the same scale — see
+    field_metrics.elementwise_morris_stats.
+
+    `bundles` are the kept run bundles, ordered like plan.X's rows; a
+    missing run (None) removes its elementary effects from the average
+    instead of failing. Returns {} if nothing usable is available."""
+    if not bundles:
+        return {}
+    ref = next((b for b in bundles if b is not None), None)
+    if ref is None:
+        return {}
+    inst = instance or eulerian_instance(ref)
+    paths = list(plan.param_paths)
+    out = {}
+    for var in field_vars:
+        fields = []
+        for b in bundles:
+            if b is None:
+                fields.append(None)
+                continue
+            try:
+                fields.append(b.field(inst, var))
+            except Exception:
+                log_swallowed("reading field %r for a Morris map" % var,
+                              level=logging.DEBUG)
+                fields.append(None)
+        if all(f is None for f in fields):
+            continue
+        try:
+            stats = fm.elementwise_morris_stats(fields, plan.X,
+                                                plan.num_levels)
+        except Exception:
+            log_swallowed("computing the Morris map for %r" % var,
+                          level=logging.WARNING)
+            continue
+        per_param = {}
+        for i, p in enumerate(paths):
+            per_param[p] = {"mu_star": stats["mu_star"][i],
+                            "sigma": stats["sigma"][i],
+                            "mu": stats["mu"][i]}
+        out[var] = per_param
+    return out
+
+
+def build_field_maps(plan, plan_kind, bundles, field_vars, instance=None):
+    """Per-element sensitivity maps for either method, in one shape.
+
+    Returns {var: {param_path: {quantity: (n_frames, n_elements) array}}}:
+    quantity "dFdtheta" for a Jacobian plan, "mu_star"/"sigma"/"mu" for a
+    Morris plan. The cartography always uses the scheme of the study that
+    produced it — the two are not interchangeable."""
+    if not field_vars or not bundles:
+        return {}
+    if plan_kind == "morris":
+        return morris_field_maps(plan, bundles, field_vars, instance=instance)
+    if plan_kind == "jacobian":
+        raw = jacobian_field_maps(plan, bundles, field_vars, instance=instance)
+        return {var: {p: {"dFdtheta": S} for p, S in per.items()}
+                for var, per in raw.items()}
+    return {}
+
+
+def build_map_set(plan, plan_kind, bundles, field_vars, instance=None,
+                  param_labels=None, param_units=None, field_labels=None,
+                  meta=None):
+    """Assemble a `map_io.SensitivityMapSet` from a finished run.
+
+    Computes the maps for `plan_kind`, takes the mesh from the first usable
+    bundle and records the labels the viewer needs. Returns None when no map
+    could be produced (wrong method, no field ticked, no bundle kept, or a
+    bundle without a readable mesh) — the caller reports that to the user."""
+    if not field_vars or not bundles:
+        return None
+    ref = next((b for b in bundles if b is not None), None)
+    if ref is None:
+        return None
+    inst = instance or eulerian_instance(ref)
+    if inst is None:
+        return None
+    maps = build_field_maps(plan, plan_kind, bundles, field_vars,
+                            instance=inst)
+    if not maps:
+        return None
+    try:
+        nodes_xy, faces = mio.mesh_from_bundle(ref, inst)
+    except Exception:
+        log_swallowed("reading the mesh for the sensitivity maps",
+                      level=logging.WARNING)
+        return None
+    try:
+        times = np.asarray(ref.times, dtype=float)
+    except Exception:
+        log_swallowed("reading frame times for the sensitivity maps",
+                      level=logging.DEBUG)
+        times = np.zeros(0)
+    return mio.SensitivityMapSet(
+        method=plan_kind,
+        maps=maps,
+        field_vars=[v for v in field_vars if v in maps],
+        param_paths=list(plan.param_paths),
+        nodes_xy=nodes_xy, faces=faces, times=times,
+        param_labels=dict(param_labels or {}),
+        param_units=dict(param_units or {}),
+        field_labels=dict(field_labels or {}),
+        meta=dict(meta or {}))
+
+
 @dataclass
 class RunResult:
     plan_kind: str                 # "morris" | "jacobian"
@@ -207,8 +324,11 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
     """
     if plan_kind not in ("morris", "jacobian"):
         raise ValueError("plan_kind must be 'morris' or 'jacobian'")
+    # Scalar field-discrepancy QoI stay a Jacobian construction; the
+    # per-element MAPS are produced for either method, and both need the
+    # bundles kept.
     want_fields = bool(field_vars) and plan_kind == "jacobian"
-    if want_fields:
+    if field_vars:
         keep_bundles = True
     mod = jac if plan_kind == "jacobian" else mp
     configs = mod.plan_to_configs(base_cfg, plan)

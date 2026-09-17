@@ -135,67 +135,145 @@ class TestJacobianFieldMaps:
         assert rc.jacobian_field_maps(plan, [None], ["S_VM"]) == {}
 
 
+
+
 # ---------------------------------------------------------------------------
-# Sensitivity tab — Maps UI wiring (headless)
+# Morris — per-element elementary effects
 # ---------------------------------------------------------------------------
-class TestSensitivityMapsUI:
+def _morris_plan_2params():
+    """A hand-built 2-parameter, 2-trajectory Morris plan.
 
-    def _bundles_and_plan(self, tmp_path):
-        from gui.results.fake_builder import build_fake_results
-        from gui.results.reader import ResultsBundle
-        bundles = []
-        for k in range(3):
-            _, npz = build_fake_results(tmp_path / ("j%d.results.npz" % k),
-                                        n_frames=3, n_grid_x=5, n_grid_y=4)
-            bundles.append(ResultsBundle.load(npz))
-        spec = pr.spec_for("interaction.friction_coeff")
-        plan = jac.build_plan([(spec, 0.3, 0.1, False)], scheme="central")
-        order = [None] * plan.n_runs
-        order[0] = bundles[0]
-        order[plan.idx_plus[0]] = bundles[1]
-        order[plan.idx_minus[0]] = bundles[2]
-        return bundles, plan, order
+    Built by instantiating MorrisPlan directly rather than through
+    build_plan, so these tests do not need SALib (an optional dependency
+    of the project). The trajectory layout is the one SALib produces: blocks
+    of k+1 rows, one parameter moving at a time.
+    """
+    from gui.sensitivity.morris_plan import MorrisPlan
+    specs = [pr.spec_for("interaction.friction_coeff"),
+             pr.spec_for("bcs.cutting_speed")]
+    X = np.array([
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0],      # trajectory 1 (both up)
+        [1.0, 1.0], [0.0, 1.0], [0.0, 0.0],      # trajectory 2 (both down)
+    ], dtype=float)
+    return MorrisPlan(specs=specs, bounds=[(0.0, 1.0), (0.0, 1.0)], N=2,
+                      num_levels=4, problem={"num_vars": 2,
+                                             "names": [s.path for s in specs],
+                                             "bounds": [[0, 1], [0, 1]]}, X=X)
 
-    def test_maps_populate_and_render(self, qapp, tmp_path):
-        from gui.tabs.sensitivity_tab import SensitivityTab
-        from gui.core.model_config import ModelConfig
-        bundles, plan, order = self._bundles_and_plan(tmp_path)
-        tab = SensitivityTab(ModelConfig())
-        tab.plan = plan
-        tab.plan_kind = "jacobian"
-        tab._field_checks["EVF"].setChecked(True)
-        res = rc.RunResult(plan_kind="jacobian", qoi_ids=[],
-                           param_paths=list(plan.param_paths),
-                           Y=np.zeros((plan.n_runs, 0)), analyses={},
-                           failures=[], bundles=order)
-        tab._build_field_maps(res)
-        assert tab.cb_map_param.count() == 1
-        assert tab.cb_map_field.count() == 1            # EVF only
-        assert tab._map_n_frames == 3
-        assert tab._map_mesh_set is True
-        # signed/magnitude x aggregate combinations must not raise
-        for signed in (True, False):
-            for agg in (True, False):
-                tab.chk_map_signed.setChecked(signed)
-                tab.chk_map_aggregate.setChecked(agg)
-                tab._refresh_map()
-        # the frame slider is disabled while aggregating, enabled otherwise
-        tab.chk_map_aggregate.setChecked(True)
-        assert tab.sld_map_frame.isEnabled() is False
-        tab.chk_map_aggregate.setChecked(False)
-        assert tab.sld_map_frame.isEnabled() is True
-        tab.sld_map_frame.setValue(0)
-        tab._refresh_map()
-        for b in bundles:
-            b.close()
 
-    def test_morris_clears_maps(self, qapp):
-        from gui.tabs.sensitivity_tab import SensitivityTab
-        from gui.core.model_config import ModelConfig
-        tab = SensitivityTab(ModelConfig())
-        res = rc.RunResult(plan_kind="morris", qoi_ids=[], param_paths=[],
-                           Y=np.zeros((1, 0)), analyses={}, failures=[],
-                           bundles=None)
-        tab._build_field_maps(res)
-        assert tab._field_maps == {}
-        assert tab.cb_map_param.isEnabled() is False
+class TestElementwiseMorrisStats:
+
+    def _linear_fields(self, plan, a, b, n_frames=2):
+        """F_e = a_e*x0 + b_e*x1, one (n_frames, n_elem) array per run."""
+        return [np.tile(a * row[0] + b * row[1], (n_frames, 1))
+                for row in plan.X]
+
+    def test_recovers_per_element_slopes(self):
+        plan = _morris_plan_2params()
+        a = np.array([1.0, -2.0, 0.0, 0.5])
+        b = np.array([0.0, 3.0, -1.0, 0.25])
+        fields = self._linear_fields(plan, a, b)
+        st = fm.elementwise_morris_stats(fields, plan.X, plan.num_levels)
+        step = fm.morris_grid_step(plan.num_levels)
+        assert st["mu"].shape == (2, 2, 4)
+        # Both trajectories see the same slope -> mu = slope/step, sigma = 0.
+        assert np.allclose(st["mu"][0, 0], a / step)
+        assert np.allclose(st["mu"][1, 0], b / step)
+        assert np.allclose(st["mu_star"][0, 0], np.abs(a) / step)
+        assert np.allclose(st["sigma"][0, 0], 0.0, atol=1e-9)
+        assert np.all(st["n_eff"] == 2)
+
+    def test_grid_step_is_salib_convention(self):
+        # Delta = p / (2*(p-1)) -- SALib 1.5.2 _compute_delta.
+        assert fm.morris_grid_step(4) == pytest.approx(4 / 6.0)
+        assert fm.morris_grid_step(6) == pytest.approx(6 / 10.0)
+        with pytest.raises(ValueError):
+            fm.morris_grid_step(1)
+
+    def test_matches_salib_on_a_scalar_model(self):
+        """A 1x1 'field' must reproduce SALib's scalar mu*/sigma exactly:
+        the map and the ranking table are then on the same scale."""
+        pytest.importorskip("SALib")
+        from gui.sensitivity import morris_plan as mp
+        plan = _morris_plan_2params()
+        rng = np.random.default_rng(0)
+        Y = np.array([2.0 * r[0] - 0.5 * r[1] + 0.1 * rng.random()
+                      for r in plan.X])
+        fields = [np.array([[y]]) for y in Y]
+        st = fm.elementwise_morris_stats(fields, plan.X, plan.num_levels)
+        si = mp.analyze(plan, Y)
+        for i in range(2):
+            assert st["mu"][i, 0, 0] == pytest.approx(si["mu"][i])
+            assert st["mu_star"][i, 0, 0] == pytest.approx(si["mu_star"][i])
+            assert st["sigma"][i, 0, 0] == pytest.approx(si["sigma"][i])
+
+    def test_missing_run_drops_only_its_effects(self):
+        plan = _morris_plan_2params()
+        a = np.array([1.0, -2.0, 0.0, 0.5])
+        b = np.array([0.0, 3.0, -1.0, 0.25])
+        fields = self._linear_fields(plan, a, b)
+        fields[1] = None                     # kills both effects of traj. 1
+        st = fm.elementwise_morris_stats(fields, plan.X, plan.num_levels)
+        step = fm.morris_grid_step(plan.num_levels)
+        assert np.all(st["n_eff"][0] == 1)   # param 0: one effect left
+        assert np.allclose(st["mu"][0, 0], a / step)   # still the right slope
+        assert np.all(np.isnan(st["sigma"][0]))        # ddof=1 needs 2 samples
+
+    def test_nan_element_does_not_poison_its_neighbours(self):
+        plan = _morris_plan_2params()
+        a = np.array([1.0, -2.0, 0.0, 0.5])
+        b = np.zeros(4)
+        fields = self._linear_fields(plan, a, b)
+        fields[1] = fields[1].copy()
+        fields[1][0, 2] = np.nan
+        st = fm.elementwise_morris_stats(fields, plan.X, plan.num_levels)
+        step = fm.morris_grid_step(plan.num_levels)
+        assert st["n_eff"][0, 0, 2] == 1                 # one effect lost
+        assert st["n_eff"][0, 0, 0] == 2                 # neighbour intact
+        assert st["mu"][0, 0, 0] == pytest.approx(a[0] / step)
+
+    def test_bad_design_raises(self):
+        plan = _morris_plan_2params()
+        fields = [np.ones((1, 2)) for _ in range(5)]     # 5 rows, k+1 = 3
+        with pytest.raises(ValueError):
+            fm.elementwise_morris_stats(fields, plan.X[:5], plan.num_levels)
+        with pytest.raises(ValueError):
+            fm.elementwise_morris_stats([None] * 6, plan.X, plan.num_levels)
+
+
+class TestMorrisFieldMaps:
+
+    def test_maps_carry_the_three_indices(self):
+        plan = _morris_plan_2params()
+        a = np.array([1.0, -2.0, 0.0, 0.5])
+        bundles = [_FakeFieldBundle({"TEMP": np.tile(a * r[0], (2, 1))})
+                   for r in plan.X]
+        maps = rc.morris_field_maps(plan, bundles, ["TEMP"], instance="Euler")
+        per = maps["TEMP"]["interaction.friction_coeff"]
+        assert set(per) == {"mu_star", "sigma", "mu"}
+        assert per["mu_star"].shape == (2, 4)
+
+    def test_build_field_maps_follows_the_method(self):
+        plan = _morris_plan_2params()
+        bundles = [_FakeFieldBundle({"EVF": np.ones((2, 4))}) for _ in plan.X]
+        out = rc.build_field_maps(plan, "morris", bundles, ["EVF"],
+                                  instance="Euler")
+        assert set(out["EVF"]["interaction.friction_coeff"]) == \
+            {"mu_star", "sigma", "mu"}
+
+        jplan = jac.build_plan(
+            [(pr.spec_for("interaction.friction_coeff"), 0.3, 0.1, False)],
+            scheme="central")
+        jb = [None] * jplan.n_runs
+        jb[0] = _FakeFieldBundle({"EVF": np.ones((2, 4))})
+        jb[jplan.idx_plus[0]] = _FakeFieldBundle({"EVF": np.ones((2, 4))})
+        jb[jplan.idx_minus[0]] = _FakeFieldBundle({"EVF": np.zeros((2, 4))})
+        out = rc.build_field_maps(jplan, "jacobian", jb, ["EVF"],
+                                  instance="Euler")
+        assert list(out["EVF"]["interaction.friction_coeff"]) == ["dFdtheta"]
+
+    def test_unknown_method_returns_empty(self):
+        plan = _morris_plan_2params()
+        bundles = [_FakeFieldBundle({"EVF": np.ones((2, 4))}) for _ in plan.X]
+        assert rc.build_field_maps(plan, "sobol", bundles, ["EVF"]) == {}
+        assert rc.build_field_maps(plan, "morris", bundles, []) == {}

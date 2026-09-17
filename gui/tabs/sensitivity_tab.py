@@ -11,10 +11,15 @@ Lets the user:
 
 Running the plan and plotting mu*/sigma come next (Lots 2c / 2d). The
 generated plan is kept on the tab (`self.plan`) for the runner to pick up.
+
+Ticking a ROI field also makes the run keep every results bundle, from
+which the *Maps* tab builds the per-element CARTOGRAPHY: the sensitivity
+of each element instead of one number averaged over the whole ROI. The
+map always uses the scheme of the study that produced it (dF/dtheta for
+the Jacobian, mu*/sigma/mu for Morris) — see gui/sensitivity/map_io.py
+and gui/widgets/sensitivity_map_panel.py.
 """
 from __future__ import annotations
-
-import numpy as np
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
@@ -25,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QCheckBox, QPlainTextEdit, QAbstractItemView, QSplitter, QComboBox,
-    QProgressBar, QTabWidget, QFileDialog, QSlider,
+    QProgressBar, QTabWidget, QFileDialog,
 )
 from PySide6.QtCore import QThread, QTimer
 
@@ -35,7 +40,7 @@ from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
 from gui.sensitivity.run_worker import SensitivityRunWorker
-from gui.widgets.field_viewer import FieldViewer
+from gui.widgets.sensitivity_map_panel import SensitivityMapPanel
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
@@ -53,6 +58,11 @@ _DEFAULT_QOIS = ("Fx_mean", "Fy_mean", "T_max")
 _EXCLUDED_CATEGORIES = {"Géométrie outil", "Géométrie pièce"}
 _EXCLUDED_PATHS = {"elem_size"}
 
+# Eulerian ROI fields the extractor writes (abaqus_scripts/cel_results.py
+# extracts EVF, TEMP and V), with the label shown in the UI. These are the
+# outputs a sensitivity map can be drawn for.
+_FIELD_LABELS = {"EVF": "EVF (chip)", "V": "V (flow)", "TEMP": "TEMP"}
+
 
 class SensitivityTab(QWidget):
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
@@ -68,12 +78,9 @@ class SensitivityTab(QWidget):
         self._thread = None              # QThread for the run worker
         self._worker = None              # SensitivityRunWorker
         self._last_result = None         # rc.RunResult
-        # Per-element sensitivity maps: {var: {param_path: S (n_frames,n_elem)}}
-        self._field_maps = {}
-        self._map_param_paths = []       # ordered, matches cb_map_param
-        self._map_field_vars = []        # ordered, matches cb_map_field
-        self._map_n_frames = 0
-        self._map_mesh_set = False
+        # Per-element sensitivity maps (map_io.SensitivityMapSet), shown in
+        # the Maps tab and saveable/loadable as a .npz study.
+        self._map_set = None
         self._per_run_sec = None         # measured/estimated wall-clock per run
         self._per_frame_sec = None       # measured wall-clock between two frames
         self._cur_frame = None           # (current, total) for the running run
@@ -179,14 +186,18 @@ class SensitivityTab(QWidget):
             qg.addWidget(cb, i // 2, i % 2)
         bl.addWidget(qoi_box)
 
-        # Field QoI: screen how much each parameter moves whole Eulerian
-        # fields in the ROI (SSD vs the base run). Jacobian only.
-        field_box = QGroupBox("Field QoI in the ROI (SSD vs base run)")
+        # ROI fields: ticking one keeps every run's bundle, which feeds the
+        # per-element sensitivity MAPS (both methods) and, with the Jacobian,
+        # the scalar field QoI (SSD vs the base run).
+        field_box = QGroupBox(
+            "ROI fields to map (Jacobian: also screened as field QoI, "
+            "SSD vs base run)")
         fg = QHBoxLayout(field_box)
         self._field_checks = {}
-        for var, label in (("EVF", "EVF (chip)"), ("V", "V (flow)"),
-                           ("TEMP", "TEMP")):
+        for var, label in _FIELD_LABELS.items():
             cb = QCheckBox(label)
+            cb.setToolTip("Keep this field to build per-element sensitivity "
+                          "maps in the Maps tab.")
             self._field_checks[var] = cb
             fg.addWidget(cb)
         fg.addStretch(1)
@@ -262,52 +273,13 @@ class SensitivityTab(QWidget):
         cv.addWidget(self._canvas, 1)
         self.tabs_out.addTab(chart_w, "Chart")
 
-        # ---- Sensitivity maps tab (per-element dF/dparam) ---------------
-        # Reuses the Results FieldViewer. Two dropdowns pick the (parameter x
-        # field) map; a toggle switches signed vs magnitude; a frame slider
-        # scrubs time, with an aggregate option (mean if signed, RMS if
-        # magnitude) over all frames.
-        maps_w = QWidget(); mvl = QVBoxLayout(maps_w)
-        mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("Parameter:"))
-        self.cb_map_param = QComboBox()
-        mrow.addWidget(self.cb_map_param)
-        mrow.addWidget(QLabel("Field:"))
-        self.cb_map_field = QComboBox()
-        mrow.addWidget(self.cb_map_field)
-        self.chk_map_signed = QCheckBox("Signed")
-        self.chk_map_signed.setChecked(True)
-        self.chk_map_signed.setToolTip(
-            "Signed: central difference (F+ - F-)/(2\u03b4) per element, shows "
-            "direction (diverging colour). Off: magnitude |dF/d\u03b8| (sequential).")
-        mrow.addWidget(self.chk_map_signed)
-        self.chk_map_aggregate = QCheckBox("Aggregate over time")
-        self.chk_map_aggregate.setToolTip(
-            "Reduce all frames to one map: time-mean if Signed, time-RMS if "
-            "magnitude.")
-        mrow.addWidget(self.chk_map_aggregate)
-        mrow.addWidget(QLabel("Frame:"))
-        self.sld_map_frame = QSlider(Qt.Horizontal)
-        self.sld_map_frame.setMinimum(0); self.sld_map_frame.setMaximum(0)
-        self.sld_map_frame.setEnabled(False)
-        mrow.addWidget(self.sld_map_frame, 1)
-        self.lbl_map_frame = QLabel("-")
-        mrow.addWidget(self.lbl_map_frame)
-        mvl.addLayout(mrow)
-        self.fv_map = FieldViewer()
-        mvl.addWidget(self.fv_map, 1)
-        self.lbl_map_hint = QLabel(
-            "Run a Jacobian plan with at least one ROI field ticked to get "
-            "per-element sensitivity maps.")
-        self.lbl_map_hint.setStyleSheet("color: #6b7280;")
-        mvl.addWidget(self.lbl_map_hint)
-        self.tabs_out.addTab(maps_w, "Maps")
-        # Wire map controls (no-op until maps are computed).
-        self.cb_map_param.currentIndexChanged.connect(self._refresh_map)
-        self.cb_map_field.currentIndexChanged.connect(self._refresh_map)
-        self.chk_map_signed.toggled.connect(self._refresh_map)
-        self.chk_map_aggregate.toggled.connect(self._on_map_aggregate_toggled)
-        self.sld_map_frame.valueChanged.connect(self._refresh_map)
+        # ---- Sensitivity maps tab (per-element cartography) -------------
+        # The panel owns the viewer, the selectors (output field, perturbed
+        # parameter, quantity), the frame/aggregate controls and the .npz
+        # save/load of the whole study. It draws whatever method produced
+        # the maps: dF/dtheta for a Jacobian plan, mu*/sigma/mu for Morris.
+        self.map_panel = SensitivityMapPanel()
+        self.tabs_out.addTab(self.map_panel, "Maps")
 
         bl.addStretch(1)          # keep the controls top-aligned in their column
 
@@ -625,13 +597,10 @@ class SensitivityTab(QWidget):
             qois = self._selected_qoi_specs()
             field_vars = self._selected_field_vars()
             if method == "morris":
-                # Morris screens scalar QoI globally (mu*, sigma). The field
-                # (ROI) sensitivity is a Jacobian-only construction.
-                if field_vars:
-                    self._warn("Field (ROI) screening is only available with "
-                               "the Jacobian method; ignoring the field "
-                               "selection for Morris.")
-                    field_vars = []
+                # Morris screens scalar QoI globally (mu*, sigma). A ticked
+                # ROI field does not become a scalar QoI here -- the SSD
+                # construction is Jacobian-only -- but it IS mapped element by
+                # element (mu*/sigma/mu per element) in the Maps tab.
                 if not qois:
                     self._warn("Tick at least one scalar QoI for Morris.")
                     return
@@ -667,20 +636,28 @@ class SensitivityTab(QWidget):
         self.plan = plan
         self.plan_kind = method
         self.selected_qois = qois
-        qoi_names = [q.id for q in qois] + ["%s[field]" % v for v in field_vars]
+        if method == "morris":
+            qoi_names = [q.id for q in qois]
+            map_note = (" ROI fields mapped per element: %s."
+                        % ", ".join(field_vars)) if field_vars else ""
+        else:
+            qoi_names = [q.id for q in qois] + ["%s[field]" % v
+                                                for v in field_vars]
+            map_note = (" ROI fields also mapped per element: %s."
+                        % ", ".join(field_vars)) if field_vars else ""
         self.status.setStyleSheet("color: #15803d;")
         if method == "morris":
             self.status.setText(
                 "Morris plan ready: %d parameters, N=%d trajectories, "
                 "%d runs, %d QoI (%s). Ready for the run step." % (
                     plan.k, plan.N, plan.n_runs, len(qoi_names),
-                    ", ".join(qoi_names) if qoi_names else "—"))
+                    ", ".join(qoi_names) if qoi_names else "—") + map_note)
         else:
             self.status.setText(
                 "Jacobian (%s FD) plan ready: %d parameters, %d runs, %d QoI "
                 "(%s). Ready for the run step." % (
                     self._scheme(), plan.k, plan.n_runs, len(qoi_names),
-                    ", ".join(qoi_names) if qoi_names else "—"))
+                    ", ".join(qoi_names) if qoi_names else "—") + map_note)
         self._show_preview(plan)
         self.btn_run.setEnabled(True)
         self.tabs_out.setCurrentWidget(self.preview)
@@ -920,170 +897,76 @@ class SensitivityTab(QWidget):
         self.tabs_out.setCurrentWidget(self.results_table)
 
     # =====================================================================
-    # Per-element sensitivity maps
+    # Per-element sensitivity maps (cartography)
     # =====================================================================
-    def _clear_map(self):
-        self._map_mesh_set = False
-        try:
-            self.fv_map.clear()
-        except Exception:
-            log_swallowed("clearing the sensitivity-map viewer",
-                          level=logging.DEBUG)
-
-    def _set_map_controls_enabled(self, on):
-        for w in (self.cb_map_param, self.cb_map_field, self.chk_map_signed,
-                  self.chk_map_aggregate):
-            w.setEnabled(on)
-        self.sld_map_frame.setEnabled(
-            on and not self.chk_map_aggregate.isChecked())
-
     def _build_field_maps(self, result):
-        """Compute per-element sensitivity maps from the kept run bundles and
-        populate the Maps tab. No-op (and clears) unless this was a Jacobian
-        run with ROI field(s) and bundles were kept."""
-        self._field_maps = {}
-        self._map_param_paths = []
-        self._map_field_vars = []
-        self._map_n_frames = 0
+        """Build the sensitivity maps from the kept run bundles and hand them
+        to the Maps panel.
+
+        The cartography follows the method that was run: dF/dtheta per element
+        for a Jacobian plan, mu*/sigma/mu per element for a Morris plan. It
+        needs at least one ROI field ticked (that is what makes the runner
+        keep the bundles). When nothing can be mapped the panel is cleared
+        with a hint saying why — a previously LOADED study is replaced too, so
+        the tab never shows maps that do not belong to the last run."""
+        self._map_set = None
         field_vars = self._selected_field_vars()
         bundles = getattr(result, "bundles", None)
         plan = getattr(self, "plan", None)
-        if (result.plan_kind != "jacobian" or not field_vars
-                or not bundles or plan is None):
-            self._clear_map()
-            self._set_map_controls_enabled(False)
-            self.lbl_map_hint.setText(
-                "Run a Jacobian plan with at least one ROI field ticked to "
-                "get per-element sensitivity maps.")
+        if not field_vars or not bundles or plan is None:
+            self.map_panel.set_map_set(
+                None,
+                hint="Tick at least one ROI field before running to get "
+                     "per-element sensitivity maps (the run then keeps each "
+                     "bundle). A saved study can be re-opened with "
+                     "\u201cLoad maps (.npz)\u201d.")
             return
-        ref = bundles[0] if bundles else None
-        inst = rc.eulerian_instance(ref) if ref is not None else None
         try:
-            maps = rc.jacobian_field_maps(plan, bundles, field_vars,
-                                          instance=inst)
+            mapset = rc.build_map_set(
+                plan, result.plan_kind, bundles, field_vars,
+                param_labels={p: pr.spec_for(p).label
+                              for p in plan.param_paths},
+                param_units={p: pr.spec_for(p).unit_str(self._temp_unit())
+                             for p in plan.param_paths},
+                field_labels=dict(_FIELD_LABELS),
+                meta=self._map_meta(result))
         except Exception as e:
-            log_swallowed("computing sensitivity maps", level=logging.WARNING)
-            self._clear_map(); self._set_map_controls_enabled(False)
-            self.lbl_map_hint.setText("Could not compute maps: %s" % e)
-            return
-        if not maps or not self._set_map_mesh(ref, inst):
-            self._clear_map(); self._set_map_controls_enabled(False)
-            self.lbl_map_hint.setText(
-                "No field maps were produced (check the mesh / fields).")
-            return
-        self._field_maps = maps
-        self._map_field_vars = list(field_vars)
-        self._map_param_paths = list(plan.param_paths)
-        for per in maps.values():
-            for S in per.values():
-                arr = np.asarray(S)
-                if arr.ndim == 2 and arr.size:
-                    self._map_n_frames = arr.shape[0]
-                    break
-            if self._map_n_frames:
-                break
-        # Populate dropdowns (block signals to avoid premature redraws).
-        self.cb_map_param.blockSignals(True)
-        self.cb_map_field.blockSignals(True)
-        self.cb_map_param.clear()
-        for p in self._map_param_paths:
-            try:
-                self.cb_map_param.addItem(pr.spec_for(p).label, p)
-            except Exception:
-                self.cb_map_param.addItem(p, p)
-        self.cb_map_field.clear()
-        self.cb_map_field.addItems(self._map_field_vars)
-        self.cb_map_param.blockSignals(False)
-        self.cb_map_field.blockSignals(False)
-        self.sld_map_frame.blockSignals(True)
-        self.sld_map_frame.setMinimum(0)
-        self.sld_map_frame.setMaximum(max(0, self._map_n_frames - 1))
-        self.sld_map_frame.setValue(max(0, self._map_n_frames - 1))
-        self.sld_map_frame.blockSignals(False)
-        self._set_map_controls_enabled(True)
-        self.lbl_map_hint.setText(
-            "%d parameter(s) \u00d7 %d field(s), %d frame(s). "
-            "Signed = central difference; magnitude = |dF/d\u03b8|."
-            % (len(self._map_param_paths), len(self._map_field_vars),
-               self._map_n_frames))
-        self._refresh_map()
-
-    def _set_map_mesh(self, bundle, inst):
-        """Push the base-run mesh into fv_map. Mirrors ResultsTab: angle-order
-        each element's projected nodes into a 2D footprint."""
-        if bundle is None or inst is None:
-            return False
-        try:
-            info = bundle.instance(inst)
-            nodes = bundle.nodes_init(info.name)        # (n_nodes, 3)
-            elems = bundle.elements(info.name)           # (n_elem, 8)
-            nodes_xy = np.asarray(nodes)[:, :2]
-            conn = np.asarray(elems)
-            P = nodes_xy[conn]                           # (n_elem, n_loc, 2)
-            c = P.mean(axis=1, keepdims=True)
-            ang = np.arctan2(P[:, :, 1] - c[:, :, 1], P[:, :, 0] - c[:, :, 0])
-            order = np.argsort(ang, axis=1)
-            face_idx = np.take_along_axis(conn, order, axis=1)
-            self.fv_map.set_mesh(nodes_xy, face_idx)
-            self._map_mesh_set = True
-            return True
-        except Exception:
-            log_swallowed("building the sensitivity-map mesh",
+            log_swallowed("computing the sensitivity maps",
                           level=logging.WARNING)
-            return False
+            self.map_panel.set_map_set(
+                None, hint="Could not compute the maps: %s" % e)
+            return
+        if mapset is None:
+            self.map_panel.set_map_set(
+                None,
+                hint="No map could be built from this run (no usable bundle, "
+                     "field or mesh).")
+            return
+        self._map_set = mapset
+        self.map_panel.set_map_set(mapset)
 
-    def _on_map_aggregate_toggled(self, *_):
-        self.sld_map_frame.setEnabled(
-            bool(self._field_maps) and not self.chk_map_aggregate.isChecked())
-        self._refresh_map()
-
-    def _refresh_map(self, *_):
-        """Render the selected (parameter x field) map into fv_map, applying
-        the signed/magnitude toggle and the frame/aggregate choice."""
-        if not self._field_maps or not self._map_mesh_set:
-            return
-        var = self.cb_map_field.currentText()
-        p = self.cb_map_param.currentData()
-        if not var or p is None:
-            return
-        S = self._field_maps.get(var, {}).get(p)
-        if S is None:
-            return
-        S = np.asarray(S, dtype=float)
-        if S.ndim != 2 or S.size == 0:
-            return
-        signed = self.chk_map_signed.isChecked()
-        aggregate = self.chk_map_aggregate.isChecked()
-        if aggregate:
-            with np.errstate(invalid="ignore"):
-                if signed:
-                    values = np.nanmean(S, axis=0)             # keeps sign
-                    frame_txt = "mean over %d frames" % S.shape[0]
-                else:
-                    values = np.sqrt(np.nanmean(S * S, axis=0))   # >= 0
-                    frame_txt = "RMS over %d frames" % S.shape[0]
-            self.lbl_map_frame.setText("agg")
+    def _map_meta(self, result):
+        """What the .npz records about the run behind the maps."""
+        plan = self.plan
+        meta = {"plan_kind": result.plan_kind,
+                "n_runs": int(getattr(plan, "n_runs", 0)),
+                "failed_runs": list(getattr(result, "failures", [])),
+                "temp_unit": self._temp_unit()}
+        if result.plan_kind == "morris":
+            meta.update(N=int(getattr(plan, "N", 0)),
+                        num_levels=int(getattr(plan, "num_levels", 0)))
         else:
-            f = int(np.clip(self.sld_map_frame.value(), 0, S.shape[0] - 1))
-            row = S[f]
-            values = row if signed else np.abs(row)
-            frame_txt = "frame %d/%d" % (f, S.shape[0] - 1)
-            self.lbl_map_frame.setText("%d" % f)
-        finite = values[np.isfinite(values)]
-        if signed:
-            m = float(np.max(np.abs(finite))) if finite.size else 1.0
-            vmin, vmax, cmap = -m, m, "RdBu_r"
-        else:
-            vmax = float(np.max(finite)) if finite.size else 1.0
-            vmin, cmap = 0.0, "inferno"
+            meta.update(scheme=str(getattr(plan, "scheme", "")),
+                        deltas={p: float(d) for p, d in
+                                zip(plan.param_paths,
+                                    getattr(plan, "deltas", []))})
         try:
-            plabel = pr.spec_for(p).label
+            meta["workdir"] = str(self._run_workdir) if self._run_workdir \
+                else ""
         except Exception:
-            plabel = p
-        title = "dF/d(%s) \u00b7 %s \u2014 %s (%s)" % (
-            plabel, var, "signed" if signed else "|.|", frame_txt)
-        self.fv_map.set_values(values, vmin=vmin, vmax=vmax, cmap=cmap,
-                               title=title)
+            log_swallowed("recording the workdir in the map metadata",
+                          level=logging.DEBUG)
+        return meta
 
     def _on_export(self):
         if self._last_result is None:

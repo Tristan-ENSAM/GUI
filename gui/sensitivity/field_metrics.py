@@ -165,3 +165,131 @@ def elementwise_signed_sensitivity(base_field, plus_field, minus_field,
 
     a, b = _align(a, b)
     return (a - b) / denom
+
+
+# ---------------------------------------------------------------------------
+# Morris — per-element elementary effects
+# ---------------------------------------------------------------------------
+def morris_grid_step(num_levels) -> float:
+    """The Morris grid step Delta = p / (2*(p-1)) for p levels.
+
+    This is SALib's convention (`SALib.analyze.morris._compute_delta`,
+    verified against SALib 1.5.2): the elementary effect is divided by this
+    DIMENSIONLESS step in the unit hypercube, not by the physical increment.
+    Reproducing it here keeps the per-element maps on the same scale as the
+    scalar mu*/sigma that `morris_plan.analyze` returns through SALib."""
+    p = int(num_levels)
+    if p < 2:
+        raise ValueError("num_levels must be >= 2")
+    return p / (2.0 * (p - 1.0))
+
+
+def _fit(arr, shape):
+    """Return `arr` cropped/NaN-padded to `shape` (2D). A run that produced
+    fewer frames than the reference is not dropped: its overlapping block
+    still contributes, the rest counts as missing."""
+    a = np.asarray(arr, dtype=float)
+    if a.shape == shape:
+        return a
+    out = np.full(shape, np.nan, dtype=float)
+    sl = tuple(slice(0, min(s1, s2)) for s1, s2 in zip(a.shape, shape))
+    out[sl] = a[sl]
+    return out
+
+
+def elementwise_morris_stats(fields, X, num_levels):
+    """Per-element, per-frame Morris statistics for every parameter.
+
+    The map counterpart of the scalar Morris indices: instead of reducing a
+    run to one number before computing the elementary effects, the effects
+    are formed FIELD BY FIELD, so every element keeps its own mu*, sigma
+    and mu.
+
+    Parameters
+    ----------
+    fields : list
+        One (n_frames, n_elements) array per run -- ordered exactly like the
+        rows of `X` -- or None for a run that produced no usable field.
+    X : (n_runs, k) array
+        The Morris sample matrix (``MorrisPlan.X``), in displayed units.
+    num_levels : int
+        Morris grid levels p, as passed to the sampler.
+
+    Returns
+    -------
+    dict with keys "mu", "mu_star", "sigma", "n_eff", each a (k, n_frames,
+    n_elements) array ("n_eff" is an int count of the elementary effects
+    that were usable at that element). Definitions follow SALib:
+
+        EE_i = sign(dx_i) * (F(after) - F(before)) / Delta      (Delta = grid step)
+        mu      = mean_t(EE)          mu_star = mean_t(|EE|)
+        sigma   = std_t(EE, ddof=1)
+
+    The trajectory layout is read from `X` itself: runs are taken in blocks
+    of (k+1) rows, and within a block the parameter that moved between two
+    consecutive rows is the one whose column changed. Nothing is assumed
+    about WHICH parameter moves first. A missing run (None) or a NaN entry
+    simply removes that elementary effect from the average at the elements
+    concerned -- it never poisons the whole map.
+
+    Raises ValueError if `X` is not a valid Morris design (n_runs must be a
+    multiple of k+1) or if no field array is usable."""
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D (n_runs, k) array")
+    n_runs, k = X.shape
+    if k < 1 or n_runs % (k + 1) != 0:
+        raise ValueError(
+            "X has %d rows for %d parameters; a Morris design needs a "
+            "multiple of k+1=%d rows." % (n_runs, k, k + 1))
+    if len(fields) < n_runs:
+        raise ValueError("fields has %d entries for %d runs"
+                         % (len(fields), n_runs))
+    ref = next((f for f in fields[:n_runs] if f is not None), None)
+    if ref is None:
+        raise ValueError("no usable field among the runs")
+    shape = np.asarray(ref, dtype=float).shape
+    if len(shape) != 2:
+        raise ValueError("field arrays must be 2D (n_frames, n_elements)")
+
+    step = morris_grid_step(num_levels)
+    n_traj = n_runs // (k + 1)
+    # One-pass accumulators (sum, sum of |.|, sum of squares, count) per
+    # parameter. Keeping every elementary effect would cost k*n_traj full
+    # fields; the accumulators cost 4.
+    s1 = np.zeros((k,) + shape, dtype=float)
+    sa = np.zeros((k,) + shape, dtype=float)
+    s2 = np.zeros((k,) + shape, dtype=float)
+    cnt = np.zeros((k,) + shape, dtype=np.int64)
+
+    for t in range(n_traj):
+        base = t * (k + 1)
+        for s in range(k):
+            ia, ib = base + s, base + s + 1
+            dx = X[ib] - X[ia]
+            j = int(np.argmax(np.abs(dx)))
+            if dx[j] == 0.0:
+                continue                      # no move: not an elementary effect
+            fa, fb = fields[ia], fields[ib]
+            if fa is None or fb is None:
+                continue
+            ee = (_fit(fb, shape) - _fit(fa, shape)) / step
+            if dx[j] < 0:
+                ee = -ee                      # always "effect of increasing"
+            m = np.isfinite(ee)
+            e = np.where(m, ee, 0.0)
+            s1[j] += e
+            sa[j] += np.abs(e)
+            s2[j] += e * e
+            cnt[j] += m
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        n = cnt.astype(float)
+        mu = np.where(cnt >= 1, s1 / np.where(n == 0, 1.0, n), np.nan)
+        mu_star = np.where(cnt >= 1, sa / np.where(n == 0, 1.0, n), np.nan)
+        # Sample variance (ddof=1, as SALib) from the accumulators. The
+        # subtraction can go slightly negative on round-off; clamp at 0.
+        var = (s2 - n * np.where(cnt >= 1, mu, 0.0) ** 2) / np.where(
+            cnt >= 2, n - 1.0, 1.0)
+        sigma = np.where(cnt >= 2, np.sqrt(np.clip(var, 0.0, None)), np.nan)
+    return {"mu": mu, "mu_star": mu_star, "sigma": sigma, "n_eff": cnt}
