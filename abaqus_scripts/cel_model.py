@@ -549,7 +549,7 @@ def create_interaction(model, RP, tool_elem, p):
     model.RigidBody(name='Rigid_Tool', refPointRegion=RP, bodyRegion=tool_elem)
 
 
-def create_step(model, assembly, RP, p):
+def create_step(model, RP, p):
     """Create the thermo-mechanical Explicit step and the FROZEN output requests."""
     sim_time = p["sim_time"]
     fo_variables = p["fo_variables"]
@@ -643,37 +643,30 @@ def create_step(model, assembly, RP, p):
         name='H-Output-2', createStepName='Cut',
         variables=PRESELECT, numIntervals=ho_n_intervals)
 
-    # Mass and volume over the Eulerian domain: a conservation check (is
-    # material leaving the domain, or being lost numerically?) that the model
-    # had no indicator for. Not filtered -- a conservation check must see the
-    # raw balance.
-    # MASS and EVOL -- NOT MASSEUL/VOLEUL. Those two names were never valid:
-    # from e9e967f onwards Abaqus rejected this request outright with
-    # "Invalid variables are specified in an output request", so the
-    # conservation check has never existed in a single ODB. The failure went
-    # unnoticed because the warning below travelled on a stdout that
-    # `abaqus cae noGUI=` discards (see run_simul._Tee).
+    # NO Eulerian mass/volume conservation history is requested. That is a
+    # deliberate outcome, not an omission -- three attempts failed and the
+    # evidence is recorded here so nobody re-invents a fourth.
     #
-    # The replacement is measured, not guessed. _review/masseul_probe.py put
-    # candidates to the real model one at a time: MASSEUL and VOLEUL are each
-    # invalid alone, MASS and EVOL are both accepted on this exact region, and
-    # an EVF control passed -- proving the region and the request shape were
-    # never at fault.
+    # 1. MASSEUL / VOLEUL, requested from e9e967f to 2026-09: not valid
+    #    variable names at all. Abaqus refused the whole request with
+    #    "Invalid variables are specified in an output request", so the check
+    #    existed in no ODB, ever. Nobody noticed because the warning went to a
+    #    stdout that `abaqus cae noGUI=` discards (see run_simul._Tee).
+    # 2. MASS: accepted by CAE when the model is built, then refused by the
+    #    solver's input processor -- "OUTPUT REQUEST MASS IS NOT AVAILABLE FOR
+    #    THIS TYPE OF ANALYSIS" in the .dat of job TEST_vol. Acceptance at
+    #    build time proves nothing about the solver.
+    # 3. EVOL: accepted at both stages, but written as
+    #    `*elementoutput, elset=ASSEMBLY_EULER`, i.e. ONE SERIES PER ELEMENT
+    #    over the whole Eulerian domain -- thousands of series for a quantity
+    #    that cannot vary anyway, the Eulerian mesh being fixed in space.
     #
-    # STILL UNVERIFIED, to check on the first real run: whether these arrive
-    # as ONE series for the set or one PER ELEMENT. The Eulerian set holds
-    # ~10^4 elements, so the per-element form would bloat the ODB and this
-    # request should then be narrowed or dropped rather than kept.
-    try:
-        model.HistoryOutputRequest(
-            name='H-Output-3', createStepName='Cut',
-            region=assembly.sets['Euler'],
-            variables=('MASS', 'EVOL'),
-            numIntervals=ho_n_intervals)
-    except Exception as exc:
-        # Non-fatal: losing the conservation check must not lose the run.
-        print("[WARNING] MASS/EVOL history not created: %s" % exc)
-        sys.stdout.flush()
+    # Getting a real conservation indicator would mean a different mechanism
+    # (integrated output over the Eulerian material surface is the lead the
+    # deck hints at, with `*surface, type=EULERIANMATERIAL`), not another
+    # variable name in this request. Until that is worked out against the
+    # documentation, requesting nothing beats requesting something that is
+    # silently empty or silently huge.
 
 
 def create_boundary_conditions(model, assembly, eul_instance, eul_set, tool_set, RP, p):
@@ -837,7 +830,7 @@ def build_model(model_cfg, run_cfg):
     eul_set, tool_set = create_mesh(assembly, eul_instance, tool_instance, p)
     RP, tool_elem = create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p)
     create_interaction(model, RP, tool_elem, p)
-    create_step(model, assembly, RP, p)
+    create_step(model, RP, p)
     create_boundary_conditions(model, assembly, eul_instance, eul_set, tool_set, RP, p)
     return model, p
 

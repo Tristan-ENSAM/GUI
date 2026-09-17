@@ -9,7 +9,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
-| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CORRIGÉ** — remplacés par `MASS`/`EVOL`, noms établis empiriquement. Forme de la sortie à vérifier au premier run |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CLOS — requête RETIRÉE.** `MASS` refusé par le solveur, `EVOL` écrit par élément et constant. Trois tentatives, aucune valable ; voie à explorer documentée |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
 | M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CORRIGÉ** — journal fichier `<job>.gui.log` suivi par la GUI |
 | m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
@@ -603,8 +603,42 @@ de masse eulérienne n'existe pas dans les résultats.**
   3. `MASS` et `EVOL` sont acceptés sur cette région exacte.
 
   `cel_model.create_step` demande désormais `variables=('MASS', 'EVOL')`.
-- **Ce qui reste NON VÉRIFIÉ, et je ne le masque pas** : qu'Abaqus accepte
-  ces noms ne dit pas ce qu'il écrira. Deux inconnues :
+- **PUIS INVALIDÉ PAR LE PREMIER RUN RÉEL (job `TEST_vol`, 17/09). Ma
+  correction était mauvaise et a été retirée.** Le `.dat` dit :
+
+  ```
+  ***WARNING: OUTPUT REQUEST MASS IS NOT AVAILABLE FOR THIS TYPE OF ANALYSIS
+
+  *output, history, timeinterval=6e-07
+    *elementoutput, elset=ASSEMBLY_EULER      <- EVOL, une série PAR ÉLÉMENT
+    *integratedoutput, elset=ASSEMBLY_EULER
+    *nodeoutput, nset=ASSEMBLY_RP
+  ```
+
+  - `MASS` : accepté par CAE à la construction, **refusé par le processeur
+    d'entrée du solveur** pour ce type d'analyse. Mon probe ne testait que la
+    première étape ; l'acceptation par CAE ne prouve rien sur le solveur.
+    C'est exactement la réserve que j'avais écrite dans le code — elle s'est
+    matérialisée.
+  - `EVOL` : accepté aux deux étapes, mais écrit en `*elementoutput` sur tout
+    le set eulérien, donc **une série par élément** — le gonflement que
+    j'avais signalé — pour une grandeur qui de toute façon ne peut pas varier,
+    le maillage eulérien étant fixe dans l'espace.
+- **DÉCISION : la requête est retirée**, et le raisonnement est consigné dans
+  `cel_model.create_step` pour que personne n'invente une quatrième tentative.
+  Trois essais (`MASSEUL`/`VOLEUL`, `MASS`, `EVOL`), aucun ne donne un
+  indicateur de conservation. Ne rien demander vaut mieux que demander
+  quelque chose de silencieusement vide ou silencieusement énorme.
+- **Piste pour qui reprendra le sujet** : le deck contient
+  `*surface, type=EULERIANMATERIAL, name=ASSEMBLY_EULER_EULER-1`, et Abaqus a
+  traduit une de mes variables en `*integratedoutput`. La voie est
+  probablement une sortie intégrée sur cette surface de matière eulérienne —
+  ce qui rejoint en partie l'intuition de Tristan sur l'integrated output —
+  et non un autre nom de variable dans une requête d'historique par région.
+  À travailler contre la doc, pas au jugé.
+
+- **Ce qui restait NON VÉRIFIÉ à l'époque, et que le run a tranché** : qu'Abaqus
+  accepte ces noms ne disait pas ce qu'il écrirait. Deux inconnues :
   - **la forme** : une série unique pour le set, ou **une par élément** ? Le
     set eulérien compte ~10 000 éléments ; à 500 intervalles, la forme
     par-élément représenterait des millions de valeurs et il faudrait
@@ -875,11 +909,27 @@ Toute la couche de diagnostic du projet est écrite pour personne.**
     même job serait sinon rejoué comme s'il était en cours.
   - 10 tests de non-régression (`tests/test_script_log.py`), sur les deux
     moitiés du contrat.
-- **Reste hors périmètre de cette correction** : `SensitivityRunWorker` lit
-  toujours `proc.stdout` (run_worker.py:246-249), qui est vide pour la même
-  raison. Les campagnes de sensibilité n'affichent donc rien du script. Le
-  même `log_path_for()` s'y appliquerait ; je ne l'ai pas fait pour garder ce
-  lot circonscrit à l'onglet Job.
+- **ÉTENDU AUX CAMPAGNES** (demande de Tristan, 17/09).
+  `SensitivityRunWorker._abaqus_solve` lisait `proc.stdout`, vide pour la
+  même raison : une campagne ne montrait rien de ce que faisait chaque run.
+  Elle suit maintenant le même `<job>.gui.log`, via `_emit_log_tail()` et une
+  boucle de scrutation à 400 ms tant que le processus vit, plus un drainage
+  final — les dernières lignes sont celles qui expliquent la fin du run. Le
+  `stdout` du lanceur (bannière de licence, erreur fatale avant le script)
+  est lu une fois après la sortie, au lieu d'être attendu ligne à ligne.
+- **La règle de nommage est désormais énoncée une seule fois par côté** :
+  `script_log_path()` dans `run_worker.py` pour la GUI (utilisé par l'onglet
+  Job ET par le worker), `log_path_for()` dans `run_simul.py` pour Abaqus.
+  Les deux interpréteurs ne peuvent pas partager un module, donc un test les
+  épingle à la même réponse — s'ils divergeaient, la GUI suivrait un fichier
+  que personne n'écrit et le journal se tairait sans erreur nulle part.
+- **VALIDÉ EN PRODUCTION** (job `TEST_vol`, 17/09) : le panneau de l'onglet
+  Job affiche désormais l'intégralité du journal — `[META] field_filter=…`,
+  `[STAGE] SOLVE_START`/`SOLVE_DONE`, tout le log d'extraction (ROI, bbox de
+  maillage, `ROI_node=1682 / ROI_elem=784`, champs), `[STAGE] EXTRACT_DONE`
+  et le récapitulatif de nettoyage. La ligne
+  `Filtered series preferred: field=CAMERABAND history=SENSORBAND` confirme
+  au passage que la préférence de M5 est active sur un vrai run.
 
 ### Mineur
 
@@ -1153,6 +1203,63 @@ ajouter » de cette mission — à toi de dire si tu la veux) : après un run,
 balayer `<job>.dat` et `<job>.sta` pour les lignes `***WARNING` / `***ERROR`
 et les afficher dans l'onglet Job ou Results. Une quinzaine de lignes de
 code auraient fait remonter M4, M5 et m6 automatiquement, le jour même.
+
+## Limite de la méthode — ce que cette revue ne peut pas garantir
+
+Section demandée par Tristan avant la fusion. Elle dit ce que l'audit
+**n'établit pas**, pour que personne ne lui prête une portée qu'il n'a pas.
+
+### 1. Trois niveaux de validation, souvent confondus
+
+L'affaire `MASSEUL` → `MASS` → retrait l'a montré de façon coûteuse : un
+appel Abaqus peut franchir un niveau et échouer au suivant.
+
+| Niveau | Ce qu'il prouve | Comment on le teste ici |
+|---|---|---|
+| **1. Le symbole existe** | La méthode/constante est présente dans l'API | `_review/check_api.py` (`hasattr`) |
+| **2. CAE accepte l'appel** | Les arguments passent à la construction du modèle | probe qui construit le vrai modèle |
+| **3. Le solveur l'honore** | La grandeur est réellement calculée et écrite | **un vrai run, et lui seul** |
+
+`MASS` a franchi les niveaux 1 et 2 et échoué au 3. Aucune introspection ne
+pouvait l'anticiper. **Tout ce que cette revue déclare VÉRIFIÉ sans run réel
+l'est au niveau 1 ou 2, pas au 3.**
+
+### 2. Seuls les chemins exercés sont couverts
+
+Les configurations réellement lancées pendant l'audit sont : contact
+`penalty` + `HARD`, sans génération de chaleur, BC eulériennes `NONE` en bas
+et `FREE` ailleurs, mass scaling 1000, filtres actifs. Pour ces chemins, les
+noms de mots-clés sont **indirectement attestés** — un mot-clé erroné ferait
+lever l'appel, et le modèle se construit.
+
+Ne sont attestés à AUCUN niveau les chemins que la GUI expose mais qu'aucun
+run n'a empruntés : formulations `rough` et `frictionless`, lois de
+pression-pénétration `exponential` / `linear` / `tabular`, `HeatGeneration`,
+et les types d'inflow/outflow non utilisés (`NON_REFLECTING`, `EQUILIBRIUM`,
+`ZERO_PRESSURE`, `VOID`). Les constantes symboliques correspondantes
+existent (niveau 1, vérifié) ; que les appels qui les consomment soient
+acceptés et honorés n'a jamais été éprouvé.
+
+### 3. Ce qui n'a pas pu être testé du tout
+
+- **Le chemin Windows d'annulation** (`taskkill /F /T`) : écrit et couvert par
+  des tests unitaires qui simulent l'OS, jamais exercé contre un vrai arbre de
+  processus Abaqus. Le seul test réel (job `cancel_test`) a emprunté la route
+  propre `abaqus terminate`, pas le repli.
+- **La coexistence `V` / `V_CAMERABAND` dans l'ODB** et la préférence de
+  `_resolve_fo_name` pour la série filtrée : le deck est vérifié, le
+  comportement d'extraction ne l'est que par les tests sur doublures.
+- **Le journal des campagnes de sensibilité** : le mécanisme est celui,
+  validé, de l'onglet Job, mais aucune campagne réelle n'a tourné depuis.
+
+### 4. Ce que l'audit garantit, en revanche
+
+Les 12 constats reposent sur des faits vérifiables et cités : sorties de
+commandes, extraits de `.dat`/`.sta`/`.log`, clés d'ODB, sorties de tests.
+Là où je n'ai pas pu vérifier, c'est écrit. Deux de mes propres hypothèses
+ont été **infirmées** par la vérification (m5, et la cause supposée de M4) et
+sont consignées comme telles plutôt que corrigées en silence — c'est le seul
+signe fiable que le processus mordait sur la réalité.
 
 ## Questions pour Tristan
 

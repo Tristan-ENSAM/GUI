@@ -29,7 +29,8 @@ from gui.core.sta_parser import parse_sta
 from gui.core.model_config import ModelConfig
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
                                         build_abaqus_args,
-                                        kill_process_tree_by_pid)
+                                        kill_process_tree_by_pid,
+                                        script_log_path)
 
 
 def _section_header(title: str) -> QLabel:
@@ -564,7 +565,7 @@ class JobTab(QWidget):
         # Where run_simul.py writes its diagnostics. `abaqus cae noGUI=` runs
         # it in a separate kernel process whose stdout reaches nobody, so the
         # panel is fed by tailing this file rather than by the pipe.
-        self._pipeline["log_path"] = wd / f"{job_name}.gui.log"
+        self._pipeline["log_path"] = script_log_path(wd, job_name)
         self._log_offset = 0
         try:
             # A stale log from a previous run of the same job would otherwise
