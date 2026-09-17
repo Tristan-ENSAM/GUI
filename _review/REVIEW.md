@@ -8,7 +8,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 |---|---|---|---|
 | M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
-| M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
+| M3 | Le Cancel gèle l'UI (les trois chemins) | Majeur | **ROUVERT PUIS CORRIGÉ** (17/09, demande de Tristan) — d'abord clos sans correction, puis traité par l'option (b) : annulation asynchrone. Plus aucun appel bloquant dans le thread GUI |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CLOS — requête RETIRÉE.** `MASS` refusé par le solveur, `EVOL` écrit par élément et constant. Trois tentatives, aucune valable ; voie à explorer documentée |
 | M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
 | M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CORRIGÉ** — journal fichier `<job>.gui.log` suivi par la GUI |
@@ -18,7 +18,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | **CORRIGÉ** — supprimé sur décision de Tristan |
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | **CORRIGÉ** (`bb31f67`) |
 | m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | **CORRIGÉ** (`5ac4255`) — `importorskip`, suite verte |
-| m7 | Le Cancel des études d'optimisation n'atteignait jamais le solveur (test d'annulation enfermé dans une boucle bloquante, `terminate()` sur le seul lanceur, pas de `abaqus terminate`) | **Majeur** | **CORRIGÉ** — aligné sur le schéma de Sensitivity sur décision de Tristan (option c) ; 6 tests ajoutés |
+| m7 | Le Cancel des études d'optimisation n'atteignait jamais le solveur (test d'annulation enfermé dans une boucle bloquante, `terminate()` sur le seul lanceur, pas de `abaqus terminate`) | **Majeur** | **CORRIGÉ** — aligné sur le schéma de Sensitivity sur décision de Tristan (option c) ; 12 tests ajoutés |
 
 ## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
 
@@ -423,8 +423,21 @@ renvoient plus vers un module inexistant.
   reflète l'état réel du produit plutôt qu'une régression silencieuse à
   chaque exécution.
 
-**M3 — Le Cancel bloque le thread GUI jusqu'à ~30 s, sur les DEUX chemins
+**M3 — Le Cancel bloque le thread GUI jusqu'à ~32 s, sur TOUS les chemins
 d'annulation.** (constat ajouté en phase 2, non présent dans l'audit initial)
+
+> **ROUVERT ET CORRIGÉ le 17/09.** Ce constat avait été clos sans correction
+> sur la décision de Tristan (option c, « ne rien faire »), au motif que
+> `abaqus terminate` répond en 0,63 s mesuré. Après la correction de m7,
+> Tristan a demandé que la réserve soit levée : c'est l'**option (b)**,
+> annulation asynchrone, qui a été appliquée aux trois chemins. Le détail est
+> en fin de section ; ce qui suit décrit l'état d'AVANT la correction et reste
+> le diagnostic qui la motive.
+>
+> Correction de ma propre borne : j'écrivais « ~30 s » dans le titre alors que
+> le calcul ligne par ligne, plus bas dans cette même section, donnait 32 s
+> pour le chemin Job. Les deux autres chemins sont à 30 s. Le titre disait
+> donc le minimum au lieu du maximum.
 - Fichiers : `gui/sensitivity/run_worker.py:67-69` (la fonction bloquante),
   appelée depuis `gui/tabs/job_tab.py:745` et depuis
   `gui/sensitivity/run_worker.py:181` via
@@ -516,6 +529,52 @@ terme dominant. Rien à corriger tant que l'usage ne remonte pas de gêne.
   (c) Faire émettre à `SensitivityTab._on_cancel` un signal vers le worker
   au lieu de l'appel direct (corrige uniquement le chemin (b) du constat,
   pas celui de l'onglet Job).
+
+**CORRECTION (17/09) — option (b), annulation asynchrone.**
+
+Le principe tient en une phrase : *aucun appel bloquant ne reste dans le
+thread GUI*. Deux mécanismes, selon ce qui bloque.
+
+- **Les appels sous-processus** (`abaqus terminate`, `taskkill`) partent sur
+  un thread démon via `gui/core/async_call.py:run_async`, qui rend leur
+  résultat par un signal Qt — donc réceptionné dans le thread du widget, où
+  toucher l'interface est licite.
+- **Les attentes** (laisser le solveur se dérouler avant de forcer) ne sont
+  PAS déportées : un `QProcess` ne se manipule que depuis le thread qui le
+  possède, et deux threads qui attendent le même `Popen` se disputent son
+  code de sortie. Elles deviennent des `QTimer.singleShot`, qui ne coûtent
+  rien à la boucle d'événements.
+
+| Chemin | Avant | Après |
+|---|---|---|
+| `job_tab.py:_cancel_run` | `terminate` 20 s + `waitForFinished(10000)` + `waitForFinished(2000)` = **32 s gelés** | `run_async` + deux `singleShot` → **0 s** |
+| `run_worker.py:cancel` | `terminate` 20 s + `proc.wait(10)` = **30 s gelés** | thread démon (`_cancel_blocking`) → **0 s** |
+| `optimization_tab.py:_on_cancel` | idem, **30 s gelés** | `run_async` + `singleShot` → **0 s** |
+
+Le drapeau d'annulation reste posé **synchronement** dans les trois cas :
+c'est lui qui arrête la campagne ou l'étude, et il doit être visible de la
+boucle de run à l'instant du clic. Seul le travail bloquant part ailleurs.
+
+**Deux points de sûreté traités au passage, faits et non suppositions :**
+
+- `_kill_if_alive` lit `proc.returncode` au lieu d'appeler `poll()`. Le thread
+  de l'étude sonde déjà le même `Popen`, et deux threads qui moissonnent le
+  même enfant se disputent son statut. Lire l'attribut ne touche pas l'OS.
+- Le repli ne tue plus un PID déjà libéré : si le run s'est terminé entre le
+  clic et l'expiration du timer de 10 s, `taskkill /F /T` viserait un numéro
+  potentiellement recyclé. Un test couvre ce cas.
+
+**Réserve subsistante, explicite :** `SensitivityRunWorker._cancel_blocking`
+appelle `proc.wait(timeout=10)` sur un `Popen` que la boucle de run sonde
+aussi. Sous Windows c'est bénin (`WaitForSingleObject`) ; sous POSIX l'un des
+deux peut recevoir `ECHILD`. L'appel est déjà sous `try/except` et le chemin
+est best-effort, mais **ce n'est pas prouvé sans course, c'est jugé
+acceptable** — la cible est Windows.
+
+**Couverture :** 12 tests dans `tests/test_abaqus_terminate.py`, dont un qui
+mesure directement la propriété en cause — le slot d'annulation rend la main
+en moins d'une seconde alors que le faux `abaqus terminate` est encore bloqué.
+Tous avec des doubles ; aucun solveur réel.
 
 **M4 — `MASSEUL`/`VOLEUL` sont absents de l'ODB : le contrôle de conservation
 de masse eulérienne n'existe pas dans les résultats.**
@@ -1179,15 +1238,19 @@ se matérialise pas** : `run_bundle` retourne `None` dès que le drapeau
 d'annulation est posé, et les deux études traitent déjà un bundle `None`
 comme un run échoué. C'est vérifié par le code, pas supposé.
 
-**Réserve, non levée :** `abaqus terminate` est appelé depuis le thread GUI et
-bloque jusqu'à 10 s. C'est le même gel que le constat M3, clos sans correction
-sur ta décision au motif que `terminate` répond vite (0,63 s mesuré). La même
-réserve vaut ici, avec le même argument.
+**Réserve levée le 17/09.** J'avais écrit ici que `abaqus terminate` bloquait
+le thread GUI « jusqu'à 10 s » — c'était faux par sous-estimation : le timeout
+du sous-processus est de 20 s (`run_worker.py:81`), plus l'attente de 10 s,
+soit 30 s. Sur demande de Tristan, le gel a été supprimé partout : voir la
+correction de M3 (option b, annulation asynchrone).
 
-**Non testé en conditions réelles** : 6 tests de non-régression couvrent les
-deux étapes, le repli, le libellé et le suivi de journal, tous avec des doubles.
-Le chemin réel — un vrai solveur Abaqus tué sous Windows — reste dans le
-périmètre décrit par « Limite de la méthode ».
+**Non testé en conditions réelles** : 12 tests de non-régression couvrent les
+deux étapes, le repli, le libellé, le suivi de journal et le caractère non
+bloquant, tous avec des doubles. Le chemin réel — un vrai solveur Abaqus tué
+sous Windows — reste dans le périmètre décrit par « Limite de la méthode », et
+c'est la **seule réserve de ce constat qui ne peut pas être levée depuis cet
+environnement** : elle demande une session avec Abaqus. Le protocole exact est
+en fin de section « Limite de la méthode ».
 
 ### Style
 
@@ -1333,6 +1396,37 @@ acceptés et honorés n'a jamais été éprouvé.
   comportement d'extraction ne l'est que par les tests sur doublures.
 - **Le journal des campagnes de sensibilité** : le mécanisme est celui,
   validé, de l'onglet Job, mais aucune campagne réelle n'a tourné depuis.
+- **L'annulation asynchrone des trois onglets** (correction de M3 et m7,
+  17/09) : 12 tests sur doubles, aucun solveur réel.
+
+#### Protocole pour lever la dernière réserve — à exécuter avec Abaqus
+
+Cette réserve ne peut PAS être levée depuis un environnement sans Abaqus. Elle
+demande trois essais, chacun visant un chemin distinct du code.
+
+**Essai 1 — la voie propre, onglet Optimization** (celui qui n'a jamais
+fonctionné). Lancer une étude Mesh GCI ou Domain sizing, attendre que
+`<job>.sta` progresse — donc que `<job>.cid` existe — puis cliquer Cancel.
+Attendu : la fenêtre **reste réactive** (la déplacer pendant l'annulation le
+prouve mieux qu'un chronomètre) ; le panneau affiche `[CANCEL] asking Abaqus
+to terminate job ...` ; le run s'arrête en quelques secondes ; le
+Gestionnaire des tâches ne montre **aucun** `standard.exe`/`explicit.exe`
+résiduel. C'est aussi la première occasion de voir défiler le déroulé du run
+dans cet onglet, muet jusqu'ici pour la raison M7.
+
+**Essai 2 — le repli, jamais exercé à ce jour.** Même manœuvre, mais cliquer
+Cancel **avant** que `<job>.cid` apparaisse (pendant la construction du
+modèle, les premières secondes). `abaqus terminate` n'a alors rien à signaler
+et doit répondre non ; attendu : le panneau affiche `Abaqus did not answer;
+killing the process tree`, et là encore aucun processus résiduel. **C'est le
+seul essai qui teste `taskkill /F /T` contre un vrai arbre Abaqus**, et donc
+le seul qui puisse enfin répondre à la question Q3.
+
+**Essai 3 — onglet Job, même protocole que l'essai 1.** Il vérifie le
+troisième chemin, celui dont le gel de 32 s était le plus long.
+
+Si un essai laisse un processus résiduel, la trace utile est la sortie du
+panneau **et** la liste des processus Abaqus au moment du clic.
 
 ### 4. Ce que l'audit garantit, en revanche
 
@@ -1513,3 +1607,25 @@ Réconciliation, vérifiée par collecte et non par soustraction :
 `pytest --collect-only` donne **583 avant / 589 après** en passe 1, soit
 **+6**, et `TestOptimizationTabCancelsTheRunInFlight` en collecte exactement
 **6**. Aucun test supprimé. 594 + 6 = 600, ce que la mesure donne.
+
+### Relevé après la correction de M3 (17/09)
+
+Arbre portant l'annulation asynchrone des trois onglets.
+
+```
+QT_QPA_PLATFORM=offscreen pytest -q --ignore=tests/test_mesh_pipeline.py
+  595 passed in 137.95s (0:02:17)
+
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_mesh_pipeline.py
+  11 passed in 133.36s (0:02:13)
+```
+
+**606 réussis, 0 ignoré, 0 échec**, contre 600 au relevé précédent.
+
+Réconciliation par collecte : `--collect-only` donne **589 avant / 595 après**
+en passe 1, soit **+6**. Les deux classes d'annulation collectent maintenant
+**12 tests** contre 6 auparavant — les 6 premiers ont été réécrits pour piloter
+des chemins devenus asynchrones (l'attente d'un signal remplace la lecture
+immédiate de l'état), et 6 ont été ajoutés, dont
+`test_the_slot_returns_before_the_blocking_call_finishes`, qui mesure
+directement la propriété en cause. Aucun test supprimé. 600 + 6 = 606.

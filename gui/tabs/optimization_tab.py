@@ -38,6 +38,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 
+from gui.core.async_call import run_async
 from gui.core.domain_sizing import DomainDims
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
@@ -1065,7 +1066,7 @@ class OptimizationTab(QWidget):
     # Cancel / failure
     # ===================================================================
     def _on_cancel(self):
-        """Stop the study AND the run currently in flight.
+        """Stop the study AND the run currently in flight, without freezing.
 
         Same two stages as SensitivityRunWorker.cancel, in the same order:
           1. ``abaqus terminate job=<name>`` -- the clean route: it stops the
@@ -1074,10 +1075,14 @@ class OptimizationTab(QWidget):
              answer (no .cid yet, job already finishing, hung solver). This
              leaves the tokens checked out, hence the ordering.
 
-        Before this, cancelling only called ``proc.terminate()`` on the
+        Both stages run OFF the GUI thread (see gui/core/async_call), and the
+        pause between them is a QTimer, not a wait(). Doing it inline cost up
+        to 30 s of frozen window -- finding M3.
+
+        Before any of this, cancelling only called ``proc.terminate()`` on the
         ``abaqus cae`` launcher: the solver behind it survived as an orphan
-        (M1), the licence stayed checked out, and the test itself sat in a
-        loop reading a stdout that never produces a line (M7).
+        (M1), the licence stayed checked out, and the test itself sat in a loop
+        reading a stdout that never produces a line (M7).
 
         The run interrupted here is reported as failed -- run_bundle returns
         None on a set cancel flag, which the studies already treat as "no
@@ -1092,21 +1097,33 @@ class OptimizationTab(QWidget):
 
         job, proc = self._current_job, self._current_proc
         cmd, run_dir = self._current_abaqus_cmd, self._current_run_dir
-        if job and cmd:
-            self._log_ui("[CANCEL] asking Abaqus to terminate job %s" % job)
-            if abaqus_terminate_job(cmd, job, run_dir):
-                if proc is not None:
-                    try:
-                        # Give the solver a moment to unwind before force-killing.
-                        proc.wait(timeout=10.0)
-                        return
-                    except Exception:
-                        log_swallowed("waiting for the terminated job to exit",
-                                      level=logging.DEBUG)
-        if proc is not None and proc.poll() is None:
-            self._log_ui("[CANCEL] Abaqus did not answer; killing the process "
-                         "tree (licence tokens stay checked out)")
-            kill_process_tree_by_pid(proc.pid)
+        if not (job and cmd):
+            return              # nothing started yet: the flag is enough
+        self._log_ui("[CANCEL] asking Abaqus to terminate job %s" % job)
+        run_async(lambda: abaqus_terminate_job(cmd, job, run_dir),
+                  lambda ok: self._after_terminate(bool(ok), proc), self)
+
+    def _after_terminate(self, accepted: bool, proc):
+        """Back on the GUI thread once Abaqus has answered (or not)."""
+        if accepted:
+            # Let the solver unwind. A timer, so the window stays alive.
+            QTimer.singleShot(10000, lambda: self._kill_if_alive(proc))
+        else:
+            self._kill_if_alive(proc)
+
+    def _kill_if_alive(self, proc):
+        """Force-kill the tree, unless the run has already exited.
+
+        `returncode` is read rather than poll() called: the study thread is
+        polling the same Popen, and two threads reaping one child race for its
+        exit status. The attribute is set by whichever poll() saw it exit.
+        """
+        if proc is None or proc.returncode is not None:
+            return
+        self._log_ui("[CANCEL] Abaqus did not answer; killing the process "
+                     "tree (licence tokens stay checked out)")
+        run_async(lambda: kill_process_tree_by_pid(proc.pid),
+                  lambda _ok: None, self)
 
     def _on_fail(self, msg):
         self._stop_progress()

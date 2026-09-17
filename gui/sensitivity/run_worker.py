@@ -20,6 +20,7 @@ from pathlib import Path
 import os
 import signal
 import subprocess
+import threading
 import time
 import logging
 
@@ -240,24 +241,41 @@ class SensitivityRunWorker(QObject):
           2. kill the process tree -- the fallback, for when Abaqus does not
              answer (no .cid yet, job already finishing, hung solver). This
              leaves the tokens checked out, hence the ordering.
+
+        Returns immediately. This method is invoked directly from the Cancel
+        slot, so it executes on the GUI THREAD even though the worker lives in
+        another one -- and the two stages block for up to 30 s together
+        (subprocess timeout 20 s, then the grace wait). Running them inline is
+        finding M3: a frozen window for the whole duration. They go to a
+        daemon thread instead; the flag below is what actually stops the
+        campaign, and it is set synchronously so the run loop sees it at once.
         """
         self._cancel = True
         job = self._current_job
-        if job:
-            self.log.emit("[CANCEL] asking Abaqus to terminate job %s\n" % job)
-            if abaqus_terminate_job(self._abaqus_cmd, job, self._workdir):
-                # Give the solver a moment to unwind before force-killing.
-                p = self._proc
-                if p is not None:
-                    try:
-                        p.wait(timeout=10.0)
-                        return
-                    except Exception:
-                        log_swallowed("waiting for the terminated job to exit",
-                                      level=logging.DEBUG)
-        p = self._proc
-        if p is not None:
-            _terminate_process_tree(p)
+        if not job:
+            return
+        self.log.emit("[CANCEL] asking Abaqus to terminate job %s\n" % job)
+        threading.Thread(target=self._cancel_blocking,
+                         args=(job, self._proc), daemon=True).start()
+
+    def _cancel_blocking(self, job: str, proc) -> None:
+        """The blocking half of cancel(), off the GUI thread.
+
+        `proc` is passed in rather than read from self: by the time this runs,
+        the run loop may have moved on and cleared the attribute, and killing
+        the NEXT run's process would be worse than killing nothing.
+        """
+        if abaqus_terminate_job(self._abaqus_cmd, job, self._workdir):
+            if proc is not None:
+                try:
+                    # Give the solver a moment to unwind before force-killing.
+                    proc.wait(timeout=10.0)
+                    return
+                except Exception:
+                    log_swallowed("waiting for the terminated job to exit",
+                                  level=logging.DEBUG)
+        if proc is not None and proc.returncode is None:
+            _terminate_process_tree(proc)
 
     # -- entry point (run inside the QThread) --------------------------
     def run(self):

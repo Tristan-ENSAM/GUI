@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QProgressBar
 )
 
+from gui.core.async_call import run_async
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
@@ -747,7 +748,7 @@ class JobTab(QWidget):
         return "cancel"
 
     def _cancel_run(self):
-        """Stop the running Abaqus job.
+        """Stop the running Abaqus job, without freezing the window.
 
         Two stages, in this order:
           1. ``abaqus terminate job=<name>`` -- the clean route. It stops the
@@ -760,6 +761,13 @@ class JobTab(QWidget):
              as a separate process that outlives a kill aimed at the launcher.
 
         Either way the .odb may be left incomplete.
+
+        NOTHING BLOCKS THE GUI THREAD HERE. Done inline, the two stages add up
+        to ~32 s of dead window (subprocess timeout 20 s, grace wait 10 s,
+        escalation wait 2 s) -- finding M3. The subprocess calls go to a
+        daemon thread via run_async; the two waits become single-shot timers.
+        A QProcess may only be touched from the thread that owns it, so every
+        call on self._proc below stays on this one.
         """
         if self._proc is None or self._proc.state() == QProcess.NotRunning:
             return
@@ -772,6 +780,7 @@ class JobTab(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        self.btn_cancel.setEnabled(False)   # one cancel sequence at a time
         ctx = self._pipeline or {}
         job_name = ctx.get("job_name")
         workdir = ctx.get("workdir")
@@ -782,24 +791,51 @@ class JobTab(QWidget):
         if job_name and workdir and abq:
             self._append_output(
                 "\n[CANCEL] asking Abaqus to terminate job %s\n" % job_name)
-            if abaqus_terminate_job(abq, job_name, workdir):
-                # Let the solver unwind before force-killing it.
-                if self._proc.waitForFinished(10000):
-                    self._append_output("\n[CANCELLED by user]\n")
-                    return
+            run_async(lambda: abaqus_terminate_job(abq, job_name, workdir),
+                      self._after_terminate, self)
+        else:
+            # `abaqus terminate` needs a job name and a working directory, so
+            # a Cancel during the model build has nothing to ask politely.
+            self._force_kill()
 
-        # Fallback. `abaqus terminate` only works once the solver has written
+    def _after_terminate(self, accepted):
+        """Back on the GUI thread once Abaqus has answered (or not)."""
+        if accepted:
+            # Let the solver unwind. A timer, so the window stays alive; if it
+            # exits first, _force_kill finds NotRunning and does nothing.
+            QTimer.singleShot(10000, self._force_kill)
+        else:
+            self._force_kill()
+
+    def _force_kill(self):
+        """Stage 2: kill the whole tree. No-op if the job already exited."""
+        if self._proc is None or self._proc.state() == QProcess.NotRunning:
+            self._append_output("\n[CANCELLED by user]\n")
+            return
+        # `abaqus terminate` only works once the solver has written
         # <job>.cid, so Cancel during the model build (or during extraction)
         # always lands here. QProcess.terminate()/kill() reach only the direct
         # child, which on Windows leaves the solver processes Abaqus spawned
-        # alive; kill the whole tree by PID there instead.
-        if not kill_process_tree_by_pid(self._proc.processId()):
-            # POSIX, or taskkill unavailable: terminate() sends WM_CLOSE which
-            # Abaqus may ignore, so escalate to kill() after 2 seconds.
+        # alive; kill the whole tree by PID there instead. taskkill is a
+        # subprocess, so it goes off-thread like the terminate did.
+        pid = self._proc.processId()
+        run_async(lambda: kill_process_tree_by_pid(pid),
+                  self._after_tree_kill, self)
+
+    def _after_tree_kill(self, killed):
+        """POSIX, or taskkill unavailable: fall back to the single process."""
+        if not killed and self._proc is not None \
+                and self._proc.state() != QProcess.NotRunning:
+            # terminate() sends WM_CLOSE which Abaqus may ignore, so escalate
+            # to kill() after 2 seconds -- again a timer, not a wait.
             self._proc.terminate()
-            if not self._proc.waitForFinished(2000):
-                self._proc.kill()
+            QTimer.singleShot(2000, self._escalate_kill)
         self._append_output("\n\n[CANCELLED by user]\n")
+
+    def _escalate_kill(self):
+        if self._proc is not None \
+                and self._proc.state() != QProcess.NotRunning:
+            self._proc.kill()
 
     def _on_proc_output(self):
         """Slot connected to QProcess.readyReadStandardOutput. Reads
