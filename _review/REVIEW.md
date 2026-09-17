@@ -21,17 +21,27 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 
 ## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
 
-`_review/check_api.py` v1 a été exécuté sur l'installation réelle
-(`abaqus cae noGUI=_review/check_api.py`). Sortie complète :
-`_review/check_api_report.txt` côté machine Abaqus.
+`_review/check_api.py` v1, v2 puis v3 ont été exécutés sur l'installation
+réelle (`abaqus cae noGUI=_review/check_api.py`), qui écrivait sa sortie
+complète dans `_review/check_api_report.txt`.
 
-> **Le script n'est plus dans l'arbre de travail.** Les quatre sondes de cette
-> revue ont été retirées une fois la revue close ; l'historique les conserve.
-> Pour rejouer l'introspection contre une autre version d'Abaqus :
-> `git show 07e2c84:_review/check_api.py > check_api.py`, puis
-> `abaqus cae noGUI=check_api.py`. Les trois autres sondes
-> (`masseul_probe.py`, `run_simul_logged.py`, `stdout_probe.py`) se récupèrent
-> de la même façon depuis le même commit.
+> **Ni le script ni son rapport ne sont dans l'arbre de travail.** Les quatre
+> sondes de cette revue ont été retirées une fois la revue close, et le
+> rapport était une sortie machine locale, jamais versionnée, supprimée avec
+> elles. Les chiffres cités ci-dessous sont donc **attestés par ce rapport
+> mais non ré-auditables en l'état** : ils valent pour l'installation Abaqus
+> 2022 HF8 de Tristan au 15/09/2026, et pour aucune autre.
+>
+> Ils sont en revanche **reproductibles en deux commandes** — c'est le seul
+> point qui compte pour une mise à jour d'Abaqus :
+>
+> ```
+> git show 07e2c84:_review/check_api.py > check_api.py
+> abaqus cae noGUI=check_api.py
+> ```
+>
+> Les trois autres sondes (`masseul_probe.py`, `run_simul_logged.py`,
+> `stdout_probe.py`) se récupèrent de la même façon depuis le même commit.
 
 **VÉRIFIÉ (preuve = sortie du script) :**
 
