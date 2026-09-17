@@ -25,6 +25,14 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 (`abaqus cae noGUI=_review/check_api.py`). Sortie complète :
 `_review/check_api_report.txt` côté machine Abaqus.
 
+> **Le script n'est plus dans l'arbre de travail.** Les quatre sondes de cette
+> revue ont été retirées une fois la revue close ; l'historique les conserve.
+> Pour rejouer l'introspection contre une autre version d'Abaqus :
+> `git show 07e2c84:_review/check_api.py > check_api.py`, puis
+> `abaqus cae noGUI=check_api.py`. Les trois autres sondes
+> (`masseul_probe.py`, `run_simul_logged.py`, `stdout_probe.py`) se récupèrent
+> de la même façon depuis le même commit.
+
 **VÉRIFIÉ (preuve = sortie du script) :**
 
 | Élément | Résultat |
