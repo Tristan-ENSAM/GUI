@@ -52,10 +52,14 @@ class TestLogPath:
         got = run_simul.log_path_for("Cutting_job", str(tmp_path))
         assert Path(got) == tmp_path / "Cutting_job.gui.log"
 
-    def test_matches_what_the_job_tab_builds(self, run_simul, tmp_path):
-        # job_tab._launch_abaqus does: wd / f"{job_name}.gui.log"
+    def test_the_two_sides_agree(self, run_simul, tmp_path):
+        """The rule is stated twice -- once for Abaqus' Python 2.7, once for
+        the GUI -- because the two interpreters cannot share a module. If they
+        ever disagree, the GUI tails a file nobody writes and the live log
+        goes quiet with no error anywhere."""
+        from gui.sensitivity.run_worker import script_log_path
         job_name = "TEST_0"
-        gui_side = tmp_path / ("%s.gui.log" % job_name)
+        gui_side = script_log_path(tmp_path, job_name)
         script_side = Path(run_simul.log_path_for(job_name, str(tmp_path)))
         assert gui_side == script_side
 
@@ -114,6 +118,42 @@ class TestTee:
             tee.write("visible immediately\n")
             # Read it back while the writer is still open.
             assert "visible immediately" in target.read_text()
+
+
+class TestSensitivityWorkerTailsTheLog:
+    """Campaigns had the same blind spot as the Job tab: reading proc.stdout
+    showed nothing of what each run was doing."""
+
+    @pytest.fixture
+    def worker(self, tmp_path):
+        from gui.sensitivity.run_worker import SensitivityRunWorker
+        w = SensitivityRunWorker(
+            plan=[], plan_kind="jacobian", qoi_specs=[], base_cfg=None,
+            abaqus_cmd="abq", abaqus_script="s.py", workdir=str(tmp_path))
+        w._emitted = []
+        w.log.connect(w._emitted.append)
+        return w
+
+    def test_absent_log_leaves_the_offset_untouched(self, worker, tmp_path):
+        missing = tmp_path / "nope.gui.log"
+        assert worker._emit_log_tail(missing, 0) == 0
+        assert worker._emitted == []
+
+    def test_emits_only_the_new_bytes(self, worker, tmp_path):
+        log = tmp_path / "sens_run000.gui.log"
+        log.write_text("[STAGE] SOLVE_START\n", encoding="latin-1")
+        offset = worker._emit_log_tail(log, 0)
+        assert worker._emitted == ["[STAGE] SOLVE_START\n"]
+
+        with open(log, "a", encoding="latin-1") as handle:
+            handle.write("[STAGE] SOLVE_DONE\n")
+        worker._emit_log_tail(log, offset)
+        assert worker._emitted[-1] == "[STAGE] SOLVE_DONE\n"
+
+    def test_uses_the_shared_naming_rule(self, worker, tmp_path):
+        from gui.sensitivity.run_worker import script_log_path
+        assert (script_log_path(tmp_path, "sens_run007")
+                == tmp_path / "sens_run007.gui.log")
 
 
 class TestJobTabTailsTheLog:

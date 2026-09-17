@@ -40,6 +40,21 @@ def _popen_group_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+SCRIPT_LOG_SUFFIX = ".gui.log"
+
+
+def script_log_path(workdir, job_name: str) -> Path:
+    """Where run_simul.py writes this job's diagnostics.
+
+    Mirrors `run_simul.log_path_for` on the Abaqus side. The two cannot share
+    one implementation -- that module is written for Abaqus' Python 2.7 and
+    lives outside the GUI package -- so a test pins them to the same answer
+    instead. Both the Job tab and the sensitivity worker read through here, so
+    the rule is stated once on this side.
+    """
+    return Path(workdir) / ("%s%s" % (job_name, SCRIPT_LOG_SUFFIX))
+
+
 def build_abaqus_args(abaqus_cmd: str, abaqus_script: str,
                       model_params: dict, run_params: dict) -> list:
     """The exact argv that runs `run_simul.py` under Abaqus/CAE.
@@ -259,6 +274,22 @@ class SensitivityRunWorker(QObject):
         except Exception as e:                          # pragma: no cover
             self.failed.emit("%s" % e)
 
+    def _emit_log_tail(self, log_path, offset: int) -> int:
+        """Emit whatever run_simul.py appended since `offset`; return the new
+        offset. Reads from a byte position rather than re-reading, so a long
+        campaign does not replay what the panel already shows. Latin-1 decodes
+        any byte: a decode error here would silently stop the live log."""
+        try:
+            with open(log_path, "rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                offset = handle.tell()
+        except OSError:
+            return offset          # not created yet, or already gone
+        if chunk:
+            self.log.emit(chunk.decode("latin-1", errors="replace"))
+        return offset
+
     # -- the Abaqus per-profile solve (default solve_fn) ---------------
     def _abaqus_solve(self, cfg, i):
         job_name = "%s_run%03d" % (self._job_prefix, i)
@@ -291,14 +322,31 @@ class SensitivityRunWorker(QObject):
             self.runDone.emit(i, False)
             return None
 
-        # Stream merged output live (Abaqus uses cp1252 on Windows).
+        # Stream the run live by TAILING THE SCRIPT'S LOG, not its stdout.
+        # `abaqus cae noGUI=` runs run_simul.py inside a separate kernel
+        # process (ABQcaeK.exe) whose stdout reaches nobody -- not this pipe,
+        # not even a console redirection. Reading proc.stdout here used to
+        # yield nothing but the licence banner, so a campaign showed no sign
+        # of what each run was doing. run_simul tees everything into
+        # <job>.gui.log; the Job tab tails the same file.
+        log_path = script_log_path(self._workdir, job_name)
+        offset = 0
+        while self._proc.poll() is None:
+            if self._cancel:
+                break
+            offset = self._emit_log_tail(log_path, offset)
+            time.sleep(0.4)
+        # Final drain: the lines written since the last tick are the ones that
+        # explain how the run ended.
+        self._emit_log_tail(log_path, offset)
+        # Whatever the launcher itself put on stdout (licence banner, a fatal
+        # error before the script starts). Read once, after exit.
         try:
-            for raw in iter(self._proc.stdout.readline, b""):
-                if self._cancel:
-                    break
-                self.log.emit(raw.decode("cp1252", errors="replace"))
+            rest = self._proc.stdout.read()
+            if rest:
+                self.log.emit(rest.decode("cp1252", errors="replace"))
         except Exception:
-            log_swallowed("streaming Abaqus stdout for run %d" % (i + 1),
+            log_swallowed("reading Abaqus launcher output for run %d" % (i + 1),
                           level=logging.DEBUG)
         self._proc.wait()
         rc_code = self._proc.returncode
