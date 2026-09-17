@@ -33,8 +33,14 @@ class MeshGciWorker(QThread):
         self._cancel = False
 
     def cancel(self):
-        """Request a stop. Checked BETWEEN runs; the in-flight Abaqus job is not
-        interrupted."""
+        """Request a stop, checked BETWEEN runs.
+
+        This flag alone does not touch the job in flight; interrupting it is
+        OptimizationTab._on_cancel's job, which holds the process handle and
+        the job name. See DomainConvergenceWorker.cancel for why the previous
+        wording ("the in-flight Abaqus job is not interrupted") was true of
+        the flag but false of the Cancel button.
+        """
         self._cancel = True
 
     def run(self):

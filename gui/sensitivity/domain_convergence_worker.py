@@ -34,9 +34,19 @@ class DomainConvergenceWorker(QThread):
         self._cancel = False
 
     def cancel(self):
-        """Request a stop. Checked BETWEEN runs: the Abaqus job currently in
-        flight is not interrupted (the study would otherwise be left with a
-        half-written bundle)."""
+        """Request a stop, checked BETWEEN runs.
+
+        This flag alone does not touch the job in flight. Interrupting it is
+        OptimizationTab._on_cancel's job, because the process handle and the
+        job name live there (`abaqus terminate`, then the process tree). That
+        split is why this docstring used to claim the in-flight run was never
+        interrupted: true of this flag, false of the Cancel button, which has
+        terminated the launcher since the tab was written.
+
+        The half-written bundle the old wording worried about cannot be read
+        as data: run_bundle returns None once the cancel event is set, and
+        run_domain_convergence treats a None bundle as a failed run.
+        """
         self._cancel = True
 
     def run(self):

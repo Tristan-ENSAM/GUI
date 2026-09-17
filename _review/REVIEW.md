@@ -18,7 +18,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 | m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | **CORRIGÉ** — supprimé sur décision de Tristan |
 | m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | **CORRIGÉ** (`bb31f67`) |
 | m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | **CORRIGÉ** (`5ac4255`) — `importorskip`, suite verte |
-| m7 | « Cancelling after the current run… » : message exact côté Optimization, périmé côté Sensitivity | Mineur | **CONSTATÉ, NON CORRIGÉ** — découvert le 17/09 via la réponse de Tristan à Q3 ; trois alternatives présentées, aucune tranchée |
+| m7 | Le Cancel des études d'optimisation n'atteignait jamais le solveur (test d'annulation enfermé dans une boucle bloquante, `terminate()` sur le seul lanceur, pas de `abaqus terminate`) | **Majeur** | **CORRIGÉ** — aligné sur le schéma de Sensitivity sur décision de Tristan (option c) ; 6 tests ajoutés |
 
 ## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
 
@@ -1128,58 +1128,66 @@ dépendance volontairement optionnelle côté production.**
   `requirements.txt`. Correction : `pytest.importorskip("imageio")` en
   tête des tests concernés (ou dans `tests/conftest.py`).
 
-### m7 — « Cancelling after the current run… » : exact dans un onglet, faux dans l'autre
+### m7 — le Cancel des études d'optimisation n'atteignait pas le solveur
 
-**Origine du constat.** Il ne vient pas de ma lecture du code mais de la
-réponse de Tristan à la question Q3 (17/09) : *« avant quand je cancellais une
+> **Reclassé Majeur.** Il garde l'identifiant `m7` sous lequel il a été ouvert,
+> et reste rangé ici, mais sa sévérité a été relevée une fois le diagnostic
+> établi : il ne s'agissait pas d'un libellé trompeur mais d'un bouton Cancel
+> sans effet sur le solveur.
+
+**Origine.** La réponse de Tristan à Q3 (17/09) : *« quand je cancellais une
 run ça me disait "pipeline will be canceled after actual run" et pour
-contourner ça je terminais le job en cours à la main avec `abaqus terminate
-job=<nom>` »*. Le message qu'il cite de mémoire correspond à deux endroits du
-code, et les deux ne se comportent pas pareil.
+contourner ça je terminais le job à la main avec `abaqus terminate
+job=<nom>` »*.
 
-**FAIT — le même texte, deux comportements opposés :**
+**Ma première rédaction de ce constat était fausse et a été remplacée.**
+J'avais conclu, en lisant les seules docstrings de
+`domain_convergence_worker.py:37` et `mesh_gci_worker.py:36` (« the in-flight
+Abaqus job is not interrupted »), que l'onglet Optimization n'interrompait
+délibérément rien, et que le message était donc exact. La lecture de
+`optimization_tab.py:_make_run_bundle` montre l'inverse : un second mécanisme,
+`self._cancel_evt`, appelait bien `proc.terminate()` sur le run en vol. Les
+docstrings étaient vraies du drapeau du worker et fausses du bouton Cancel.
+Corrigées toutes les deux.
 
-| Émetteur | Worker appelé | Le job en vol est-il interrompu ? |
+**FAIT — trois défauts cumulés dans l'ancien chemin d'annulation :**
+
+| # | Constat | Conséquence |
 |---|---|---|
-| `gui/tabs/optimization_tab.py:1027` | `DomainConvergenceWorker.cancel` (`gui/sensitivity/domain_convergence_worker.py:36`), `MeshGciWorker.cancel` (`gui/sensitivity/mesh_gci_worker.py:35`) | **NON** — le drapeau est relu *entre* deux runs |
-| `gui/tabs/sensitivity_tab.py:787` | `SensitivityRunWorker.cancel` (`gui/sensitivity/run_worker.py:234`) | **OUI** — `abaqus terminate job=<name>`, puis repli par arbre de processus |
+| 1 | La boucle de suivi était `for raw in iter(proc.stdout.readline, b"")`, et le test d'annulation vivait **à l'intérieur** | `abaqus cae noGUI=` ne produit aucune sortie standard (constat M7) : la boucle bloquait jusqu'à la fin du process. **Le test d'annulation n'était jamais atteint.** C'est la cause du comportement observé par Tristan — le bouton semblait ne rien faire jusqu'à la fin du run. |
+| 2 | `proc.terminate()` visait le lanceur `abaqus cae` | N'atteint que l'enfant direct — c'est exactement M1. Le `standard.exe`/`explicit.exe` survit. |
+| 3 | Aucun `abaqus terminate job=` | Jetons de licence non rendus, alors que la voie propre existait déjà dans `run_worker.py:234`. |
 
-**Côté Optimization : ce n'est pas un défaut, c'est un choix assumé.** La
-docstring de `domain_convergence_worker.py:37-39` le motive explicitement :
-« the Abaqus job currently in flight is not interrupted (the study would
-otherwise be left with a half-written bundle) ». Le message est donc exact.
-Son coût est réel et mesuré par l'usage : pour ne pas attendre la fin du run,
-Tristan ouvrait un terminal et lançait `abaqus terminate` lui-même — c'est
-précisément la manœuvre que le code évite de faire à sa place, pour protéger
-le bundle de résultats. Le compromis mérite d'être revu, pas corrigé d'office.
+Le défaut 1 explique aussi pourquoi Q3 (« as-tu vu un processus orphelin ? »)
+n'a jamais eu de réponse : avec la boucle bloquante, le `terminate()` fautif
+n'était quasiment jamais exécuté, donc l'orphelin n'avait pas l'occasion
+d'apparaître.
 
-**Côté Sensitivity : le message est périmé.** `SensitivityRunWorker.cancel`
-interrompt bel et bien le run en vol — depuis le commit `5322c10` de Tristan
-lui-même (« Clean job cancellation via abaqus terminate », 01/09/2026), donc
-bien avant cette revue. Le texte de l'onglet n'a pas suivi : il annonce une
-annulation différée là où le code en fait une immédiate. Rien ne casse, mais
-l'utilisateur croit devoir attendre un run qui est déjà tué — et peut, comme
-ci-dessus, aller lancer à la main un `abaqus terminate` déjà émis par la GUI.
+**CORRIGÉ sur décision de Tristan (17/09), option (c) : aligner Optimization
+sur Sensitivity.** `optimization_tab.py:_on_cancel` applique désormais les deux
+mêmes étapes, dans le même ordre, que `SensitivityRunWorker.cancel` :
+`abaqus terminate job=<nom>` (voie propre, rend les licences), attente de 10 s,
+puis repli par arbre de processus. La boucle de suivi ne bloque plus sur
+`stdout` : elle suit `<job>.gui.log` par sondage de 400 ms — le canal créé par
+M7 — ce qui rend le test d'annulation atteignable et, effet de bord,
+fait enfin défiler le déroulé de chaque run dans le panneau de l'onglet.
+`build_abaqus_args` est réutilisé au lieu de la construction dupliquée
+(constat m1). Le libellé devient « Cancelling the current run… ».
 
-**Sévérité : mineure**, et strictement limitée au libellé de
-`sensitivity_tab.py:787`. Alternatives, sans arbitrage de ma part :
+**Le risque invoqué par l'ancienne docstring — un bundle à moitié écrit — ne
+se matérialise pas** : `run_bundle` retourne `None` dès que le drapeau
+d'annulation est posé, et les deux études traitent déjà un bundle `None`
+comme un run échoué. C'est vérifié par le code, pas supposé.
 
-- (a) Aligner le texte sur le code : « Cancelling the current run… » ou
-  « Terminating job <nom>… ». Une ligne, aucun risque, mais les deux onglets
-  affichent alors des messages différents pour un même bouton.
-- (b) Aligner le code sur le texte, c'est-à-dire retirer le `terminate` du
-  worker de sensibilité. Cohérence retrouvée entre les deux onglets, au prix
-  de la fonctionnalité que Tristan avait ajoutée en `5322c10` — et du retour
-  de la manœuvre manuelle.
-- (c) Aligner Optimization sur Sensitivity : interrompre aussi le run en vol
-  des études de domaine et de maillage. Supprime la manœuvre manuelle
-  partout, mais réintroduit exactement le risque que la docstring invoque
-  (bundle à moitié écrit) — il faudrait alors traiter le run annulé comme
-  échoué, ce que `run_worker.py:356-358` fait déjà (`runDone.emit(i, False)`)
-  et ce que les deux autres workers ne font pas.
+**Réserve, non levée :** `abaqus terminate` est appelé depuis le thread GUI et
+bloque jusqu'à 10 s. C'est le même gel que le constat M3, clos sans correction
+sur ta décision au motif que `terminate` répond vite (0,63 s mesuré). La même
+réserve vaut ici, avec le même argument.
 
-Aucune de ces trois options n'a été appliquée : le constat est arrivé après
-la clôture de la revue, et le choix engage l'ergonomie, pas la correction.
+**Non testé en conditions réelles** : 6 tests de non-régression couvrent les
+deux étapes, le repli, le libellé et le suivi de journal, tous avec des doubles.
+Le chemin réel — un vrai solveur Abaqus tué sous Windows — reste dans le
+périmètre décrit par « Limite de la méthode ».
 
 ### Style
 
@@ -1485,3 +1493,23 @@ relevé précédent (« 580 passed, 3 skipped »), donc la base à comparer est
 Les 3 tests `imageio` sont désormais **réussis** et non plus ignorés — c'est
 la seule différence de couverture réelle avec le relevé d'avant la fusion, et
 elle vient de l'environnement, pas du code.
+
+### Relevé après la correction m7 (17/09)
+
+Mêmes conditions que le relevé précédent, sur l'arbre portant la correction du
+Cancel des études d'optimisation.
+
+```
+QT_QPA_PLATFORM=offscreen pytest -q --ignore=tests/test_mesh_pipeline.py
+  589 passed in 131.67s (0:02:11)
+
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_mesh_pipeline.py
+  11 passed in 133.74s (0:02:13)
+```
+
+**600 réussis, 0 ignoré, 0 échec**, contre 594 au relevé précédent.
+
+Réconciliation, vérifiée par collecte et non par soustraction :
+`pytest --collect-only` donne **583 avant / 589 après** en passe 1, soit
+**+6**, et `TestOptimizationTabCancelsTheRunInFlight` en collecte exactement
+**6**. Aucun test supprimé. 594 + 6 = 600, ce que la mesure donne.

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,9 @@ from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
 from gui.sensitivity.domain_convergence_worker import DomainConvergenceWorker
+from gui.sensitivity.run_worker import (
+    abaqus_terminate_job, build_abaqus_args, kill_process_tree_by_pid,
+    script_log_path)
 from gui.core.domain_sizing import (
     DIMENSION_NAMES, diagonal, diagonal_limit)
 from gui.results.reader import ResultsBundle
@@ -79,6 +83,12 @@ class OptimizationTab(QWidget):
         self._cpus_getter = cpus_getter
         self._initial = None            # DomainDims from Merchant
         self._cancel_evt = threading.Event()
+        # Published by run_bundle so _on_cancel can name the job to
+        # `abaqus terminate` and reach the solver behind the launcher.
+        self._current_job = None
+        self._current_proc = None
+        self._current_abaqus_cmd = None
+        self._current_run_dir = None
         self._hist = {}                 # param key -> list of (value, {q: E_q})
         self._current_sta = None        # current job's .sta path (for progress)
         self._sim_timer = QTimer(self)
@@ -587,13 +597,28 @@ class OptimizationTab(QWidget):
             return Path(workdir)
 
     # -- Abaqus launcher (replicates the Sensitivity run mechanism) --------
+    def _emit_log_tail(self, log_path, offset: int) -> int:
+        """Emit whatever run_simul.py appended since `offset`; return the new
+        offset. Same contract as SensitivityRunWorker._emit_log_tail: read from
+        a byte position rather than re-reading, and latin-1 so a decode error
+        cannot silently stop the live log."""
+        try:
+            with open(log_path, "rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                offset = handle.tell()
+        except OSError:
+            return offset          # not created yet, or already gone
+        if chunk:
+            self._log_ui(chunk.decode("latin-1", errors="replace"))
+        return offset
+
     def _make_run_bundle(self, prefs, run_dir, cpus, prefix):
         import subprocess
 
         counter = {"i": 0}
 
         def run_bundle(cfg):
-            self._cancel_evt.clear() if False else None
             i = counter["i"]; counter["i"] += 1
             job = "%s_run%03d" % (prefix, i)
             out_path = Path(run_dir) / ("%s.results.npz" % job)
@@ -603,10 +628,9 @@ class OptimizationTab(QWidget):
                     out_path.unlink()
             except Exception:
                 log_swallowed("removing stale bundle", level=logging.DEBUG)
-            args = [prefs.abaqus_cmd, "cae",
-                    "noGUI=%s" % prefs.abaqus_script, "--",
-                    "--model_cfg", repr(cfg.to_params_dict()),
-                    "--run_cfg", repr({"cpus": cpus, "job_name": job})]
+            args = build_abaqus_args(
+                prefs.abaqus_cmd, prefs.abaqus_script,
+                cfg.to_params_dict(), {"cpus": cpus, "job_name": job})
             _ms = (float(getattr(cfg.step, "mass_scaling_factor", 1.0))
                    if getattr(cfg.step, "mass_scaling_enabled", False) else 1.0)
             self._log_ui("\n%s\n[%s] ms=%.4g wp=%.4g tool=%.4g | "
@@ -616,26 +640,48 @@ class OptimizationTab(QWidget):
                             cfg.euler_geometry.h_wp, cfg.euler_geometry.h_void,
                             cfg.euler_geometry.l_wp, cfg.euler_geometry.l_void,
                             "-" * 60))
+            # Published BEFORE Popen so a Cancel landing during start-up can
+            # still name the job to `abaqus terminate`.
+            self._current_job = job
+            self._current_abaqus_cmd = prefs.abaqus_cmd
+            self._current_run_dir = run_dir
             try:
                 proc = subprocess.Popen(
                     args, cwd=str(run_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except Exception as e:
                 self._log_ui("failed to start Abaqus: %s\n" % e)
+                self._current_job = None
                 return None
+            self._current_proc = proc
+
+            # Follow the run by TAILING THE SCRIPT'S LOG, not its stdout.
+            # `abaqus cae noGUI=` runs run_simul.py in a separate kernel
+            # process whose stdout reaches nobody (see M7 in _review/REVIEW.md),
+            # so the old `iter(proc.stdout.readline, b"")` blocked until the
+            # process exited. That is what made Cancel look like it did
+            # nothing: the cancel test sat inside a loop no line ever woke.
+            log_path = script_log_path(run_dir, job)
+            offset = 0
+            while proc.poll() is None:
+                if self._cancel_evt.is_set():
+                    break
+                offset = self._emit_log_tail(log_path, offset)
+                time.sleep(0.4)
+            # The lines written since the last tick explain how the run ended.
+            self._emit_log_tail(log_path, offset)
+            # Whatever the launcher itself put on stdout (licence banner, a
+            # fatal error before the script starts). Read once, after exit.
             try:
-                for raw in iter(proc.stdout.readline, b""):
-                    if self._cancel_evt.is_set():
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            log_swallowed("terminating Abaqus",
-                                          level=logging.DEBUG)
-                        break
-                    self._log_ui(raw.decode("cp1252", errors="replace"))
+                rest = proc.stdout.read()
+                if rest:
+                    self._log_ui(rest.decode("cp1252", errors="replace"))
             except Exception:
-                log_swallowed("streaming Abaqus stdout", level=logging.DEBUG)
+                log_swallowed("reading Abaqus launcher output",
+                              level=logging.DEBUG)
             proc.wait()
+            self._current_proc = None
+            self._current_job = None
             if self._cancel_evt.is_set() or proc.returncode != 0 \
                     or not out_path.exists():
                 self._log_ui("[%s] no bundle (rc=%s)\n" % (job, proc.returncode))
@@ -1019,12 +1065,48 @@ class OptimizationTab(QWidget):
     # Cancel / failure
     # ===================================================================
     def _on_cancel(self):
+        """Stop the study AND the run currently in flight.
+
+        Same two stages as SensitivityRunWorker.cancel, in the same order:
+          1. ``abaqus terminate job=<name>`` -- the clean route: it stops the
+             solver AND releases the licence tokens.
+          2. kill the process tree -- the fallback, for when Abaqus does not
+             answer (no .cid yet, job already finishing, hung solver). This
+             leaves the tokens checked out, hence the ordering.
+
+        Before this, cancelling only called ``proc.terminate()`` on the
+        ``abaqus cae`` launcher: the solver behind it survived as an orphan
+        (M1), the licence stayed checked out, and the test itself sat in a
+        loop reading a stdout that never produces a line (M7).
+
+        The run interrupted here is reported as failed -- run_bundle returns
+        None on a set cancel flag, which the studies already treat as "no
+        usable result" -- so a half-written bundle is never read as data.
+        """
         for attr in ("_dc_worker", "_mesh_worker"):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
                 w.cancel()
         self._cancel_evt.set()
-        self.lbl_status.setText("Cancelling after the current run\u2026")
+        self.lbl_status.setText("Cancelling the current run\u2026")
+
+        job, proc = self._current_job, self._current_proc
+        cmd, run_dir = self._current_abaqus_cmd, self._current_run_dir
+        if job and cmd:
+            self._log_ui("[CANCEL] asking Abaqus to terminate job %s" % job)
+            if abaqus_terminate_job(cmd, job, run_dir):
+                if proc is not None:
+                    try:
+                        # Give the solver a moment to unwind before force-killing.
+                        proc.wait(timeout=10.0)
+                        return
+                    except Exception:
+                        log_swallowed("waiting for the terminated job to exit",
+                                      level=logging.DEBUG)
+        if proc is not None and proc.poll() is None:
+            self._log_ui("[CANCEL] Abaqus did not answer; killing the process "
+                         "tree (licence tokens stay checked out)")
+            kill_process_tree_by_pid(proc.pid)
 
     def _on_fail(self, msg):
         self._stop_progress()

@@ -142,3 +142,101 @@ class TestWorkerTracksCurrentJob:
         assert w._current_job is None
         w.cancel()
         assert w._cancel is True
+
+
+class TestOptimizationTabCancelsTheRunInFlight:
+    """The Optimization studies now cancel the way the sensitivity campaigns
+    do: `abaqus terminate` first, process tree only as a fallback.
+
+    Before this, _on_cancel called proc.terminate() on the `abaqus cae`
+    launcher. That reaches the launcher alone -- the solver behind it survives
+    (M1) and the licence stays checked out -- and the test that triggered it
+    sat inside `iter(proc.stdout.readline, b"")`, a loop no line ever wakes,
+    because `abaqus cae noGUI=` produces no stdout (M7). The button therefore
+    appeared to do nothing until the run ended on its own.
+    """
+
+    @pytest.fixture
+    def tab(self, qapp):
+        from gui.core.model_config import ModelConfig
+        from gui.tabs.optimization_tab import OptimizationTab
+        return OptimizationTab(ModelConfig())
+
+    class _Proc:
+        def __init__(self, alive=True):
+            self.pid = 4321
+            self._alive = alive
+            self.waited = None
+        def poll(self):
+            return None if self._alive else 0
+        def wait(self, timeout=None):
+            self.waited = timeout
+            if self._alive:
+                raise RuntimeError("still running")
+            return 0
+
+    def test_idle_cancel_touches_nothing(self, tab, monkeypatch):
+        # No study running: no job name, no process. Must not raise, and must
+        # not spawn a terminate for a job that does not exist.
+        calls = []
+        monkeypatch.setattr("gui.tabs.optimization_tab.abaqus_terminate_job",
+                            lambda *a: calls.append(a) or True)
+        tab._on_cancel()
+        assert calls == []
+        assert tab._cancel_evt.is_set()
+
+    def test_clean_route_first_and_no_kill_when_it_answers(self, tab,
+                                                           monkeypatch):
+        proc = self._Proc(alive=False)      # exits when asked politely
+        tab._current_job = "GCI_run002"
+        tab._current_proc = proc
+        tab._current_abaqus_cmd = "abaqus"
+        tab._current_run_dir = "/wd"
+        seen, killed = [], []
+        monkeypatch.setattr("gui.tabs.optimization_tab.abaqus_terminate_job",
+                            lambda *a: seen.append(a) or True)
+        monkeypatch.setattr("gui.tabs.optimization_tab.kill_process_tree_by_pid",
+                            lambda pid: killed.append(pid))
+        tab._on_cancel()
+        assert seen == [("abaqus", "GCI_run002", "/wd")]
+        # The licence-friendly route worked, so the tree is left alone.
+        assert killed == []
+        assert proc.waited == 10.0
+
+    def test_falls_back_to_the_tree_when_abaqus_stays_silent(self, tab,
+                                                             monkeypatch):
+        proc = self._Proc(alive=True)       # ignores the terminate
+        tab._current_job = "domainsizing_run000"
+        tab._current_proc = proc
+        tab._current_abaqus_cmd = "abaqus"
+        tab._current_run_dir = "/wd"
+        killed = []
+        monkeypatch.setattr("gui.tabs.optimization_tab.abaqus_terminate_job",
+                            lambda *a: False)
+        monkeypatch.setattr("gui.tabs.optimization_tab.kill_process_tree_by_pid",
+                            lambda pid: killed.append(pid))
+        tab._on_cancel()
+        assert killed == [4321]
+
+    def test_the_label_no_longer_promises_a_deferred_cancel(self, tab):
+        tab._on_cancel()
+        text = tab.lbl_status.text()
+        assert "after the current run" not in text
+        assert "current run" in text
+
+    def test_the_log_tail_emits_only_new_bytes(self, tab, tmp_path):
+        # Same contract as the campaign worker: the panel must not replay what
+        # it already shows, and a non-ASCII byte must not stop the live log.
+        log = tmp_path / "GCI_run000.gui.log"
+        log.write_bytes(b"[STAGE] SOLVE_START\n")
+        offset = tab._emit_log_tail(log, 0)
+        assert "[STAGE] SOLVE_START" in tab.log.toPlainText()
+        with open(log, "ab") as handle:
+            handle.write(b"\xe9chec\n")
+        tab._emit_log_tail(log, offset)
+        panel = tab.log.toPlainText()
+        assert "chec" in panel
+        assert panel.count("[STAGE] SOLVE_START") == 1
+
+    def test_an_absent_log_is_not_an_error(self, tab, tmp_path):
+        assert tab._emit_log_tail(tmp_path / "nope.gui.log", 0) == 0
