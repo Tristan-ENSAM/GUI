@@ -63,7 +63,11 @@ def test_image_sequence_array():
 
 
 def test_image_sequence_folder_standard_formats(tmp_path):
-    import imageio.v3 as iio
+    # imageio is OPTIONAL: requirements.txt does not list it, and
+    # sequence_io falls back Pillow -> imageio -> matplotlib precisely
+    # so the product works without it. Only this test needs it, to
+    # WRITE the fixture images.
+    iio = pytest.importorskip("imageio.v3")
     from gui.core.sequence_io import ImageSequence
     for i in range(4):
         iio.imwrite(tmp_path / ("frame_%03d.png" % i),
@@ -78,7 +82,11 @@ def test_image_sequence_folder_standard_formats(tmp_path):
 
 
 def test_image_sequence_folder_jpeg(tmp_path):
-    import imageio.v3 as iio
+    # imageio is OPTIONAL: requirements.txt does not list it, and
+    # sequence_io falls back Pillow -> imageio -> matplotlib precisely
+    # so the product works without it. Only this test needs it, to
+    # WRITE the fixture images.
+    iio = pytest.importorskip("imageio.v3")
     from gui.core.sequence_io import ImageSequence
     for i in range(3):
         iio.imwrite(tmp_path / ("f%02d.jpg" % i),
@@ -154,7 +162,11 @@ def test_experimental_container_has_subtabs(qapp):
 def test_image_sequence_dir_natural_sort(tmp_path):
     """A folder of PNG frames must load in natural (capture) order, not
     lexicographic order, and support standard formats."""
-    import imageio.v3 as iio
+    # imageio is OPTIONAL: requirements.txt does not list it, and
+    # sequence_io falls back Pillow -> imageio -> matplotlib precisely
+    # so the product works without it. Only this test needs it, to
+    # WRITE the fixture images.
+    iio = pytest.importorskip("imageio.v3")
     # Non zero-padded names: lexicographic would put 10,11,12 before 2.
     for n in range(1, 13):
         img = np.full((4, 4), n, dtype=np.uint8)

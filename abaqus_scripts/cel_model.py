@@ -67,6 +67,20 @@ _BC_DEFINITION_MAP = {
     "both":    BOTH,
 }
 
+# Field-output variables a *FILTER actually applies to, out of the frozen list
+# in prepare_parameters(). Evidence, from a real run (job cancel_test):
+#   * the ODB carried V_CAMERABAND and ERV_CAMERABAND (also U/UR/VR, which
+#     Abaqus emits alongside V) but plain TEMP, EVF, PEEQ, S, STATUS, CPRESS
+#     and CSHEARMAG -- no suffix, hence no filtering;
+#   * the .sta stated that nodal coordinates/temperatures and element PEEQ,
+#     STATUS, coordinates, temperatures and FIELD VARIABLES (EVF) "are not
+#     (digitally) filtered";
+#   * the .dat NOTE stated the filter never applies to contact output.
+# S is in the unfiltered group because the ODB shows it unsuffixed, though it
+# appears in neither .sta warning list -- move it here if a run ever proves
+# otherwise.
+_FILTERABLE_FO_VARIABLES = ('V', 'ERV')
+
 
 def prepare_parameters(model_cfg, run_cfg):
     """Read/validate GUI dictionaries and return normalized parameters."""
@@ -573,30 +587,52 @@ def create_step(model, assembly, RP, p):
                   % p["filter_cutoff_history"])
         sys.stdout.flush()
 
-    # ---- Field output (frozen variable list, see prepare_parameters) -------
-    if fo_filter is None:
+    # ---- Field output -----------------------------------------------------
+    # TWO requests, always in this shape:
+    #
+    #   F-Output-1        every variable, NEVER filtered. Always emitted, so
+    #                     the raw series is in the ODB whatever the filter
+    #                     setting: the numericist compares filtered against
+    #                     raw by hand in Abaqus/Viewer, and COORD is what
+    #                     display groups by node coordinate are built from.
+    #   F-Output-Filtered only the variables Abaqus can actually filter, and
+    #                     only when a cutoff is set.
+    #
+    # WHY THE SPLIT: a *FILTER on the single combined request did NOT filter
+    # most of its variables. Abaqus said so on every run, in the .sta:
+    #   "Nodal Output for coordinates and temperatures are not (digitally)
+    #    filtered" and "Element Output for Equivalent plastic strains,
+    #    Status, ..., Temperatures and Field Variables are not (digitally)
+    #    filtered", plus a .dat NOTE that contact output is never filtered.
+    # The ODB agrees: V/ERV came back as V_CAMERABAND/ERV_CAMERABAND while
+    # TEMP, EVF, PEEQ, S and the contact outputs kept their bare names. So
+    # the old single request claimed an anti-aliasing guarantee it only
+    # delivered for V and ERV, and bought a handful of warnings for the rest.
+    model.FieldOutputRequest(
+        name='F-Output-1', createStepName='Cut',
+        variables=fo_variables, numIntervals=n_frames)
+
+    if fo_filter is not None:
         model.FieldOutputRequest(
-            name='F-Output-1', createStepName='Cut',
-            variables=fo_variables, numIntervals=n_frames)
-    else:
-        model.FieldOutputRequest(
-            name='F-Output-1', createStepName='Cut',
-            variables=fo_variables, numIntervals=n_frames,
+            name='F-Output-Filtered', createStepName='Cut',
+            variables=_FILTERABLE_FO_VARIABLES, numIntervals=n_frames,
             filter=fo_filter)
 
     # ---- History output ---------------------------------------------------
-    # RF on the tool RP = the cutting forces. Filtered only to avoid aliasing
-    # at the output rate; the real sensor bandwidth is applied afterwards in
-    # post-processing (a low runtime cutoff would demand an unreachable
-    # mass-scaling factor).
-    if ho_filter is None:
+    # RF on the tool RP = the cutting forces. Same two-request shape: the raw
+    # series always lands in the ODB, the filtered one is added on top. The
+    # filter only prevents ALIASING at the output rate; the real sensor
+    # bandwidth is applied afterwards in post-processing (a low runtime cutoff
+    # would demand an unreachable mass-scaling factor). Cost of keeping both:
+    # two extra scalar series.
+    model.HistoryOutputRequest(
+        name='H-Output-1', createStepName='Cut',
+        region=RP, variables=('RF1', 'RF2',),
+        numIntervals=ho_n_intervals)
+
+    if ho_filter is not None:
         model.HistoryOutputRequest(
-            name='H-Output-1', createStepName='Cut',
-            region=RP, variables=('RF1', 'RF2',),
-            numIntervals=ho_n_intervals)
-    else:
-        model.HistoryOutputRequest(
-            name='H-Output-1', createStepName='Cut',
+            name='H-Output-1-Filtered', createStepName='Cut',
             region=RP, variables=('RF1', 'RF2',),
             numIntervals=ho_n_intervals, filter=ho_filter)
 
@@ -607,20 +643,36 @@ def create_step(model, assembly, RP, p):
         name='H-Output-2', createStepName='Cut',
         variables=PRESELECT, numIntervals=ho_n_intervals)
 
-    # Eulerian mass/volume per material instance, over the whole Eulerian
-    # domain: a conservation check (is material leaving the domain, or being
-    # lost numerically?) that the model had no indicator for. Cheap: two
-    # scalars per sample. Not filtered -- a conservation check must see the
+    # Mass and volume over the Eulerian domain: a conservation check (is
+    # material leaving the domain, or being lost numerically?) that the model
+    # had no indicator for. Not filtered -- a conservation check must see the
     # raw balance.
+    # MASS and EVOL -- NOT MASSEUL/VOLEUL. Those two names were never valid:
+    # from e9e967f onwards Abaqus rejected this request outright with
+    # "Invalid variables are specified in an output request", so the
+    # conservation check has never existed in a single ODB. The failure went
+    # unnoticed because the warning below travelled on a stdout that
+    # `abaqus cae noGUI=` discards (see run_simul._Tee).
+    #
+    # The replacement is measured, not guessed. _review/masseul_probe.py put
+    # candidates to the real model one at a time: MASSEUL and VOLEUL are each
+    # invalid alone, MASS and EVOL are both accepted on this exact region, and
+    # an EVF control passed -- proving the region and the request shape were
+    # never at fault.
+    #
+    # STILL UNVERIFIED, to check on the first real run: whether these arrive
+    # as ONE series for the set or one PER ELEMENT. The Eulerian set holds
+    # ~10^4 elements, so the per-element form would bloat the ODB and this
+    # request should then be narrowed or dropped rather than kept.
     try:
         model.HistoryOutputRequest(
             name='H-Output-3', createStepName='Cut',
             region=assembly.sets['Euler'],
-            variables=('MASSEUL', 'VOLEUL'),
+            variables=('MASS', 'EVOL'),
             numIntervals=ho_n_intervals)
     except Exception as exc:
         # Non-fatal: losing the conservation check must not lose the run.
-        print("[WARNING] MASSEUL/VOLEUL history not created: %s" % exc)
+        print("[WARNING] MASS/EVOL history not created: %s" % exc)
         sys.stdout.flush()
 
 

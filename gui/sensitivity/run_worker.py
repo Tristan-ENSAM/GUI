@@ -40,6 +40,29 @@ def _popen_group_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+def build_abaqus_args(abaqus_cmd: str, abaqus_script: str,
+                      model_params: dict, run_params: dict) -> list:
+    """The exact argv that runs `run_simul.py` under Abaqus/CAE.
+
+    Single source of truth for the launch contract, which three call sites
+    used to spell out independently: the Job tab's dry-run preview, the Job
+    tab's real launch, and the sensitivity worker. They cannot be allowed to
+    drift -- a change made in one of them would silently break the others,
+    which is exactly how the two cancel paths ended up behaving differently.
+
+    Both dicts cross the process boundary as `repr()` and are read back with
+    `ast.literal_eval` (run_simul.parse_arguments), so they must contain
+    literals only -- see ModelConfig.to_params_dict.
+
+    Returns the FULL argv, `abaqus_cmd` included at index 0. QProcess takes
+    the program separately from its arguments, so that caller passes
+    `args[0]` and `args[1:]`.
+    """
+    return [abaqus_cmd, "cae", "noGUI=%s" % abaqus_script, "--",
+            "--model_cfg", repr(model_params),
+            "--run_cfg", repr(run_params)]
+
+
 def abaqus_terminate_job(abaqus_cmd: str, job_name: str, workdir,
                          timeout: float = 20.0) -> bool:
     """Ask Abaqus to stop `job_name` cleanly: ``abaqus terminate job=<name>``.
@@ -70,6 +93,35 @@ def abaqus_terminate_job(abaqus_cmd: str, job_name: str, workdir,
         return completed.returncode == 0
     except Exception:
         log_swallowed("asking Abaqus to terminate job %r" % job_name,
+                      level=logging.DEBUG)
+        return False
+
+
+def kill_process_tree_by_pid(pid: int) -> bool:
+    """Kill `pid` AND every process it spawned, addressing it by PID only.
+
+    For callers holding a QProcess rather than a Popen: QProcess.terminate()
+    and .kill() reach only the direct child, so on Windows they stop
+    `abaqus.bat`/`cae.exe` and leave the solver processes it spawned
+    (pre, standard.exe, explicit.exe, package) running.
+
+    Windows only -- returns False everywhere else, and the caller must then
+    fall back to its own single-process kill. The POSIX kill-a-whole-group
+    route used by `_terminate_process_tree` is NOT reusable here: it relies on
+    Popen(start_new_session=True) having put the child in its own process
+    group, which QProcess does not do. os.getpgid() on a QProcess child
+    returns the GUI's OWN group, so killpg would take the GUI down with it.
+    """
+    if not pid:
+        return False
+    if os.name != "nt":
+        return False
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                       capture_output=True, check=False)
+        return True
+    except Exception:
+        log_swallowed("killing the process tree of pid %r" % pid,
                       level=logging.DEBUG)
         return False
 
@@ -220,10 +272,8 @@ class SensitivityRunWorker(QObject):
 
         model_params = cfg.to_params_dict()
         run_params = {"cpus": self._cpus, "job_name": job_name}
-        args = [self._abaqus_cmd, "cae",
-                "noGUI=%s" % self._abaqus_script, "--",
-                "--model_cfg", repr(model_params),
-                "--run_cfg", repr(run_params)]
+        args = build_abaqus_args(self._abaqus_cmd, self._abaqus_script,
+                                 model_params, run_params)
 
         self.log.emit("\n%s\n[run %d] %s\n%s\n"
                       % ("-" * 60, i + 1, job_name, "-" * 60))

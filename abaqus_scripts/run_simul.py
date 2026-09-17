@@ -65,6 +65,56 @@ def parse_arguments(argv=None):
     return model_cfg, run_cfg
 
 
+LOG_SUFFIX = ".gui.log"
+
+
+def log_path_for(job_name, workdir=None):
+    """Where this run's diagnostics are written, for both sides to agree on.
+
+    The GUI derives the same path to tail the file, so the rule lives here
+    rather than being spelled out twice."""
+    base = workdir if workdir is not None else os.getcwd()
+    return os.path.join(base, "%s%s" % (job_name, LOG_SUFFIX))
+
+
+class _Tee(object):
+    """Writes to a file AND to the original stream.
+
+    WHY THIS EXISTS: `abaqus cae noGUI=` runs this script inside a separate
+    kernel process (ABQcaeK.exe) whose stdout reaches nobody -- not the GUI,
+    not even a console redirection (finding M7). Every print in cel_model and
+    cel_results was therefore written for no reader, including the message
+    that finally diagnosed the MASSEUL failure. Diagnostics go to a file
+    instead, which demonstrably works.
+
+    The original stream is kept so nothing is lost if this ever runs somewhere
+    stdout IS connected. Writes are flushed immediately: the GUI tails the
+    file while the job runs, and a crash must not swallow the last lines.
+    """
+
+    def __init__(self, handle, original):
+        self._handle = handle
+        self._original = original
+
+    def write(self, text):
+        try:
+            self._handle.write(text)
+            self._handle.flush()
+        except Exception:
+            pass
+        try:
+            self._original.write(text)
+        except Exception:
+            pass
+
+    def flush(self):
+        for stream in (self._handle, self._original):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
 def main():
     _ensure_script_dir()
 
@@ -75,17 +125,38 @@ def main():
     from cel_results import extract_results
 
     model_cfg, run_cfg = parse_arguments()
-    model, params = build_model(model_cfg, run_cfg)
-    job = create_job(model, params)
 
-    if run_job(job, params):
-        extract_results(params["job_name"], model_cfg)
-        # Only after a successful run AND after extraction: the extractor needs
-        # the .odb, and on a failure the scratch files are what you diagnose
-        # with. run_job() raises on failure, and write_inp_only returns False,
-        # so neither path reaches this line.
-        if bool(run_cfg.get("cleanup_working_dir", True)):
-            cleanup_working_directory(params["job_name"])
+    # Redirect before build_model: the filter and MASSEUL messages are printed
+    # during model construction.
+    handle = open(log_path_for(run_cfg.get("job_name", "job")), "w")
+    saved_out, saved_err = sys.stdout, sys.stderr
+    sys.stdout = _Tee(handle, saved_out)
+    sys.stderr = _Tee(handle, saved_err)
+    try:
+        model, params = build_model(model_cfg, run_cfg)
+        job = create_job(model, params)
+
+        if run_job(job, params):
+            extract_results(params["job_name"], model_cfg)
+            # Only after a successful run AND after extraction: the extractor
+            # needs the .odb, and on a failure the scratch files are what you
+            # diagnose with. run_job() raises on failure, and write_inp_only
+            # returns False, so neither path reaches this line.
+            if bool(run_cfg.get("cleanup_working_dir", True)):
+                cleanup_working_directory(params["job_name"])
+    except Exception:
+        # The traceback is the most valuable thing this script ever prints, and
+        # it was going nowhere. Record it, then re-raise so the exit code still
+        # reports the failure.
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

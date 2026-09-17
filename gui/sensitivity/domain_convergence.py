@@ -5,8 +5,9 @@ Rationale
 ---------
 Domain sizing is an *independence* problem, not a derivative one: we want the
 smallest Eulerian domain whose boundaries no longer influence a fixed
-measurement zone (the ZOI). The forward-difference Jacobian in
-``domain_jacobian`` divides a field difference by the perturbation step; when
+measurement zone (the ZOI). The forward-difference Jacobian approach (a
+``domain_jacobian`` module, since abandoned and removed) divided a field
+difference by the perturbation step; when
 the true boundary influence is small it is dominated by a step-independent
 floor, and the linearity ratio J(h)/J(2h) saturates at 2 ("noise, not
 sensitivity"). This module removes that failure mode by:

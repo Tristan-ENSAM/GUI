@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from gui.sensitivity.run_worker import abaqus_terminate_job
+from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        build_abaqus_args,
+                                        kill_process_tree_by_pid)
 
 
 def _script(path: Path, body: str) -> Path:
@@ -54,6 +56,80 @@ class TestAbaqusTerminateJob:
         (tmp_path / "J.cid").write_text("host:1\n")
         exe = _script(tmp_path / "fail.sh", "#!/bin/sh\nexit 1\n")
         assert abaqus_terminate_job(str(exe), "J", tmp_path) is False
+
+
+class TestBuildAbaqusArgs:
+    """The launch contract, shared by the Job tab (preview AND real launch)
+    and the sensitivity worker. Three call sites used to spell it out
+    separately; this pins the shape so they cannot drift apart again."""
+
+    def test_the_documented_command_shape(self):
+        args = build_abaqus_args("abq.bat", "run_simul.py",
+                                 {"a": 1}, {"job_name": "J"})
+        assert args == ["abq.bat", "cae", "noGUI=run_simul.py", "--",
+                        "--model_cfg", "{'a': 1}",
+                        "--run_cfg", "{'job_name': 'J'}"]
+
+    def test_the_program_is_index_zero(self):
+        # QProcess.start() wants program and arguments separately, so the Job
+        # tab passes args[0] and args[1:]. Guard that split staying valid.
+        args = build_abaqus_args("abq.bat", "s.py", {}, {})
+        assert args[0] == "abq.bat"
+        assert args[1] == "cae"
+
+    def test_config_crosses_as_a_literal_repr(self):
+        """run_simul.parse_arguments reads both dicts back with
+        ast.literal_eval, so what is written must survive that round trip."""
+        import ast
+        model = {"geometry": {"bbox": {"xmin": -0.5}}, "flag": True}
+        run = {"cpus": 4, "job_name": "J", "write_inp_only": False}
+        args = build_abaqus_args("abq", "s.py", model, run)
+        assert ast.literal_eval(args[args.index("--model_cfg") + 1]) == model
+        assert ast.literal_eval(args[args.index("--run_cfg") + 1]) == run
+
+
+class TestKillProcessTreeByPid:
+    """The Job tab's fallback when `abaqus terminate` cannot answer.
+
+    Abaqus spawns the solver as its own process, so killing only the launcher
+    leaves standard.exe/explicit.exe orphaned with their licence tokens held.
+    """
+
+    def test_refuses_a_null_pid(self):
+        assert kill_process_tree_by_pid(0) is False
+
+    def test_posix_declines_so_the_caller_falls_back(self, monkeypatch):
+        # os.getpgid() on a QProcess child returns the GUI's OWN group (Qt
+        # does not put it in a new one), so killpg would kill the GUI. The
+        # function must decline rather than guess.
+        monkeypatch.setattr(os, "name", "posix")
+        called = []
+        monkeypatch.setattr("subprocess.run",
+                            lambda *a, **k: called.append(a))
+        assert kill_process_tree_by_pid(4321) is False
+        assert called == []
+
+    def test_windows_issues_taskkill_with_the_tree_flag(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen["args"] = args
+            return None
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+        assert kill_process_tree_by_pid(4321) is True
+        # /T is what makes it a TREE kill -- without it the solver survives.
+        assert seen["args"] == ["taskkill", "/F", "/T", "/PID", "4321"]
+
+    def test_a_failing_taskkill_reports_false(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "nt")
+
+        def _boom(*a, **k):
+            raise OSError("taskkill missing")
+
+        monkeypatch.setattr("subprocess.run", _boom)
+        assert kill_process_tree_by_pid(4321) is False
 
 
 class TestWorkerTracksCurrentJob:

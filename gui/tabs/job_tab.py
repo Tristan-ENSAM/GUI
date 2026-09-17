@@ -27,7 +27,9 @@ from PySide6.QtWidgets import (
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
-from gui.sensitivity.run_worker import abaqus_terminate_job
+from gui.sensitivity.run_worker import (abaqus_terminate_job,
+                                        build_abaqus_args,
+                                        kill_process_tree_by_pid)
 
 
 def _section_header(title: str) -> QLabel:
@@ -92,6 +94,8 @@ class JobTab(QWidget):
         self._proc: QProcess | None = None
         # Filled in `_run_abaqus`, read by `_finish_pipeline`.
         self._pipeline: dict = {}
+        # Byte offset already shown from the script log (see _poll_script_log).
+        self._log_offset: int = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -322,17 +326,10 @@ class JobTab(QWidget):
         # loop parallel etc.) on its own for now.
         run_params = {"cpus": cpus, "job_name": job_name}
 
-        # Reproduce ABQ.run_simul's command list literally.
-        cmd = [
-            prefs.abaqus_cmd,
-            "cae",
-            f"noGUI={prefs.abaqus_script}",
-            "--",
-            "--model_cfg",
-            repr(model_params),
-            "--run_cfg",
-            repr(run_params),
-        ]
+        # The same builder the real launch uses, so the preview cannot drift
+        # from what would actually be executed.
+        cmd = build_abaqus_args(prefs.abaqus_cmd, prefs.abaqus_script,
+                                model_params, run_params)
 
         # Pretty-print the output panel with clearly separated blocks.
         lines = []
@@ -518,15 +515,9 @@ class JobTab(QWidget):
             # bundle is written -- the user was warned in the dialog.
             args = ["job=%s" % job_name, "continue", "cpus=%d" % cpus]
         else:
-            args = [
-                "cae",
-                f"noGUI={prefs.abaqus_script}",
-                "--",
-                "--model_cfg",
-                repr(model_params),
-                "--run_cfg",
-                repr(run_params),
-            ]
+            # [1:] because QProcess.start() takes the program separately.
+            args = build_abaqus_args(prefs.abaqus_cmd, prefs.abaqus_script,
+                                     model_params, run_params)[1:]
 
         # Header in the output panel — replaces the dry-run text.
         if resume:
@@ -570,11 +561,25 @@ class JobTab(QWidget):
         self.btn_cancel.setEnabled(True)
         self.btn_generate.setEnabled(False)
 
+        # Where run_simul.py writes its diagnostics. `abaqus cae noGUI=` runs
+        # it in a separate kernel process whose stdout reaches nobody, so the
+        # panel is fed by tailing this file rather than by the pipe.
+        self._pipeline["log_path"] = wd / f"{job_name}.gui.log"
+        self._log_offset = 0
+        try:
+            # A stale log from a previous run of the same job would otherwise
+            # be replayed as if it were live.
+            Path(self._pipeline["log_path"]).unlink()
+        except OSError:
+            pass
+
         if write_inp_only:
-            # No solver -> no .sta to poll. Show an indeterminate-style note.
+            # No solver -> no .sta to poll, but the script log still needs
+            # tailing: this is where the model-build diagnostics appear.
             self.progress_bar.setValue(0)
             self.progress_label.setText("building model and writing .inp…")
             self._progress_group.setVisible(True)
+            self._sta_timer.start()
         else:
             # Show + reset the progress panel, then start polling the .sta.
             # The .sta won't exist for the first few seconds (Abaqus is busy
@@ -591,7 +596,9 @@ class JobTab(QWidget):
     def _finish_pipeline(self, success: bool):
         """Restore button states and emit a final marker. Called once
         the Abaqus run is over (success or failure)."""
-        # Stop the .sta poller and finalise the progress display.
+        # Drain the script log BEFORE stopping the timer: whatever was written
+        # since the last tick includes the very lines that explain a failure.
+        self._poll_script_log()
         self._sta_timer.stop()
         if success:
             self.progress_bar.setValue(100)
@@ -631,7 +638,13 @@ class JobTab(QWidget):
         something; in that case we leave the bar at 0 and the label
         with its waiting message.
         """
+        self._poll_script_log()
+
         pipe = getattr(self, "_pipeline", {})
+        if pipe.get("write_inp_only"):
+            # No solver, so no .sta will ever appear; the log tail above is
+            # all this tick has to do.
+            return
         sta_path = pipe.get("sta_path")
         if not sta_path:
             return
@@ -667,6 +680,30 @@ class JobTab(QWidget):
         if snap.kinetic_energy is not None:
             parts.append(f"KE = {snap.kinetic_energy:.2e}")
         self.progress_label.setText("   ·   ".join(parts))
+
+    def _poll_script_log(self):
+        """Append whatever run_simul.py has written since the last tick.
+
+        Reads from a byte offset rather than re-reading the file, so a long
+        run does not re-append what the panel already shows. Latin-1 decodes
+        any byte, which matters because the solver's messages are not
+        guaranteed to be ASCII and a decode error here would silently stop
+        the live log.
+        """
+        pipe = getattr(self, "_pipeline", {})
+        log_path = pipe.get("log_path")
+        if not log_path:
+            return
+        try:
+            with open(log_path, "rb") as handle:
+                handle.seek(self._log_offset)
+                chunk = handle.read()
+                self._log_offset = handle.tell()
+        except OSError:
+            # Not created yet, or vanished: nothing to show this tick.
+            return
+        if chunk:
+            self._append_output(chunk.decode("latin-1", errors="replace"))
 
     def _ask_existing_job(self, job_name, existing, has_restart):
         """Overwrite / resume / cancel when the job already exists.
@@ -716,8 +753,10 @@ class JobTab(QWidget):
              analysis executable AND RELEASES ITS LICENCE TOKENS. A hard kill
              leaves them checked out until the FlexNet server reclaims them,
              which on a shared pool penalises everyone else.
-          2. terminate/kill the process -- the fallback, when Abaqus does not
-             answer (no .cid yet, solver already exiting, hung job).
+          2. kill the process TREE -- the fallback, when Abaqus does not
+             answer (no .cid yet, solver already exiting, hung job). It must
+             be the tree, not just our direct child: Abaqus spawns the solver
+             as a separate process that outlives a kill aimed at the launcher.
 
         Either way the .odb may be left incomplete.
         """
@@ -748,12 +787,17 @@ class JobTab(QWidget):
                     self._append_output("\n[CANCELLED by user]\n")
                     return
 
-        # On Windows, terminate() sends WM_CLOSE which Abaqus may ignore;
-        # kill() is more reliable. Try terminate first, then kill if it
-        # hasn't exited within 2 seconds.
-        self._proc.terminate()
-        if not self._proc.waitForFinished(2000):
-            self._proc.kill()
+        # Fallback. `abaqus terminate` only works once the solver has written
+        # <job>.cid, so Cancel during the model build (or during extraction)
+        # always lands here. QProcess.terminate()/kill() reach only the direct
+        # child, which on Windows leaves the solver processes Abaqus spawned
+        # alive; kill the whole tree by PID there instead.
+        if not kill_process_tree_by_pid(self._proc.processId()):
+            # POSIX, or taskkill unavailable: terminate() sends WM_CLOSE which
+            # Abaqus may ignore, so escalate to kill() after 2 seconds.
+            self._proc.terminate()
+            if not self._proc.waitForFinished(2000):
+                self._proc.kill()
         self._append_output("\n\n[CANCELLED by user]\n")
 
     def _on_proc_output(self):

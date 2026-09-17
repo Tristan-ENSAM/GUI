@@ -1,4 +1,152 @@
-# Revue de fiabilisation — GUI_Abaqus (Phase 1 : audit en lecture seule)
+# Revue de fiabilisation — GUI_Abaqus
+
+Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
+
+## Statut des constats
+
+| ID | Constat | Sévérité | Statut |
+|---|---|---|---|
+| M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
+| M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
+| M3 | Le Cancel gèle l'UI (les deux chemins) — ampleur révisée à la baisse | Majeur | **CLOS SANS CORRECTION** sur décision de Tristan : `terminate` s'exécute vite, le gel est jugé acceptable |
+| M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CORRIGÉ** — remplacés par `MASS`/`EVOL`, noms établis empiriquement. Forme de la sortie à vérifier au premier run |
+| M5 | Le filtre Butterworth de champ ne s'applique PAS à `TEMP` ni `EVF`, contrairement à l'intention documentée | Majeur | **CORRIGÉ ET VÉRIFIÉ** sur un deck réel (`TEST_0.inp`, 16/09) |
+| M7 | `abaqus cae noGUI=` ne propage PAS la sortie standard du script — toute la couche de diagnostic du projet est invisible | Majeur | **CORRIGÉ** — journal fichier `<job>.gui.log` suivi par la GUI |
+| m6 | `COORD` demandé mais indisponible pour `EC3D8RT` (toute la pièce) | Mineur | **CLOS — NON-PROBLÈME** : Tristan confirme que `COORD` est bien dans l'ODB et que ses display groups fonctionnent. L'avertissement ne porte que sur la variante élémentaire |
+| m5 | Le repli `dataDouble` de `_read_data` reposerait sur une prémisse fausse | Mineur | **INFIRMÉ** — la vérification donne tort à mon hypothèse, le code est correct |
+| m1 | Duplication de la construction de la commande Abaqus | Mineur | **CORRIGÉ** (`edf0cf6`) — `build_abaqus_args()` unique, 3 tests |
+| m2 | Code d'extraction mort (`_TENSOR_REDUCERS`, von Mises) | Mineur | **CORRIGÉ** — supprimé sur décision de Tristan |
+| m3 | `try/except: pass` autour d'une assignation qui ne peut échouer | Mineur | **CORRIGÉ** (`bb31f67`) |
+| m4 | Suite de tests non tolérante à l'absence d'`imageio` | Mineur | **CORRIGÉ** (`5ac4255`) — `importorskip`, suite verte |
+
+## Vérification introspective — résultats réels (Abaqus 2022 HF8 de Tristan)
+
+`_review/check_api.py` v1 a été exécuté sur l'installation réelle
+(`abaqus cae noGUI=_review/check_api.py`). Sortie complète :
+`_review/check_api_report.txt` côté machine Abaqus.
+
+**VÉRIFIÉ (preuve = sortie du script) :**
+
+| Élément | Résultat |
+|---|---|
+| Interpréteur Abaqus | **Python 2.7.15** (MSC v.1928, 64 bit) — confirme la contrainte 2.7 de `cel_common.py:15-24`, qui n'était qu'une hypothèse jusqu'ici |
+| Les 44 constantes `abaqusConstants` utilisées | **toutes FOUND**, sans exception (`EC3D8RT`, `C3D8RT`, `NON_REFLECTING`, `ZERO_PRESSURE`, `EQUILIBRIUM`, `INFLOW`/`OUTFLOW`/`BOTH`, `JOHNSON_COOK`, `CONSTANTPRESSURE`, `MISES`, `PRESS`, `PRESELECT`, …) |
+| `abaqus.mdb`, `mdb.Model`, `mdb.Job` | FOUND |
+| `regionToolset.Region`, `mesh.ElemType`, `odbAccess.openOdb` | FOUND |
+
+C'est la confirmation la plus utile de l'audit : **aucune constante symbolique
+inventée ou mal nommée** dans tout le modèle CEL.
+
+**Les trois `[MISSING]` du rapport sont un DÉFAUT DU SCRIPT DE VÉRIFICATION,
+pas un constat sur le projet.** `sketch.ConstrainedSketch`, `part.Part` et
+`material.Material` sont signalés absents parce que v1 testait des noms au
+niveau MODULE que le code de production n'utilise jamais : `cel_model.py`
+appelle `model.ConstrainedSketch(...)`, `model.Part(...)`,
+`model.Material(...)` — des **méthodes de l'objet Model**. v1 vérifiait une
+façade inexistante au lieu de l'API réellement employée. Aucune conclusion
+sur le projet ne peut être tirée de ces trois lignes.
+
+**Ce que v1 n'a PAS couvert du tout** (il se contentait d'imprimer une note
+« à vérifier à la main ») — c'est-à-dire l'essentiel de l'inventaire :
+les 18 méthodes de `Model`, toutes les méthodes de `rootAssembly`
+(`seedEdgeByBias`, `DiscreteFieldByVolumeFraction`, `generateMesh`,
+`setElementType`…), les méthodes de `Material`, celles de `ContactProperty`,
+de `Job` (`writeInput`/`submit`/`waitForCompletion`), et **toute l'API
+d'extraction ODB** de `cel_results.py`.
+
+**`check_api.py` v2** corrige les deux problèmes : il instancie un modèle
+jetable en mémoire et introspecte les objets réels (puis le supprime ; il ne
+construit aucune géométrie, ne maille rien, ne soumet rien), et accepte un
+`.odb` existant pour couvrir `cel_results.py` :
+
+```
+abaqus cae noGUI=_review/check_api.py -- --odb C:\TEMP\ABQ_wd\<job>.odb
+```
+
+La branche ODB est celle qui compte le plus pour les points restants : elle
+seule peut confirmer `getSubset` / `getScalarField` / `dataDouble`, et
+surtout lister les `historyOutputs` réels — ce qui vérifie d'un coup
+**`MASSEUL`/`VOLEUL`** (cel_model.py:615-624, le point le plus risqué de
+l'inventaire, entouré d'un `try/except` justement parce que le doute
+existait), `RF1`/`RF2` et `ALLKE`/`ALLIE`, ainsi que les noms suffixés par
+les filtres Butterworth (`RF1_SENSORBAND`, `V_CAMERABAND`) que
+`_find_history_key` et `_resolve_fo_name` tentent de résoudre.
+
+### Résultats de `check_api.py` v2 (exécuté avec `--odb GCI_run000.odb`)
+
+**Désormais VÉRIFIÉ — l'essentiel de l'inventaire de construction du modèle :**
+
+| Groupe | Résultat |
+|---|---|
+| 14 méthodes `Model` (`ConstrainedSketch`, `Part`, `Material`, `EulerianSection`, `HomogeneousSolidSection`, `ContactProperty`, `ContactExp`, `TempDisplacementDynamicsStep`, `ButterworthFilter`, `EulerianBC`, `VelocityBC`, `Velocity`, `MaterialAssignment`, `Temperature`, `rootAssembly`) | **FOUND** |
+| **Les 17 méthodes de `rootAssembly`** — dont `seedEdgeByBias`, `DiscreteFieldByVolumeFraction`, `setElementType`, `setMeshControls`, `generateMesh`, `ReferencePoint`, `Surface` | **toutes FOUND** |
+| 10 méthodes `ConstrainedSketch` (dont `FilletByRadius`, `ObliqueDimension`, `AngularDimension`) | **toutes FOUND** |
+| 3 méthodes `ContactProperty` (`TangentialBehavior`, `NormalBehavior`, `HeatGeneration`) | **toutes FOUND** |
+| `Part.BaseSolidExtrude`, `Part.SectionAssignment`, `Part.cells` | **FOUND** |
+| `Job.writeInput`, `.submit`, `.waitForCompletion`, `.status`, `.messages` | **FOUND** |
+| `Odb.steps/.rootAssembly/.close`, `FieldOutput.getSubset/.getScalarField/.componentLabels/.values`, `FieldValue.data/.elementLabel/.nodeLabel` | **FOUND** |
+
+**La justification de `_check_job_succeeded` est VÉRIFIÉE.** Le script a lu, en
+mode `noGUI`, `job.status = None` et `job.messages = []` — exactement ce que
+décrit le commentaire de `cel_model.py:810-824`. Écarter `job.status` au
+profit du `.sta` n'était donc pas une superstition : c'était nécessaire.
+
+**Le mécanisme de suffixage par les filtres est VÉRIFIÉ**, et il valide le
+code de résolution :
+- `V` n'existe QUE sous `V_CAMERABAND` (le nom nu est absent) ;
+- `RF1`/`RF2` n'existent QUE sous `RF1_SENSORBAND`/`RF2_SENSORBAND` ;
+- `EVF` se résout en `['EVF_ASSEMBLY_EULER_EULER-1', 'EVF_VOID']` — exactement
+  la forme que décrit la docstring de `_resolve_fo_name` (cel_results.py:192-202).
+
+Sans `_resolve_fo_name` / `_find_history_key`, un `"RF1"` ou `"V"` codé en dur
+ne trouverait rien. Ces deux fonctions ne sont pas défensives « au cas où » :
+elles sont indispensables sur cet ODB.
+
+**Trois `[MISSING]` + un `[ERROR]` sont encore des DÉFAUTS DE MON SCRIPT**, pas
+des constats sur le projet — v3 les corrige :
+
+| Symptôme v2 | Cause réelle |
+|---|---|
+| `Model.RigidBody`, `Model.FieldOutputRequest`, `Model.HistoryOutputRequest` MISSING | v2 n'importait que `abaqus`. Ces méthodes ne sont greffées sur `Model` qu'en important les modules CAE (`step`, `interaction`…), ce que `cel_model.py:17-25` fait. **Preuve qu'elles marchent : l'ODB contient 501 frames de sortie de champ et `RF1`/`RF2` sur le point de référence du corps rigide.** |
+| `model.Material(...)` → `invalid name` | Abaqus refuse un nom commençant par `_`. Mon nom d'objet jetable était `_check_api_mat`. Les méthodes `Material` restent donc NON VÉRIFIÉES. |
+| `FieldValue.dataDouble` MISSING | Sondé sur `CPRESS General_Contact_Domain`, une sortie de contact que le projet n'extrait pas. Ne permet de conclure ni dans un sens ni dans l'autre (voir m5). |
+
+### Résultats de `check_api.py` v3 — inventaire clos
+
+Exécuté avec le même ODB. Résumé du script : **`constants missing : 0`,
+`[MISSING] rows : 0`, `[ERROR] rows : 0` — « Every symbol checked exists on
+this installation. »**
+
+Les trois défauts de script sont confirmés comme tels : après l'ajout des
+imports CAE (`step`, `interaction`, `load`, …, tous `[OK]`),
+`Model.RigidBody`, `Model.FieldOutputRequest` et `Model.HistoryOutputRequest`
+passent en **FOUND**. Le diagnostic était le bon. Avec un nom d'objet valide,
+les 8 méthodes `Material` et la chaîne `Plastic(...).RateDependent`
+ressortent **toutes FOUND**.
+
+**Bilan de l'inventaire API : VÉRIFIÉ.** Tous les symboles employés par
+`cel_model.py` et `cel_results.py` — 44 constantes, 18 méthodes `Model`,
+17 méthodes `rootAssembly`, 10 de `ConstrainedSketch`, 8 de `Material`,
+3 de `ContactProperty`, 3 de `Part`, 5 de `Job`, et l'API d'extraction ODB —
+existent sur Abaqus 2022 HF8.
+
+**Reste NON VÉRIFIÉ — et ne le sera pas par cette voie : les noms de
+mots-clés.** `hasattr` prouve qu'une méthode existe, pas que
+`secondOrderAccuracy=`, `improvedDtMethod=` ou `nodalOutputPrecision=` sont
+les bons noms d'arguments. Cela dit, ces arguments-là sont indirectement
+attestés : le modèle se construit, tourne, et produit l'ODB examiné ici —
+un nom de mot-clé erroné ferait lever l'appel. La réserve porte donc sur les
+chemins non exercés par ce run précis (les branches `ROUGH`/`FRICTIONLESS`,
+les lois de contact autres que `HARD`, `HeatGeneration`, les types
+d'inflow/outflow non utilisés).
+
+**Et une réserve qui, elle, s'est matérialisée : `MASSEUL`/`VOLEUL`.** Un nom
+de VARIABLE DE SORTIE n'est vérifiable par aucun `hasattr` — seul l'ODB le
+dit. C'est précisément là qu'un défaut se cachait (M4).
+
+---
+
+## Phase 1 — audit en lecture seule
 
 Date : 2026-09-15
 Portée : `abaqus_scripts/`, `gui/`, `tests/`, `docs/abaqus_validation_checklist.md`.
@@ -92,11 +240,21 @@ confirmé contre une installation réelle dans cet environnement.
 
 ## Tableau d'inventaire des appels API Abaqus
 
-Toutes les lignes ci-dessous ont le statut **NON VÉRIFIÉ** au sens strict
-demandé (aucune introspection possible dans cet environnement). La colonne
-« lecture » indique seulement que l'appel est cohérent avec ma connaissance
-générale de l'API Scripting Abaqus / Abaqus/CAE — ce n'est PAS une preuve.
-Utiliser `_review/check_api.py` pour obtenir un statut VÉRIFIÉ.
+Le statut **NON VÉRIFIÉ** des lignes ci-dessous date de la phase 1. Il a été
+**partiellement levé depuis** — voir la section « Vérification introspective
+— résultats réels » en tête de document :
+- les **constantes symboliques** de toutes ces lignes (`EULERIAN`, `EC3D8RT`,
+  `JOHNSON_COOK`, `NON_REFLECTING`, `PRESELECT`, `MISES`, …) sont désormais
+  **VÉRIFIÉES** : les 44 existent sur l'installation de Tristan ;
+- les points d'entrée `mdb.Model`, `mdb.Job`, `regionToolset.Region`,
+  `mesh.ElemType`, `odbAccess.openOdb` sont **VÉRIFIÉS** ;
+- les **méthodes** (`model.EulerianBC`, `assembly.seedEdgeByBias`,
+  `job.writeInput`, `FieldOutput.getScalarField`, …) et surtout les **noms
+  de mots-clés** restent **NON VÉRIFIÉS** : `check_api.py` v1 ne les
+  couvrait pas. v2 le fait, il reste à l'exécuter.
+
+La colonne « lecture » n'indique que la cohérence apparente avec l'API
+Scripting — ce n'est pas une preuve.
 
 ### Construction du modèle — `abaqus_scripts/cel_model.py`
 
@@ -155,7 +313,15 @@ exécutée sur l'installation réelle.
 ### Majeur
 
 **M1 — `JobTab._cancel_run` ne tue pas l'arbre de processus sur le chemin de
-repli, contrairement à `SensitivityRunWorker.cancel()`.**
+repli, contrairement à `SensitivityRunWorker.cancel()`.** — **CORRIGÉ**,
+commit `7a7631c` : ajout de `kill_process_tree_by_pid()`
+(`gui/sensitivity/run_worker.py`), appelée par `JobTab._cancel_run` avant le
+repli `terminate()`/`kill()`. `abaqus terminate job=<name>` reste la première
+route, conformément à la confirmation de Tristan. La fonction est
+volontairement Windows-only : sur POSIX un enfant `QProcess` partage le
+groupe de processus de la GUI, donc `killpg` tuerait la GUI elle-même — elle
+renvoie `False` et l'appelant retombe sur son kill mono-processus. 4 tests de
+non-régression ajoutés dans `tests/test_abaqus_terminate.py`.
 - Fichier : `gui/tabs/job_tab.py:711-757`.
 - Statut : **fait** (comparaison directe de deux implémentations dans le
   même dépôt) + **interprétation** sur la conséquence côté OS (le
@@ -198,7 +364,16 @@ repli, contrairement à `SensitivityRunWorker.cancel()`.**
   `JobTab._cancel_run` lui-même.
 
 **M2 — La fonctionnalité « Domain sizing by Jacobian » est livrée
-incomplète : moteur + tests présents, câblage GUI absent.**
+incomplète : moteur + tests présents, câblage GUI absent.** — **CORRIGÉ**,
+commit `70b43c0` : Tristan a confirmé que l'étude est ABANDONNÉE et qu'aucun
+câblage n'est envisagé. `gui/sensitivity/domain_jacobian.py`,
+`gui/sensitivity/domain_jacobian_worker.py`, `tests/test_domain_jacobian.py`
+et `tests/test_domain_jacobian_ui.py` ont donc été supprimés (26 tests
+retirés), ce qui achève un nettoyage déjà entamé — `gui/core/domain_sizing.py:160`
+portait déjà la mention « Relocated from domain_jacobian (now removed) ».
+Les docstrings de `domain_convergence.py` / `domain_convergence_worker.py`
+conservent la justification du choix de la méthode par convergence mais ne
+renvoient plus vers un module inexistant.
 - Fichiers : `gui/tabs/optimization_tab.py` (aucune référence à
   `domain_jacobian`/`DomainJacobianWorker`/`_on_run_domain_jacobian`/
   `_on_domain_jacobian_done` — recherche exhaustive, zéro résultat) vs
@@ -227,7 +402,584 @@ incomplète : moteur + tests présents, câblage GUI absent.**
   reflète l'état réel du produit plutôt qu'une régression silencieuse à
   chaque exécution.
 
+**M3 — Le Cancel bloque le thread GUI jusqu'à ~30 s, sur les DEUX chemins
+d'annulation.** (constat ajouté en phase 2, non présent dans l'audit initial)
+- Fichiers : `gui/sensitivity/run_worker.py:67-69` (la fonction bloquante),
+  appelée depuis `gui/tabs/job_tab.py:745` et depuis
+  `gui/sensitivity/run_worker.py:181` via
+  `gui/tabs/sensitivity_tab.py:783-785`.
+- Statut : **fait** pour le caractère bloquant et le thread d'exécution ;
+  **calcul** (et non mesure) pour la borne de ~30 s, obtenue en sommant les
+  timeouts écrits dans le code.
+- Preuve : `abaqus_terminate_job` fait
+  `subprocess.run(..., timeout=20.0)` — un appel synchrone. Il est atteint :
+  (a) depuis `JobTab._cancel_run`, qui est le slot de `btn_cancel.clicked`
+  (`job_tab.py:211`) donc s'exécute dans le thread GUI, suivi de
+  `waitForFinished(10000)` puis, en repli, `waitForFinished(2000)` →
+  20 + 10 + 2 = **~32 s** ;
+  (b) depuis `SensitivityTab._on_cancel` (`sensitivity_tab.py:783-785`) qui
+  appelle `self._worker.cancel()` en **appel de méthode direct**. Bien que
+  `SensitivityRunWorker` vive dans un QThread (`moveToThread`), un appel
+  direct s'exécute dans le thread de l'APPELANT, donc le thread GUI ici
+  aussi : 20 s (`subprocess.run`) + 10 s (`p.wait(timeout=10.0)`,
+  run_worker.py:186) + la boucle de grâce de `_terminate_process_tree`
+  (2 s) → même ordre de grandeur.
+- Conséquence : après un clic sur Cancel, la fenêtre ne se redessine plus et
+  Windows peut afficher « ne répond pas », alors même que l'annulation se
+  déroule correctement. L'utilisateur peut croire à un plantage et tuer la
+  GUI — ce qui le ramène précisément au problème d'orphelins de M1.
+
+**RÉVISION de l'ampleur (mesures réelles sur la machine de Tristan).**
+Le « ~32 s » initial était la somme de tous les timeouts en supposant que
+chacun atteigne son plafond. Deux mesures le rendent improbable :
+
+| Commande | Durée mesurée |
+|---|---|
+| `abaqus.bat information=release` | **4,90 s** |
+| `abaqus.bat terminate job=<job inexistant>` | **0,63 s** |
+
+La seconde **n'est pas** le coût d'un vrai terminate (aucun job ne tournait,
+la commande a échoué vite), mais elle établit que `abaqus.bat` peut démarrer
+et rendre la main en 0,63 s. Les 4,90 s de `information=release` sont donc le
+coût PROPRE de cette commande, pas un surcoût de lanceur : le plancher que
+j'avais supposé à ~5 s ne tient pas, et mon étape de mesure était un mauvais
+proxy.
+
+**SECONDE RÉVISION — le `waitForFinished` n'est pas non plus le coupable.**
+Le run `cancel_test` du 15/09/2026 le montre. Chronologie tirée du `.log` et
+du `.sta` :
+
+| Horodatage | Événement |
+|---|---|
+| 18:07:48 | `explicit_dp.exe` démarre |
+| 18:07:54 | `Terminate request received from 2019-0357 on CL-CHENEVEZ-01` |
+| 18:07:54 | `job aborted` — **même seconde** |
+
+Le `.sta` s'arrête sur `***ERROR: Process terminated by external request`
+après la frame 39/500. Le solveur meurt donc **en moins d'une seconde** après
+réception de la demande. `waitForFinished(10000)` rend la main presque
+immédiatement : il n'atteindra jamais son plafond de 10 s dans ce scénario.
+
+Il ne reste donc qu'un seul terme au gel : la durée du sous-processus
+`abaqus.bat terminate` lui-même — toujours non mesurée contre un job vivant
+(la mesure à 0,63 s portait sur un job inexistant). **Ampleur probable de M3 :
+quelques secondes, pas quelques dizaines.** Le mécanisme (appel bloquant sur
+le thread GUI) reste établi ; son coût réel est vraisemblablement modeste.
+À confirmer par l'observation directe du gel, seule donnée encore manquante.
+
+**Au passage, ce run VALIDE la route propre d'annulation** : `abaqus
+terminate job=` a bien été reçu par le solveur, qui s'est arrêté proprement
+et a libéré ses 8 jetons de licence. C'est exactement le comportement que
+Tristan décrivait comme le bon.
+
+**CLOS SANS CORRECTION.** Décision de Tristan : « la commande terminate
+s'exécute vite en effet donc ça me semble une bonne solution pour cancel un
+job en cours, notamment lorsqu'un pipeline entier doit être cancel ». Le
+mécanisme (appel bloquant sur le thread GUI) reste réel et documenté
+ci-dessus, mais son coût est jugé acceptable en usage. Réserve d'honnêteté :
+la durée exacte du `terminate` contre un job VIVANT n'a jamais été
+chronométrée — le 0,63 s mesuré portait sur un job inexistant (chemin
+d'erreur). Ce qui est établi, c'est que le solveur meurt dans la seconde
+(log du run `cancel_test`), donc que le `waitForFinished(10000)` n'est pas le
+terme dominant. Rien à corriger tant que l'usage ne remonte pas de gêne.
+- Corrections possibles (alternatives, à arbitrer) :
+  (a) **Minimal** : réduire les timeouts (ex. 20 s → 5 s pour
+  `abaqus terminate`, qui rend la main en général en moins d'une seconde
+  puisqu'il se contente d'écrire un fichier de signal). Ne supprime pas le
+  gel, le raccourcit.
+  (b) **Correct mais plus invasif** : exécuter `abaqus terminate` dans un
+  QThread / `QProcess` asynchrone et faire du Cancel une machine à états
+  (bouton passe en « Cancelling… », le repli est armé par un `QTimer`
+  plutôt que par un `waitForFinished`). Supprime réellement le gel, mais
+  change la structure des deux chemins d'annulation.
+  (c) Faire émettre à `SensitivityTab._on_cancel` un signal vers le worker
+  au lieu de l'appel direct (corrige uniquement le chemin (b) du constat,
+  pas celui de l'onglet Job).
+
+**M4 — `MASSEUL`/`VOLEUL` sont absents de l'ODB : le contrôle de conservation
+de masse eulérienne n'existe pas dans les résultats.**
+- Fichier : `abaqus_scripts/cel_model.py:615-624`.
+- Statut : **fait** pour l'absence (constatée sur un ODB réel) ; **hypothèse**
+  pour la cause.
+- Preuve : `check_api.py v2 --odb C:\TEMP\ABQ_wd\GCI_run000.odb` liste
+  l'intégralité des régions d'historique du step `Cut` (501 frames) :
+
+  ```
+  region 'Assembly ASSEMBLY': ['ALLAE','ALLCD','ALLDMD','ALLFD','ALLHF',
+                               'ALLIE','ALLIHE','ALLKE','ALLPD','ALLSE',
+                               'ALLVD','ALLWK','ETOTAL']
+  region 'Node ASSEMBLY.1'  : ['RF1_SENSORBAND','RF2_SENSORBAND']
+  ```
+
+  Deux régions, aucune ne porte `MASSEUL` ni `VOLEUL`. `ALLKE`/`ALLIE`
+  (garde-fou énergétique) et `RF1`/`RF2` (efforts de coupe) sont bien là :
+  H-Output-1 et H-Output-2 fonctionnent, seul **H-Output-3 ne produit rien**.
+- **L'âge de l'ODB n'explique pas l'absence.** Vérifié par `git log -S` :
+  la requête `MASSEUL`/`VOLEUL` a été introduite en `e9e967f`, et son code est
+  identique (au `COORD` près, ajouté plus tard) entre `e9e967f` et HEAD. Or
+  cet ODB porte les sorties filtrées (`V_CAMERABAND`, `RF1_SENSORBAND`)
+  introduites par ce même commit `e9e967f`, et pas `COORD` (ajouté en
+  `79b66ad`) : il a donc été produit dans l'intervalle, par un code qui
+  **contenait déjà** la requête.
+- Conséquence : le projet croit disposer d'un indicateur de conservation
+  (« is material leaving the domain, or being lost numerically? »,
+  cel_model.py:610-614). Il n'en dispose pas. Ce n'est pas une erreur de
+  physique, mais un garde-fou de diagnostic silencieusement inopérant — et
+  le `try/except` qui l'entoure garantit que personne ne le remarque, la
+  mise en garde partant sur stdout au milieu d'un log de run.
+- Causes possibles (HYPOTHÈSES — je n'ai pas de quoi trancher, et je ne
+  veux pas inventer la bonne forme de l'appel) :
+  (a) la requête lève à la construction et le `try/except` l'avale — le
+  suspect principal étant `region=assembly.sets['Euler']` : `MASSEUL`/`VOLEUL`
+  sont des grandeurs par **instance de matériau eulérien**, et un set de
+  cellules d'assemblage n'est peut-être pas une région recevable ;
+  (b) la requête est acceptée à la construction mais Abaqus ne produit rien
+  au solve.
+- **CAUSE CONFIRMÉE — hypothèse (a).** Le `.dat` du job `cancel_test`
+  (15/09/2026 18:07) le prouve sans ambiguïté :
+  - `grep -i "masseul\|voleul"` sur le `.dat` → **aucune occurrence** ;
+  - le deck ne contient que **deux** blocs `*output, history` dans le step :
+    `*output, history, filter=SENSORBAND` (avec `*nodeoutput,
+    nset=ASSEMBLY_RP` → RF1/RF2) et `*output, history, variable=PRESELECT`.
+
+  H-Output-3 n'a donc jamais été écrit dans l'input deck : l'appel
+  `model.HistoryOutputRequest(...)` de cel_model.py:616-620 **lève à la
+  construction du modèle**, et le `try/except` de la ligne 621 l'avale. Le
+  solveur n'est pas en cause, il n'a jamais reçu la demande.
+- **DIAGNOSTIQUÉ (16/09).** Le message a été capturé via
+  `_review/run_simul_logged.py`, une fois M7 contourné :
+
+  ```
+  [WARNING] MASSEUL/VOLEUL history not created: Invalid variables are
+  specified in an output request.  An output request cannot be created in a
+  step where some variables are invalid.
+  ```
+
+  **Ce n'est donc PAS un problème de région.** L'hypothèse (a) que je
+  privilégiais — `region=assembly.sets['Euler']` inadaptée — est écartée :
+  Abaqus rejette les **noms de variables** eux-mêmes. `MASSEUL` et/ou
+  `VOLEUL` ne sont pas des variables de sortie valides dans ce contexte.
+  C'est précisément le cas de figure que la mission cherchait : une API
+  mal nommée, jamais détectée parce que l'erreur partait dans le vide.
+- **Ce qui manque pour corriger : le ou les noms VALIDES.** Je ne les
+  proposerai pas de mémoire — ce serait exactement l'erreur qui a créé ce
+  constat.
+- **Piste examinée et ÉCARTÉE en l'état.** Tristan a fourni deux pages de la
+  doc 2022 (`IntegratedOutputSection object`, `Integrated Output Section
+  Definition`) en suggérant que `MASSEUL`/`VOLEUL` relèveraient de
+  l'*integrated output*, « un objet différent ». Vérification faite sur le
+  texte des deux PDF :
+  - **ni `MASSEUL` ni `VOLEUL` n'y figurent**, pas une occurrence ; ces pages
+    ne peuvent donc pas étayer la conclusion ;
+  - elles décrivent une fonctionnalité orientée **force et moment transmis à
+    travers une surface**, plus le suivi du mouvement moyen d'une surface —
+    rien sur la masse ou le volume de matière ;
+  - et surtout, elles contredisent le « objet différent » : la correspondance
+    CAE qu'elles donnent est *« **History output request editor**: Domain:
+    Integrated output section »*. L'integrated output est donc la MÊME
+    requête d'historique avec un domaine différent, pas une autre classe.
+  La page qui trancherait est celle que ces documents citent eux-mêmes
+  (« see **Integrated Output** ») et/ou la liste des *Output Variable
+  Identifiers* pour les analyses eulériennes.
+- **CORRIGÉ — noms établis par l'expérience, pas par mémoire.** Sortie du
+  probe sur le vrai modèle (`TEST_masseul`, région `assembly.sets['Euler']`) :
+
+  ```
+  [REJECTED] ('MASSEUL', 'VOLEUL')    Invalid variables are specified ...
+  [REJECTED] ('MASSEUL',)             Invalid variables are specified ...
+  [REJECTED] ('VOLEUL',)              Invalid variables are specified ...
+  [ACCEPTED] ('EVOL',)
+  [ACCEPTED] ('MASS',)
+  [ACCEPTED] ('EVF',)                 <- témoin
+  ```
+
+  Trois enseignements, tous factuels :
+  1. **Le témoin `EVF` passe.** La région et la forme de la requête n'ont
+     donc JAMAIS été en cause — mon hypothèse (a) initiale, qui soupçonnait
+     `assembly.sets['Euler']`, est définitivement écartée. Sans ce témoin, le
+     test n'aurait pas pu me contredire.
+  2. `MASSEUL` et `VOLEUL` sont invalides **chacun séparément** : ce n'est pas
+     l'un qui entraînait l'autre.
+  3. `MASS` et `EVOL` sont acceptés sur cette région exacte.
+
+  `cel_model.create_step` demande désormais `variables=('MASS', 'EVOL')`.
+- **Ce qui reste NON VÉRIFIÉ, et je ne le masque pas** : qu'Abaqus accepte
+  ces noms ne dit pas ce qu'il écrira. Deux inconnues :
+  - **la forme** : une série unique pour le set, ou **une par élément** ? Le
+    set eulérien compte ~10 000 éléments ; à 500 intervalles, la forme
+    par-élément représenterait des millions de valeurs et il faudrait
+    restreindre la requête, voire y renoncer. À lire dans le bloc
+    `*Output, history` du prochain `Write .inp only` — coût nul ;
+  - **le contenu physique** : `EVOL` est le volume d'élément, or le maillage
+    eulérien est FIXE — cette série pourrait être constante et donc sans
+    valeur comme indicateur. `MASS` est le candidat qui porte réellement le
+    sens recherché. À juger sur les valeurs d'un premier run.
+- **Limite de portée à connaître** : rien dans `cel_results.py` n'extrait
+  `MASS`/`EVOL` vers le `.npz` — seuls `RF1`/`RF2` et `ALLKE`/`ALLIE` le
+  sont. Le contrôle de conservation sera donc présent dans l'**ODB**, pour
+  inspection manuelle dans le Viewer, mais absent du bundle et de la GUI.
+  Cohérent avec l'usage décrit par Tristan (il inspecte l'ODB à la main),
+  mais c'est un choix à confirmer, pas un oubli de ma part.
+- **Note sur la piste integrated output** : le probe montre que
+  `mdb.models[...].IntegratedOutputSection` existe bien, et que l'appel avec
+  `integratedOutputSection=` échoue sur les VARIABLES (`SOF`) et non sur le
+  mot-clé — l'argument semble donc recevable. Cette voie reste ouverte mais
+  devient sans objet, `MASS`/`EVOL` répondant directement au besoin.
+- **Voie empirique fournie** : `_review/masseul_probe.py` construit le VRAI
+  modèle via `cel_model.build_model` puis soumet une liste de candidats à
+  Abaqus un par un, en consignant lesquels sont acceptés. Il inclut `EVF`
+  comme témoin : si même lui est rejeté sur cette région, alors le problème
+  n'est pas le nom de variable et toute cette analyse est à refaire. Il teste
+  aussi si `integratedOutputSection=` est un argument recevable de
+  `HistoryOutputRequest`. Aucun solveur, quelques secondes. La liste de
+  candidats qu'il contient est une liste de CHOSES À TESTER, pas de
+  recommandations.
+- En attendant, la requête reste en place, entourée de son `try/except` —
+  mais l'avertissement est désormais VISIBLE (M7 corrigé), donc l'échec
+  n'est plus silencieux.
+- Corrections possibles, à décider APRÈS ce test : corriger la région /
+  la forme de la requête si (a) ; ou retirer la requête et le `try/except`
+  si la conservation eulérienne ne s'obtient pas ainsi, plutôt que de
+  garder un garde-fou qui n'en est pas un. Dans les deux cas, remplacer
+  l'`except` muet par une trace que le pipeline remonte.
+
+**M5 — Le filtre Butterworth de sortie de champ ne s'applique PAS à `TEMP`
+ni à `EVF` : la garantie anti-repliement documentée ne vaut que pour `V`.**
+- Fichiers : `abaqus_scripts/cel_model.py:111-127` (l'intention),
+  `:551-585` (la requête filtrée), `cel_results.py:497` (les champs extraits).
+- Statut : **fait** — Abaqus le dit lui-même, et l'ODB le confirme.
+- Preuve n°1, le `.sta` du job `cancel_test` :
+
+  ```
+  ***WARNING: Nodal Output for coordinates and temperatures are not
+              (digitally) filtered.
+  ***WARNING: Element Output for Equivalent plastic strains, Status, ...,
+              Coordinates, Temperatures and Field Variables are not
+              (digitally) filtered.
+  ```
+
+- Preuve n°2, les clés de l'ODB : `V_CAMERABAND`, `U_CAMERABAND`,
+  `UR_CAMERABAND`, `VR_CAMERABAND`, `ERV_CAMERABAND` portent le suffixe du
+  filtre — mais `TEMP`, `TEMP_ASSEMBLY_EULER_EULER-1`,
+  `EVF_ASSEMBLY_EULER_EULER-1` et `EVF_VOID` **ne le portent pas**.
+- Le pipeline extrait exactement trois champs (`cel_results.py:497`) :
+  `EVF`, `TEMP`, `V`. **Un seul des trois est effectivement filtré.**
+- Pourquoi c'est un vrai constat et pas un détail : le commentaire de
+  `create_step` (cel_model.py:551-558) justifie le filtre en disant qu'Abaqus
+  filtre « at the SOLVER increment, BEFORE writing to the ODB -- the only
+  stage where aliasing can still be prevented (once aliased data is written,
+  no post-processing recovers it) ». Cette protection est réelle pour `V`.
+  Elle est **inexistante pour `TEMP`**, alors que la température est
+  précisément l'observable comparée aux mesures IRT.
+- Nuance à ne pas écraser : pour `EVF` (fraction volumique, indicateur de
+  matière), filtrer ne serait sans doute même pas souhaitable — un lissage
+  de l'interface matière/vide n'a pas de sens physique. Le point porte
+  surtout sur `TEMP`.
+- Ce que je ne tranche pas : si l'absence de filtrage sur `TEMP` est
+  acceptable dépend de la bande passante réelle de ta chaîne IRT et du taux
+  d'échantillonnage (500 frames ici) — c'est ton arbitrage, pas le mien.
+- **CORRIGÉ** — décision de Tristan : garder TOUJOURS les sorties non
+  filtrées dans l'ODB, et ajouter les filtrées par-dessus quand un filtre
+  est demandé ; la comparaison filtré/brut se fait à la main dans
+  Abaqus/Viewer, et l'extraction prend la série filtrée si elle existe.
+  Deux changements, indissociables :
+  1. `cel_model.create_step` émet désormais **deux** requêtes de champ :
+     `F-Output-1` (toutes les variables, jamais filtrée, toujours émise) et
+     `F-Output-Filtered` (uniquement `_FILTERABLE_FO_VARIABLES = ('V','ERV')`,
+     avec le filtre, seulement si un cutoff est réglé). Même forme pour
+     l'historique : `H-Output-1` brut toujours émis, `H-Output-1-Filtered`
+     en plus. Le code ne prétend donc plus filtrer ce qu'Abaqus ne filtre
+     pas, et les avertissements « not (digitally) filtered » doivent
+     disparaître du `.sta`.
+  2. **Conséquence non évidente qu'il fallait traiter en même temps** :
+     `_resolve_fo_name` et `_find_history_key` testaient le nom EXACT en
+     premier. Tant que `V` nu n'existait pas, ils tombaient sur
+     `V_CAMERABAND`. Dès que la série brute coexiste, ils auraient choisi la
+     série NON filtrée — l'inverse de l'intention, et en silence. Les deux
+     fonctions prennent maintenant un `filter_suffix` et préfèrent la série
+     filtrée quand le modèle en a demandé une, avec repli sur le nom nu.
+     `extract_results` dérive ce suffixe de `model_cfg`, en miroir exact des
+     conditions sous lesquelles `create_step` crée chaque filtre.
+  4 tests de non-régression ajoutés (`tests/test_cel_results_history.py`),
+  dont celui qui garde précisément la bascule silencieuse ci-dessus.
+- **VÉRIFIÉ sur un deck réel** (`TEST_0.inp`, 16/09, après récupération de la
+  branche). L'hypothèse tenait : Abaqus accepte bien la même variable dans
+  une requête filtrée ET dans une non filtrée. Le deck produit :
+
+  ```
+  ** FIELD OUTPUT: F-Output-1
+  *Output, field, number interval=500
+  *Node Output
+  COORD, V
+  *Element Output, directions=YES
+  COORD, DMICRT, ERV, EVF, PEEQ, S, SDEG, STATUS, TEMP
+  *Contact Output
+  CSTRESS,
+  ** FIELD OUTPUT: F-Output-Filtered
+  *Output, field, filter=CameraBand, number interval=500
+  *Node Output
+  V,
+  *Element Output, directions=YES
+  ERV,
+  ** HISTORY OUTPUT: H-Output-1
+  *Output, history, time interval=6e-07
+  *Node Output, nset=RP
+  RF1, RF2
+  ** HISTORY OUTPUT: H-Output-1-Filtered
+  *Output, history, filter=SensorBand, time interval=6e-07
+  *Node Output, nset=RP
+  RF1, RF2
+  ```
+
+  Exactement la forme visée : série brute complète d'un côté, série filtrée
+  restreinte à `V`/`ERV` de l'autre, et les deux historiques RF. Le
+  `V_CAMERABAND` attendu dans l'ODB découle de cette requête.
+- Ce deck confirme aussi l'analyse de m6 : `COORD` apparaît à la fois sous
+  `*Node Output` (la variante qui sert les display groups de Tristan) et sous
+  `*Element Output` (celle qui déclenche l'avertissement `EC3D8RT`).
+- **Reste à vérifier au prochain run réel** : que `V` et `V_CAMERABAND`
+  coexistent bien dans l'ODB, et que l'extraction retienne le second — c'est
+  ce que garantit la préférence ajoutée à `_resolve_fo_name`.
+- Ce que cette correction NE tranche pas : savoir si `TEMP` devrait être
+  band-limitée physiquement. Elle rend seulement l'ODB complet et le code
+  honnête ; l'arbitrage sur la bande passante IRT reste ouvert.
+
+**M7 — `abaqus cae noGUI=` ne propage pas la sortie standard du script.
+Toute la couche de diagnostic du projet est écrite pour personne.**
+
+> **CORRECTION D'UNE ERREUR DE MA PART.** J'avais d'abord formulé ce constat
+> comme « la GUI ne capture pas la sortie », en soupçonnant le `QProcess`.
+> C'était faux, et la sonde le prouve : lancée directement depuis `cmd` avec
+> `> probe_console.txt 2>&1`, **sans GUI du tout**, la sortie ne contient
+> toujours que la ligne du gestionnaire de licences. Ni `[PROBE] stdout`, ni
+> `[PROBE] stderr`. Le problème est en amont d'Abaqus, pas dans le code de
+> l'onglet Job — lequel est donc hors de cause, et qu'il ne faut surtout pas
+> « corriger ».
+
+- Fichiers concernés par la CONSÉQUENCE (pas par la cause) :
+  `gui/tabs/job_tab.py:559-562`, et tous les `print()` /
+  `sys.stdout.flush()` de `abaqus_scripts/cel_model.py` et
+  `abaqus_scripts/cel_results.py`.
+- Statut : **fait**, confirmé par deux exécutions indépendantes.
+- **Preuve décisive** : deux `Write .inp only` successifs, l'un AVANT la
+  récupération de la branche, l'autre APRÈS. Les decks produits DIFFÈRENT
+  (le second porte les requêtes scindées de M5, donc le nouveau code a bien
+  tourné), mais **les deux panneaux de sortie sont identiques** et ne
+  contiennent aucune ligne du script. Ce n'est donc ni une troncature de
+  copie ni un hasard : le canal ne transporte rien.
+- Observation : sur ces **Write .inp only**, le panneau ne contenait
+  que la ligne du gestionnaire de licences (émise par `abaqus.bat`) entre
+  l'en-tête et le pied écrits par la GUI elle-même. Or `run_job`
+  (cel_model.py) imprime, dans ce mode, `[META] job_name=`, `[META] sim_time=`,
+  `[META] n_frames=`, `[STAGE] WRITE_INP_START`, `[STAGE] INP_WRITTEN` et
+  `[OK] Wrote <job>.inp`, avec un `sys.stdout.flush()` explicite. **Aucune de
+  ces lignes n'apparaissait**, alors que le `.inp` a bien été écrit.
+- Si confirmé, la portée dépasse largement M4 : tout le journal de
+  progression de l'extraction (`_vprint` dans cel_results.py), les
+  `[META] field_filter=…`, les `[WARNING]` — rien de ce que le script dit ne
+  parviendrait à l'utilisateur. Le panneau annonce pourtant « Live output ».
+- **Conséquence immédiate : cela bloque M4.** Le message d'exception de
+  `MASSEUL`/`VOLEUL` passe précisément par ce canal. Tant qu'on ne sait pas
+  s'il est capturé, l'absence d'avertissement dans le panneau ne permet pas
+  de distinguer « la requête n'a pas levé » de « elle a levé mais personne
+  ne l'a vu ».
+- Piste d'explication (NON VÉRIFIÉE) : le script tourne dans un sous-processus
+  de `abaqus.bat` (`cae.exe`), et son stdout peut ne pas être hérité par le
+  tuyau ouvert par `QProcess` sur le lanceur. La ligne de licence, elle, est
+  émise par le lanceur lui-même — ce qui expliquerait qu'elle passe et pas le
+  reste.
+- **Preuve, `_review/stdout_probe.py` (16/09).** La sonde écrit le même
+  marqueur sur trois canaux. Résultats :
+
+  | Lancement | `[PROBE] stdout` | `[PROBE] stderr` |
+  |---|---|---|
+  | `cmd`, redirection directe `> probe_console.txt 2>&1` | **absent** | **absent** |
+  | GUI, onglet Job | **absent** | **absent** |
+
+  Les deux fichiers ne contiennent que la ligne du gestionnaire de licences,
+  émise par `abaqus.bat` lui-même. Le lancement en console **n'implique
+  aucun code du projet** : la perte est donc imputable à
+  `abaqus cae noGUI=`, pas à la GUI.
+
+- **Ampleur.** Sont concernés **69 messages** : 54 dans `cel_results.py`
+  (33 `_vprint` + les `print` directs) et 15 dans `cel_model.py`. Cela
+  comprend le journal complet de l'extraction, les bbox de maillage, le
+  compte `ROI_node`/`ROI_elem`, le message d'erreur détaillé qui précède le
+  `sys.exit(2)` quand la ROI ne sélectionne rien (« Increase the ROI
+  (Geometry tab) so it overlaps the mesh, then re-run »), le récapitulatif de
+  nettoyage, et les `[WARNING]`.
+- **Le protocole `[STAGE]` / `[META]` n'est lu par personne non plus** :
+  aucune occurrence dans `gui/` (recherche exhaustive). Ces marqueurs ont été
+  conçus pour un lecteur — humain via le panneau, ou machine via un parseur —
+  qui n'a jamais existé côté GUI et qui, de toute façon, ne pouvait pas les
+  recevoir.
+- **Conséquence sur M4** : le message d'exception de `MASSEUL`/`VOLEUL`
+  emprunte ce canal perdu. Son absence ne prouve toujours pas que la requête
+  ne lève pas.
+- **CONFIRMÉ : le script s'exécute bel et bien, seule sa sortie est perdue.**
+  `probe_marker.txt` a été produit, avec :
+
+  ```
+  the probe ran
+  cwd: C:\GUI_Abaqus
+  python: 2.7.15 (default, Oct 16 2021) [MSC v.1928 64 bit (AMD64)]
+  argv: ['C:\\SIMULIA\\EstProducts\\2022\\win_b64\\code\\bin\\ABQcaeK.exe',
+         '-cae', '-noGUI', 'C:\\GUI_Abaqus\\_review\\stdout_probe.py',
+         '-lmlog', 'ON', '-tmpdir', '...', '-academic', 'TEACHING']
+  ```
+
+  L'`argv` explique le mécanisme : `abaqus.bat cae noGUI=<script>` se résout
+  en un lancement de **`ABQcaeK.exe`, le noyau CAE, comme processus
+  distinct**. C'est la sortie de CE processus qui n'est raccordée à rien de
+  lisible — ni par la GUI, ni par une redirection console. Le script, lui,
+  tourne normalement : bon interpréteur, bon répertoire courant, et il écrit
+  ses fichiers sans difficulté.
+- **Corollaire opérationnel** : le canal FICHIER fonctionne parfaitement,
+  puisque c'est ainsi que la sonde a rendu son verdict. La correction (a)
+  ci-dessous n'est donc pas une hypothèse, elle est déjà démontrée.
+- **Corrections possibles, à arbitrer une fois ce point levé** :
+  (a) écrire les diagnostics dans un fichier à côté du job (par exemple
+  `<job>.gui.log`) et le suivre depuis la GUI — le projet possède DÉJÀ ce
+  mécanisme, `JobTab._poll_sta` scrute le `.sta` toutes les 800 ms, il
+  suffirait de le doubler ; robuste, indépendant du comportement d'Abaqus ;
+  (b) chercher une forme d'invocation d'Abaqus qui propage la sortie —
+  je ne peux ni la deviner ni la vérifier d'ici, cela demande la doc ou un
+  essai ; `abaqus python` n'est pas une option, il n'embarque pas le noyau
+  CAE dont `mdb` a besoin ;
+  (c) constater que cette couche ne sert à rien et la supprimer, plutôt que
+  d'entretenir 69 messages que personne ne lira jamais.
+  Ne rien faire est la seule option que je déconseille : l'onglet annonce
+  « Live output », et un utilisateur dont la ROI ne sélectionne rien reçoit
+  aujourd'hui un échec sans la moindre explication, alors que le script en a
+  écrit une, précise et actionnable.
+- **CORRIGÉ — voie (a) retenue par Tristan : journal fichier suivi.**
+  - `run_simul.py` redirige `stdout`/`stderr` vers `<job>.gui.log` dans le
+    répertoire de travail, **en un seul point** plutôt qu'en modifiant les
+    69 appels : un `_Tee` écrit dans le fichier ET dans le flux d'origine,
+    avec `flush()` à chaque écriture (la GUI lit pendant que ça tourne). Le
+    flux d'origine est conservé pour ne rien perdre là où stdout fonctionne,
+    et une écriture qui échoue de son côté ne fait pas tomber le fichier.
+  - Un `try/except` autour du corps de `main()` enregistre désormais la
+    **trace d'exception**, la chose la plus précieuse que ce script puisse
+    imprimer, avant de re-lever pour que le code retour reste juste.
+  - `log_path_for()` définit la règle de nommage **d'un seul côté** ; un test
+    vérifie que la GUI en dérive exactement la même.
+  - `JobTab._poll_script_log()` suit le fichier depuis un offset d'octets
+    (pas de relecture, donc pas de doublons), décode en latin-1 (un message
+    non-ASCII ne doit pas tuer la boucle), et le timer existant de 800 ms est
+    désormais démarré **aussi en mode Write .inp only** — c'est là que se
+    voient les diagnostics de construction. `_finish_pipeline` vide le
+    journal une dernière fois AVANT d'arrêter le timer, sans quoi les
+    dernières lignes, celles qui expliquent un échec, seraient perdues.
+  - Le fichier est supprimé au lancement : un journal d'un run précédent du
+    même job serait sinon rejoué comme s'il était en cours.
+  - 10 tests de non-régression (`tests/test_script_log.py`), sur les deux
+    moitiés du contrat.
+- **Reste hors périmètre de cette correction** : `SensitivityRunWorker` lit
+  toujours `proc.stdout` (run_worker.py:246-249), qui est vide pour la même
+  raison. Les campagnes de sensibilité n'affichent donc rien du script. Le
+  même `log_path_for()` s'y appliquerait ; je ne l'ai pas fait pour garder ce
+  lot circonscrit à l'onglet Job.
+
 ### Mineur
+
+**m6 — `COORD` est demandé alors qu'il n'existe pas pour `EC3D8RT`.**
+- Fichier : `abaqus_scripts/cel_model.py:92-104` (ajouté en `79b66ad`).
+- Statut : **fait**.
+- Preuve, `.dat` :
+  `***WARNING: OUTPUT REQUEST COORD IS NOT AVAILABLE FOR ELEMENT TYPE EC3D8RT`.
+  `EC3D8RT` est le type d'élément de TOUT le domaine eulérien, c'est-à-dire
+  de la pièce. La demande est donc sans effet là où elle aurait servi, et
+  génère un avertissement à chaque run.
+- À noter, le même `.dat` porte deux messages voisins mais LÉGITIMES, qu'il
+  ne faut pas confondre avec celui-ci : `EVF IS NOT AVAILABLE FOR ELEMENT
+  TYPE C3D8RT` (EVF n'a pas de sens sur l'outil lagrangien) et les `NOTE`
+  sur `DMICRT`/`SDEG` (pas de modèle d'endommagement actif — cohérent avec
+  `JohnsonCookDamageInitiation` commenté en cel_model.py:343-347). Ceux-là
+  sont le prix normal d'une liste de variables unique pour deux corps.
+- **CONSERVÉ sur décision de Tristan** : `COORD` sert à l'inspection manuelle
+  de l'ODB — construire des display groups à partir des coordonnées de
+  nœuds dans Abaqus/Viewer. Le retirer coûterait cet usage.
+- **Nuance qui change la lecture de l'avertissement** : il porte sur
+  `ELEMENT TYPE EC3D8RT`, donc sur la variante aux POINTS D'INTÉGRATION. Le
+  `.sta` parle par ailleurs de « **Nodal** Output for coordinates », ce qui
+  implique que la sortie NODALE de `COORD` existe — et c'est celle dont
+  l'usage ci-dessus a besoin. **HYPOTHÈSE non vérifiée** : aucun ODB
+  disponible ne permet de le confirmer (`COORD` a été ajouté en `79b66ad`,
+  après l'ODB `GCI_run000` examiné ici).
+- **CLOS — NON-PROBLÈME, vérifié par Tristan** : « COORD est bien dans
+  `cancel_test.odb`, je peux donc faire des display groups pour inspecter
+  les résultats. » L'hypothèse était la bonne : l'avertissement ne porte
+  que sur la variante aux points d'intégration, la sortie NODALE arrive
+  bien et sert son usage.
+- **Aucune correction.** Retirer `COORD` supprimerait un usage réel ; lui
+  dédier une requête scindée ajouterait de la complexité pour faire taire
+  un avertissement sur une variante dont personne ne se sert. L'entrée est
+  conservée ici pour documenter pourquoi cet avertissement du `.dat` est
+  attendu et n'a pas à être « corrigé ».
+
+**Note sans conséquence — `order=2` n'apparaît pas dans le deck.**
+`ButterworthFilter(..., order=2)` (cel_model.py:563-570) produit
+`*filter, name=CAMERABAND, type=BUTTERWORTH` sans paramètre d'ordre, et
+Abaqus avertit : « NO VALUE WAS SPECIFIED FOR THE ORDER OF FILTER CAMERABAND.
+A DEFAULT SECOND ORDER WILL BE USED. » Le résultat est donc **identique à
+l'intention** (l'ordre 2 est le défaut), la couche CAE omettant simplement
+les paramètres égaux au défaut. Consigné ici pour que personne ne « corrige »
+un comportement qui est déjà le bon.
+
+**Observation de configuration (pas un défaut de code) — BC eulérienne
+écrasée par la BC de vitesse.** Le `.sta` porte :
+`***WARNING: Both the *EULERIAN BOUNDARY, INFLOW=NONE option and the
+*BOUNDARY option are specified at the same nodes. In case of conflict
+*BOUNDARY will override the Eulerian boundary condition.` Sur cette
+configuration, une face portait à la fois une `EulerianBC` et la BC de
+vitesse de coupe ; c'est la seconde qui gagne. Cela dépend des cases cochées
+dans l'onglet BCs, pas du code — mais rien dans la GUI ne le signale.
+
+**m5 — INFIRMÉ. Mon hypothèse était fausse : le repli `dataDouble` est
+indispensable, pas du code mort.**
+- Fichier : `abaqus_scripts/cel_results.py:182-189`.
+- Ce que j'avais avancé (sur la base d'une sonde v2 portant sur `CPRESS`,
+  une sortie de contact que le pipeline n'extrait jamais) : `data`
+  fonctionne, `dataDouble` est absent, donc le repli serait du code mort.
+- **Ce que v3 mesure sur les variables réellement extraites, instance
+  eulérienne :**
+
+  ```
+  EVF (EVF_ASSEMBLY_EULER_EULER-1): data=True   dataDouble=False
+        v.data reads OK -> 1.0
+  V   (V_CAMERABAND)              : data=False  dataDouble=True
+  ```
+
+  Pour `V`, **`data` est ABSENT et `dataDouble` est PRÉSENT**. Le
+  `try: v.data / except: v.dataDouble` de `_read_data` est donc
+  effectivement emprunté, et c'est la seule branche qui permet de lire la
+  vitesse — le champ de comparaison avec la DIC. Sans ce repli, `V` ne
+  serait pas extractible.
+- La docstring dit vrai sur le fond, elle généralise seulement un peu trop
+  (« `value.data` raises » vaut pour les champs NODAUX écrits en pleine
+  précision — `nodalOutputPrecision=FULL`, cel_model.py:805 — et non pour
+  les champs élémentaires comme EVF, où `data` fonctionne). Les deux cas
+  sont correctement traités par le code tel qu'il est. **Aucune correction
+  nécessaire.**
+- Leçon pour cet audit : le constat initial venait d'une sonde non
+  représentative, que j'avais signalée comme telle. La vérification l'a
+  tranché contre moi — c'est le résultat attendu d'un tel processus.
+
+**VALIDATION SUPPLÉMENTAIRE — `_resolve_fo_name` est nécessaire, preuve à
+l'appui** (ce n'est pas un constat, c'est une confirmation que le code
+existant est bien fondé).
+- Fichier : `abaqus_scripts/cel_results.py:192-233`.
+- v3 montre que pour `TEMP`, deux clés coexistent dans l'ODB :
+  `['TEMP', 'TEMP_ASSEMBLY_EULER_EULER-1']`, et que la clé NUE `TEMP`
+  **ne porte aucune valeur sur l'instance eulérienne** (elle porte celles
+  de l'outil lagrangien). C'est exactement le cas décrit par la docstring
+  de `_resolve_fo_name`.
+- Conséquence : le test `_has_inst_values` appliqué aux correspondances
+  exactes AVANT de se rabattre sur les noms suffixés n'est pas une
+  précaution décorative. Une résolution naïve « nom exact d'abord »
+  choisirait `TEMP` et extrairait un champ de température entièrement
+  NaN pour la pièce, sans erreur visible.
 
 **m1 — Duplication de la construction de la commande Abaqus entre
 `JobTab._dry_run`/`_launch_abaqus` et `SensitivityRunWorker._abaqus_solve`.**
@@ -262,11 +1014,16 @@ incomplète : moteur + tests présents, câblage GUI absent.**
   réel), mais une source de confusion pour la maintenance et un risque
   latent si quelqu'un active `S_VM`/`PEEQ` côté GUI en pensant que
   l'extraction suit.
-- Correction possible (alternatives) : soit documenter explicitement en
-  tête de `_extract_field`/`_TENSOR_REDUCERS` que ce chemin est prêt pour
-  une extension future mais inactif ; soit le supprimer si aucune
-  extension n'est prévue (le projet demande explicitement d'éviter le code
-  mort).
+- **CORRIGÉ** — Tristan : « je ne me sers en effet pas de ça, je regarde
+  juste les contraintes dans l'ODB en mode inspection, c'est du code mort
+  que tu peux nettoyer. » Supprimés : `_reduce_VM`, `_TENSOR_REDUCERS`,
+  `_STRESS_INVARIANT`, et dans `_extract_field` la résolution d'invariant
+  et l'appel `getScalarField`.
+- **`'S'` reste demandé dans `fo_variables`** (cel_model.py:111) : c'est
+  précisément ce qui alimente l'inspection manuelle des contraintes dans
+  l'ODB. Seul le code d'EXTRACTION vers le `.npz` était mort, pas la sortie
+  elle-même. Le chemin réellement emprunté (`EVF`, `TEMP` via
+  `_reduce_identity`) est inchangé.
 
 **m3 — `try/except Exception: pass` autour d'une assignation qui ne peut
 pas échouer.**
@@ -339,27 +1096,104 @@ sur les points que la mission demandait de vérifier spécifiquement :
   kill process — c'est l'ordre attendu. Voir cependant M1 : le repli n'est
   pas UNIFORME entre les deux implémentations du dépôt.
 
+## Vérifications sur un `.inp` réel (job `cancel_test`, 16/09)
+
+Un deck produit par **Write .inp only** a permis de confirmer plusieurs
+points de l'inventaire qui n'étaient jusque-là que de la lecture de code.
+
+**Mass scaling — convention VÉRIFIÉE de bout en bout.** C'était la première
+convention du cahier des charges (« ρ ET Cp mis à l'échelle du même facteur,
+sans double scaling »). Comparaison des profils matériaux du dépôt avec les
+cartes réellement écrites :
+
+| | ρ physique (profil) | ρ dans le `.inp` | Cp physique | Cp dans le `.inp` |
+|---|---|---|---|---|
+| Ti6Al4V (pièce) | 4.43e-09 | **4.43e-06** | 5.80e+08 | **5.80e+05** |
+| Carbure (outil) | 1.50e-08 | **1.50e-05** | 2.03e+08 | **2.03e+05** |
+
+Soit ρ × 1000 et Cp ÷ 1000, **exactement**, sur les DEUX matériaux. Le
+produit ρ·Cp est donc préservé, il n'y a pas de double application, et le
+facteur unique de la GUI est bien propagé aux deux matériaux
+(model_config.py:365-367 → cel_model.py:327/330 et 350/353). Le facteur 1000
+est déduit du rapport, pas lu dans la config du run.
+
+**Types d'éléments — VÉRIFIÉ** : `*Element, type=EC3D8RT` pour le domaine
+eulérien et `*Element, type=C3D8RT` pour l'outil, conformes aux `ElemType()`
+de `create_mesh`. Le step est bien `*Dynamic Temperature-displacement,
+Explicit` avec `*Bulk Viscosity`.
+
+**`*Section Controls` ABSENT du deck — et c'est normal.** C'est le point que
+la mission signalait comme historiquement risqué (« la réimportation du .inp
+dans CAE perd les Section Controls (secondOrderAccuracy) »). Le code passe
+`secondOrderAccuracy=OFF, hourglassControl=DEFAULT` à `ElemType`, et aucune
+carte `*Section Controls` n'apparaît. INTERPRÉTATION : la couche CAE omet les
+paramètres égaux au défaut lors de l'écriture du deck — le même mécanisme que
+pour `order=2` du filtre Butterworth, où Abaqus a confirmé « A DEFAULT SECOND
+ORDER WILL BE USED ». `OFF` étant le défaut, l'absence de carte est cohérente
+avec l'intention. Et comme ce pipeline ne réimporte JAMAIS un `.inp` dans CAE,
+le risque historique ne peut pas se matérialiser ici.
+
+## Constat transversal — les avertissements `.dat`/`.sta` ne sont lus par personne
+
+M4, M5 et m6 ont tous les trois été trouvés en lisant les avertissements
+qu'Abaqus écrit lui-même dans le `.dat` et le `.sta` d'un run ordinaire. Le
+pipeline **conserve** délibérément ces deux fichiers
+(`_DIAGNOSTIC_EXTENSIONS`, cel_model.py:876-877, avec un commentaire qui dit
+qu'ils sont « the files that actually let you find out WHY a run
+misbehaved »), mais **aucun code ne les lit jamais**, et la GUI ne les
+affiche nulle part.
+
+Conséquence mesurable : trois défauts — dont un garde-fou de conservation
+inopérant et une protection anti-repliement absente sur la température —
+étaient annoncés noir sur blanc par Abaqus à chaque exécution depuis
+`e9e967f`, sans que rien ne les remonte.
+
+Piste (c'est une fonctionnalité, donc hors du périmètre « fiabiliser sans
+ajouter » de cette mission — à toi de dire si tu la veux) : après un run,
+balayer `<job>.dat` et `<job>.sta` pour les lignes `***WARNING` / `***ERROR`
+et les afficher dans l'onglet Job ou Results. Une quinzaine de lignes de
+code auraient fait remonter M4, M5 et m6 automatiquement, le jour même.
+
 ## Questions pour Tristan
 
-1. `_review/check_api.py` doit être exécuté sur la machine Abaqus
-   (`abaqus cae noGUI=_review/check_api.py`) pour confirmer/infirmer tous
-   les statuts NON VÉRIFIÉ du tableau ci-dessus. Peux-tu le lancer et me
-   renvoyer `_review/check_api_report.txt` ?
-2. Le Python embarqué par Abaqus 2022 HF8 sur ta machine est-il bien 2.7
-   (comme l'affirme `cel_common.py:15-24`) ? `abaqus python -c "import
-   sys; print(sys.version)"` donne quoi chez toi ?
+1. ~~Exécuter `check_api.py`~~ — **CLOS**. v1, v2 et v3 exécutés.
+   L'inventaire API est vérifié (0 MISSING, 0 ERROR en v3), m5 est infirmé,
+   et M4 est confirmé. Plus rien à demander de ce côté.
+2bis. **M4 — le seul test qui reste, et il est gratuit** : onglet Job →
+   **Write .inp only**, puis chercher `MASSEUL` dans le `.inp` produit.
+   Présent → Abaqus a accepté la requête et l'a abandonnée au solve ;
+   absent → la requête lève à la construction, et le log du run porte alors
+   `[WARNING] MASSEUL/VOLEUL history not created:` suivi du message d'Abaqus,
+   qui nomme la cause exacte. Sans cette information je ne peux pas proposer
+   de correction sans inventer.
+2. ~~Version du Python embarqué~~ — **répondu** : **2.7.15** (MSC v.1928,
+   64 bit). La contrainte 2.7 de `cel_common.py` est donc justifiée, ce
+   n'est plus une hypothèse.
 3. M1 (cancel process tree) : confirmes-tu que le Cancel depuis l'onglet
    Job a déjà laissé un `standard.exe`/`explicit.exe` orphelin dans le
    Gestionnaire des tâches, ou est-ce un risque théorique jamais observé en
    pratique chez toi ?
-4. M2 (domain_jacobian non câblé) : la fonctionnalité est-elle en cours de
-   développement (à finaliser en phase 2) ou son moteur a-t-il été laissé
-   de côté volontairement ? Je ne veux pas la câbler par erreur si c'est un
-   chantier en pause pour une raison que je ne connais pas.
-5. Le commentaire `docs/abaqus_validation_checklist.md` section 6 décrit le
-   Cancel comme tuant l'arbre via `taskkill /F /T` — est-ce la spécification
-   que tu veux voir appliquée uniformément (Job tab + campagnes), ou y a-t-il
-   une raison de vouloir un comportement différent entre les deux ?
+4. ~~M2 (domain_jacobian non câblé)~~ — **répondu** : abandonné, aucun
+   câblage envisagé. Code supprimé (commit `70b43c0`).
+5. ~~Cancel : `taskkill /F /T` est-il la spécification voulue ?~~ —
+   **répondu** : la meilleure route est `abaqus terminate job=<name>`
+   exécutée dans le dossier de travail du job. C'était déjà l'étape 1 des
+   deux implémentations ; seul le repli a été corrigé (M1, commit `7a7631c`),
+   car `abaqus terminate` ne peut répondre qu'une fois le `<job>.cid` écrit
+   par le solveur — un Cancel pendant la construction du modèle ou pendant
+   l'extraction n'a pas d'autre recours.
+6. **M3 (gel de l'UI pendant le Cancel)** : quelle option préfères-tu ?
+   (a) réduire simplement les timeouts (correction de quelques lignes, le
+   gel passe de ~30 s à ~7 s mais ne disparaît pas) ; (b) rendre le Cancel
+   asynchrone (supprime le gel, mais restructure les deux chemins
+   d'annulation) ; (c) ne rien faire si un gel de quelques secondes au
+   Cancel ne te gêne pas en pratique. Je n'ai pas tranché seul : c'est un
+   compromis ergonomie / risque de régression sur un chemin que je ne peux
+   pas tester sous Windows.
+7. Reste-t-il des constats mineurs (m1 à m4) que tu veux voir corrigés dans
+   cette passe ? m4 (`pytest.importorskip("imageio")`) est le moins risqué :
+   3 lignes, il rend la suite verte dans un environnement conforme à
+   `requirements.txt`.
 
 ## État des tests
 
@@ -389,6 +1223,45 @@ Détail des 9 échecs :
 ```
 
 **Total réel : 588 réussis / 9 échoués sur 597 tests collectés.**
+
+### Après les corrections de phase 2 (M1 + M2)
+
+Mêmes conditions (venv `requirements.txt`, headless, deux passes).
+
+**Passe 1 — toute la suite sauf `test_mesh_pipeline.py`** :
+```
+3 failed, 561 passed in 189.06s (0:03:09)
+```
+Les 3 échecs restants sont ceux d'`imageio` (constat m4, non corrigé à ce
+stade). Les 6 échecs `AttributeError` de `test_domain_jacobian_ui.py` ont
+disparu avec la suppression de la fonctionnalité.
+
+**Passe 2 — `test_mesh_pipeline.py` seul** :
+```
+11 passed in 212.08s (0:03:32)
+```
+
+**Total après phase 2 : 572 réussis / 3 échoués sur 575 tests collectés.**
+
+### Après les correctifs m1 / m3 / m4
+
+```
+567 passed, 3 skipped in 138.55s   (passe 1, hors test_mesh_pipeline)
+11 passed in 172.87s               (passe 2, test_mesh_pipeline seul)
+```
+
+**578 réussis, 3 ignorés, ZÉRO échec.** La suite est verte pour la première
+fois de cette revue : les 3 « échecs » restants étaient les tests `imageio`
+de m4, qui sont désormais correctement IGNORÉS dans un environnement conforme
+à `requirements.txt` au lieu d'échouer. (+3 tests par rapport au relevé
+précédent : ceux ajoutés pour `build_abaqus_args`.)
+
+Réconciliation du nombre de tests (pour vérifier qu'aucun test n'a été perdu
+silencieusement) : 586 collectés en passe 1 avant, moins 26 tests supprimés
+avec la fonctionnalité abandonnée (19 dans `test_domain_jacobian.py` + 7 dans
+`test_domain_jacobian_ui.py`, comptés sur les fichiers via `git show`), plus
+4 tests de non-régression ajoutés pour M1 = 564 collectés, ce qui correspond
+exactement aux 561 + 3 observés.
 
 Zones critiques non couvertes par la suite automatisée (le projet le
 documente déjà en grande partie dans `docs/abaqus_validation_checklist.md`) :

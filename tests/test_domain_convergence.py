@@ -3,8 +3,7 @@
 
 The run_bundle is analytic: the boundary influence on the ZOI decays with each
 domain dimension, so the plateau is reachable and convergence is deterministic.
-Sampling is bypassed (the analytic bundle IS the ZOI sample) exactly as in
-test_domain_jacobian.
+Sampling is bypassed: the analytic bundle IS the ZOI sample.
 """
 from __future__ import annotations
 

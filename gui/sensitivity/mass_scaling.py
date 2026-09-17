@@ -286,11 +286,10 @@ def make_mass_scaling_sample_fn(base_cfg, run_bundle, roi, grid_step,
         cfg.step.mass_scaling_factor = float(factor)
         # The identified factor is applied to the tool as well (ms_tool =
         # ms_eul), so each probe reflects both materials being scaled.
-        try:
-            # ALLKE/ALLIE come from the PRESELECT whole-model history
-            cfg.step.output.ho_preselect = True
-        except Exception:
-            pass
+        # Force the PRESELECT history on: it carries the ALLKE/ALLIE the guard
+        # below reads. Its default is already True, but the Step tab can turn
+        # it off and a probe without the guard is useless.
+        cfg.step.output.ho_preselect = True
         bundle = run_bundle(cfg)
         if bundle is None:
             raise RuntimeError("mass-scaling run produced no bundle "
