@@ -1263,44 +1263,41 @@ signe fiable que le processus mordait sur la réalité.
 
 ## Questions pour Tristan
 
-1. ~~Exécuter `check_api.py`~~ — **CLOS**. v1, v2 et v3 exécutés.
-   L'inventaire API est vérifié (0 MISSING, 0 ERROR en v3), m5 est infirmé,
-   et M4 est confirmé. Plus rien à demander de ce côté.
-2bis. **M4 — le seul test qui reste, et il est gratuit** : onglet Job →
-   **Write .inp only**, puis chercher `MASSEUL` dans le `.inp` produit.
-   Présent → Abaqus a accepté la requête et l'a abandonnée au solve ;
-   absent → la requête lève à la construction, et le log du run porte alors
-   `[WARNING] MASSEUL/VOLEUL history not created:` suivi du message d'Abaqus,
-   qui nomme la cause exacte. Sans cette information je ne peux pas proposer
-   de correction sans inventer.
+Toutes soldées au 17/09. Conservées avec leur réponse : une question close
+sans sa réponse est une question qui se repose.
+
+1. ~~Exécuter `check_api.py`~~ — **CLOS**. v1, v2 et v3 exécutés. L'inventaire
+   API est vérifié (0 MISSING, 0 ERROR en v3), m5 est infirmé, M4 confirmé.
 2. ~~Version du Python embarqué~~ — **répondu** : **2.7.15** (MSC v.1928,
-   64 bit). La contrainte 2.7 de `cel_common.py` est donc justifiée, ce
-   n'est plus une hypothèse.
-3. M1 (cancel process tree) : confirmes-tu que le Cancel depuis l'onglet
-   Job a déjà laissé un `standard.exe`/`explicit.exe` orphelin dans le
-   Gestionnaire des tâches, ou est-ce un risque théorique jamais observé en
-   pratique chez toi ?
-4. ~~M2 (domain_jacobian non câblé)~~ — **répondu** : abandonné, aucun
+   64 bit). La contrainte 2.7 de `cel_common.py` est justifiée, ce n'est plus
+   une hypothèse.
+2bis. ~~M4 — chercher `MASSEUL` dans un `.inp` produit par Write .inp only~~ —
+   **CLOS, dépassé par mieux qu'un `.inp`** : le `.dat` du job réel `TEST_vol`
+   a tranché à un niveau que le `.inp` ne pouvait pas atteindre
+   (`***WARNING: OUTPUT REQUEST MASS IS NOT AVAILABLE FOR THIS TYPE OF
+   ANALYSIS`, et `EVOL` écrit en `*elementoutput` sur tout `ASSEMBLY_EULER`).
+   La requête a été retirée ; la piste `*integratedoutput` sur la surface
+   `EULERIANMATERIAL` est consignée dans `create_step`.
+3. **M1 — seule question restée sans réponse, et elle n'engage rien** :
+   as-tu déjà constaté un `standard.exe`/`explicit.exe` orphelin dans le
+   Gestionnaire des tâches après un Cancel, ou le risque était-il purement
+   théorique chez toi ? La correction (`7a7631c`) est en place dans les deux
+   cas ; la réponse ne changerait que ce que ce rapport peut affirmer du
+   comportement d'origine, pas le code.
+4. ~~M2 (`domain_jacobian` non câblé)~~ — **répondu** : abandonné, aucun
    câblage envisagé. Code supprimé (commit `70b43c0`).
 5. ~~Cancel : `taskkill /F /T` est-il la spécification voulue ?~~ —
-   **répondu** : la meilleure route est `abaqus terminate job=<name>`
-   exécutée dans le dossier de travail du job. C'était déjà l'étape 1 des
-   deux implémentations ; seul le repli a été corrigé (M1, commit `7a7631c`),
-   car `abaqus terminate` ne peut répondre qu'une fois le `<job>.cid` écrit
-   par le solveur — un Cancel pendant la construction du modèle ou pendant
+   **répondu** : la route est `abaqus terminate job=<name>` exécutée dans le
+   dossier de travail du job. C'était déjà l'étape 1 ; seul le repli a été
+   corrigé (M1), car `abaqus terminate` ne peut répondre qu'une fois le
+   `<job>.cid` écrit — un Cancel pendant la construction du modèle ou pendant
    l'extraction n'a pas d'autre recours.
-6. **M3 (gel de l'UI pendant le Cancel)** : quelle option préfères-tu ?
-   (a) réduire simplement les timeouts (correction de quelques lignes, le
-   gel passe de ~30 s à ~7 s mais ne disparaît pas) ; (b) rendre le Cancel
-   asynchrone (supprime le gel, mais restructure les deux chemins
-   d'annulation) ; (c) ne rien faire si un gel de quelques secondes au
-   Cancel ne te gêne pas en pratique. Je n'ai pas tranché seul : c'est un
-   compromis ergonomie / risque de régression sur un chemin que je ne peux
-   pas tester sous Windows.
-7. Reste-t-il des constats mineurs (m1 à m4) que tu veux voir corrigés dans
-   cette passe ? m4 (`pytest.importorskip("imageio")`) est le moins risqué :
-   3 lignes, il rend la suite verte dans un environnement conforme à
-   `requirements.txt`.
+6. ~~M3 (gel de l'UI pendant le Cancel) : (a) timeouts, (b) Cancel asynchrone,
+   (c) ne rien faire ?~~ — **répondu : (c)**. `terminate` s'exécute vite
+   (0,63 s mesuré par Tristan, contre 4,90 s pour le lancement), le gel est
+   jugé acceptable. Constat clos sans correction.
+7. ~~Reste-t-il des mineurs (m1–m4) à corriger ?~~ — **répondu** : tous les
+   quatre l'ont été (m1 `edf0cf6`, m2, m3 `bb31f67`, m4 `5ac4255`).
 
 ## État des tests
 
@@ -1378,3 +1375,34 @@ test `tests/test_abaqus_terminate.py` couvre les fonctions unitaires
 `abaqus_terminate_job`/`_terminate_process_tree`, pas le code de
 `JobTab._cancel_run` lui-même — voir M1), et tout le chemin
 `_review/check_api.py` par construction.
+
+### Relevé final — contenu fusionné dans `main` (17/09)
+
+Exécuté sur l'arbre de `origin/main` après la fusion de `17475a5`
+(`git diff origin/main origin/review/fiabilisation` : vide), dans un
+conteneur reconstruit — interpréteur système, `pip install -r
+requirements.txt` **plus** `matplotlib scipy imageio opencv-python-headless`,
+donc `imageio` présent cette fois.
+
+```
+QT_QPA_PLATFORM=offscreen pytest -q --ignore=tests/test_mesh_pipeline.py
+  583 passed in 140.37s (0:02:20)
+
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_mesh_pipeline.py
+  11 passed in 150.20s (0:02:30)
+```
+
+**594 réussis, 0 ignoré, 0 échec.**
+
+Réconciliation avec le relevé précédent (580 réussis / 3 ignorés en passe 1,
+soit 583 collectés) : `17475a5` ajoute 4 tests à `test_script_log.py` et en
+supprime 1 (`test_matches_what_the_job_tab_builds`, absorbé par
+`test_the_two_sides_agree`), soit **+3 nets → 586 collectés**… or
+`pytest --collect-only` en compte **583**. L'écart de 3 est exactement le
+nombre de tests `imageio` : ils étaient **ignorés** et comptés à part dans le
+relevé précédent (« 580 passed, 3 skipped »), donc la base à comparer est
+580 collectés, pas 583. 580 + 3 = 583 : aucun test n'a été perdu.
+
+Les 3 tests `imageio` sont désormais **réussis** et non plus ignorés — c'est
+la seule différence de couverture réelle avec le relevé d'avant la fusion, et
+elle vient de l'environnement, pas du code.
