@@ -30,7 +30,9 @@ complète dans `_review/check_api_report.txt`.
 > rapport était une sortie machine locale, jamais versionnée, supprimée avec
 > elles. Les chiffres cités ci-dessous sont donc **attestés par ce rapport
 > mais non ré-auditables en l'état** : ils valent pour l'installation Abaqus
-> 2022 HF8 de Tristan au 15/09/2026, et pour aucune autre.
+> 2022 HF8 de Tristan telle qu'elle était lors des exécutions v1 à v3 de cette
+> revue, et pour aucune autre. La date de ces exécutions n'est consignée nulle
+> part dans ce rapport — seul le rapport supprimé la portait.
 >
 > Ils sont en revanche **reproductibles en deux commandes** — c'est le seul
 > point qui compte pour une mise à jour d'Abaqus :
