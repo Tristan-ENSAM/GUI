@@ -6,7 +6,7 @@ Date : 2026-09-15 (phase 1), mise à jour phase 2 le même jour.
 
 | ID | Constat | Sévérité | Statut |
 |---|---|---|---|
-| M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ** (commit `7a7631c`) |
+| M1 | Cancel : le repli ne tue pas l'arbre de processus | Majeur | **CORRIGÉ ET VÉRIFIÉ EN CONDITIONS RÉELLES** (`7a7631c`, puis `a9a70eb` après l'échec de l'essai 4) — orphelin reproduit le 18/09 puis éliminé, confirmé par Tristan |
 | M2 | `domain_jacobian` livré sans câblage GUI | Majeur | **CORRIGÉ** — fonctionnalité abandonnée sur décision de Tristan, code supprimé (commit `70b43c0`) |
 | M3 | Le Cancel gèle l'UI (les trois chemins) | Majeur | **ROUVERT PUIS CORRIGÉ** (17/09, demande de Tristan) — d'abord clos sans correction, puis traité par l'option (b) : annulation asynchrone. Plus aucun appel bloquant dans le thread GUI |
 | M4 | `MASSEUL`/`VOLEUL` absents de l'ODB : le contrôle de conservation n'existe pas | Majeur | **CLOS — requête RETIRÉE.** `MASS` refusé par le solveur, `EVOL` écrit par élément et constant. Trois tentatives, aucune valable ; voie à explorer documentée |
@@ -625,13 +625,33 @@ engendrés étaient déjà ré-attachés ailleurs.
    défaut le plus coûteux** : il m'a empêché de diagnostiquer l'essai 4
    autrement que par le nombre de lignes vides.
 
-**CE QUI N'EST PAS ÉTABLI.** Que ces trois corrections suffisent. La cause
-première reste une course entre la sortie du lanceur et le `taskkill`, et je
-ne peux pas l'observer depuis cet environnement. Les corrections 2 et 3
-réduisent la fenêtre, la 1 rend l'échec visible — elles ne la ferment pas
-formellement. **Si un lanceur meurt avant le kill, aucun `taskkill /T` par PID
-ne peut plus atteindre l'arbre.** Répéter l'essai 4 est le seul moyen de
-trancher, et si l'échec persiste le panneau nommera maintenant l'étape fautive.
+**VÉRIFIÉ le 18/09 — essai 4 bis, job `test_cancel_3`.** L'essai a été répété
+après correction. Le panneau donne :
+
+```
+[CANCEL] no test_cancel_3.cid yet: the solver is not running,
+         killing the process tree
+[FAILED] Abaqus exit code: 1, status: ExitStatus.NormalExit
+[CANCELLED by user]
+```
+
+Lecture, branche par branche : le raccourci `.cid` a joué (correction 3) ; le
+message `the process tree could not be killed` est **absent**, donc `killed`
+était vrai, donc `taskkill` a rendu 0 — ce qui, depuis la correction 1,
+signifie un vrai succès et non le `return True` inconditionnel d'avant ; et
+`[CANCELLED by user]` est précédé de deux lignes vides (`job_tab.py:869`),
+confirmant que c'est bien `_after_tree_kill` qui a conclu. **Tristan confirme
+n'avoir eu à tuer aucun processus à la main.** Au même instant de la
+manœuvre, le code rapporte donc l'inverse de ce qu'il rapportait la veille.
+
+**CE QUI RESTE NON ÉPROUVÉ, et c'est précis, pas une précaution de style :**
+une seule combinaison n'a jamais tourné — **le repli par arbre de processus
+alors que le solveur tourne déjà**. Les quatre essais couvrent soit la voie
+propre avec solveur lancé (essais 1 et 3), soit le repli avant démarrage du
+solveur (essais 2 et 4 bis). Le cas dur — Cancel juste après `[STAGE]
+SOLVE_START` mais avant que `abaqus terminate` puisse répondre — reste
+inexploré, et c'est celui où un `standard.exe` peut réellement être orphelin.
+La fenêtre est étroite, ce qui la rend difficile à viser autant que rare.
 
 **Option non appliquée, parce qu'elle est dangereuse et que ce n'est pas à moi
 de la choisir** : tuer par nom d'image (`taskkill /F /IM standard.exe`)
@@ -1450,17 +1470,20 @@ acceptés et honorés n'a jamais été éprouvé.
 
 ### 3. Ce qui n'a pas pu être testé du tout
 
-- **Le chemin Windows d'annulation** (`taskkill /F /T`) : écrit et couvert par
-  des tests unitaires qui simulent l'OS, jamais exercé contre un vrai arbre de
-  processus Abaqus. Le seul test réel (job `cancel_test`) a emprunté la route
-  propre `abaqus terminate`, pas le repli.
+- ~~**Le chemin Windows d'annulation** (`taskkill /F /T`)~~ — **LEVÉ le
+  18/09.** Exercé contre un vrai arbre Abaqus lors des essais 2
+  (`GCI_run000`, onglet Optimization) et 4 bis (`test_cancel_3`, onglet Job),
+  sans processus survivant. Reste inexploré : le repli **avec le solveur déjà
+  lancé** — voir la fin du constat m7.
 - **La coexistence `V` / `V_CAMERABAND` dans l'ODB** et la préférence de
   `_resolve_fo_name` pour la série filtrée : le deck est vérifié, le
   comportement d'extraction ne l'est que par les tests sur doublures.
 - **Le journal des campagnes de sensibilité** : le mécanisme est celui,
   validé, de l'onglet Job, mais aucune campagne réelle n'a tourné depuis.
-- **L'annulation asynchrone des trois onglets** (correction de M3 et m7,
-  17/09) : 12 tests sur doubles, aucun solveur réel.
+- **L'annulation asynchrone des trois onglets** (correction de M3 et m7) :
+  17 tests sur doubles, plus **cinq annulations réelles** les 17 et 18/09
+  (essais 1, 2, 3, 4 et 4 bis). Ce qui manque encore est nommé au constat m7 :
+  le repli déclenché alors que le solveur tourne.
 
 #### Protocole pour lever la dernière réserve — à exécuter avec Abaqus
 
@@ -1517,17 +1540,27 @@ sans sa réponse est une question qui se repose.
    ANALYSIS`, et `EVOL` écrit en `*elementoutput` sur tout `ASSEMBLY_EULER`).
    La requête a été retirée ; la piste `*integratedoutput` sur la surface
    `EULERIANMATERIAL` est consignée dans `create_step`.
-3. **M1 — processus orphelin après un Cancel** : posée, mais **restée sans
-   réponse sur ce point précis**. La réponse de Tristan (17/09) porte sur un
-   autre comportement — l'annulation différée et son contournement par
-   `abaqus terminate` à la main — dont est issu le constat m7 ci-dessus. Elle
-   n'établit rien sur l'existence d'un `standard.exe`/`explicit.exe` orphelin.
-   Elle a en revanche une conséquence directe sur la portée de M1 : les deux
-   chemins qu'il décrit (annulation différée côté Optimization, `terminate`
-   manuel) **ne sollicitent jamais le repli corrigé par `7a7631c`** — le
-   premier ne tue rien, le second est la voie propre. Le repli par arbre de
-   processus reste donc non éprouvé en usage réel, conformément à ce
-   qu'annonce « Limite de la méthode ».
+3. ~~**M1 — processus orphelin après un Cancel**~~ — **RÉPONDU le 18/09,
+   par l'expérience et non par le souvenir.** La question est restée ouverte
+   trois jours : la réponse de Tristan du 17/09 portait sur un autre
+   comportement (l'annulation différée, d'où est né m7) et n'établissait rien
+   sur l'orphelin. Ce sont les essais réels qui ont tranché, dans les deux
+   sens :
+
+   - **L'orphelin n'était pas théorique.** Essai 4 du 18/09, job
+     `test_cancel_2` : Cancel rapide depuis l'onglet Job, solveur survivant,
+     *« j'ai dû le kill à la main »*. Cause établie dans le code —
+     `kill_process_tree_by_pid` retournait `True` sans lire le code de sortie
+     de `taskkill`.
+   - **Il ne se reproduit plus.** Essai 4 bis, job `test_cancel_3`, après les
+     trois corrections : `[CANCEL] no test_cancel_3.cid yet: the solver is not
+     running, killing the process tree`, aucun message d'échec du kill (donc
+     `taskkill` a rendu 0, ce qui signifie maintenant quelque chose), et
+     **Tristan confirme n'avoir eu à tuer aucun processus à la main**.
+
+   C'est la première et unique vérification de bout en bout du repli par arbre
+   de processus contre un vrai Abaqus. Elle vaut pour le cas où le solveur
+   n'a pas démarré ; la réserve résiduelle est décrite ci-dessous.
 4. ~~M2 (`domain_jacobian` non câblé)~~ — **répondu** : abandonné, aucun
    câblage envisagé. Code supprimé (commit `70b43c0`).
 5. ~~Cancel : `taskkill /F /T` est-il la spécification voulue ?~~ —
