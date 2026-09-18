@@ -21,6 +21,16 @@ from gui.sensitivity.run_worker import (abaqus_terminate_job,
                                         kill_process_tree_by_pid)
 
 
+class _Completed:
+    """Stands in for subprocess.CompletedProcess. taskkill's EXIT CODE is what
+    says whether the tree died; the function used to ignore it."""
+
+    def __init__(self, returncode, stdout=b"", stderr=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def _script(path: Path, body: str) -> Path:
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -116,7 +126,7 @@ class TestKillProcessTreeByPid:
 
         def _fake_run(args, **kwargs):
             seen["args"] = args
-            return None
+            return _Completed(0)
 
         monkeypatch.setattr("subprocess.run", _fake_run)
         assert kill_process_tree_by_pid(4321) is True
@@ -130,6 +140,21 @@ class TestKillProcessTreeByPid:
             raise OSError("taskkill missing")
 
         monkeypatch.setattr("subprocess.run", _boom)
+        assert kill_process_tree_by_pid(4321) is False
+
+    @pytest.mark.parametrize("rc,why", [
+        (128, b"ERROR: The process \"4321\" not found."),
+        (1, b"ERROR: The process ... could not be terminated. Access denied."),
+    ])
+    def test_a_refused_taskkill_reports_false(self, monkeypatch, rc, why):
+        """REGRESSION (17/09, job test_cancel_2). This used to return True as
+        long as taskkill merely RAN. A cancel during the model build found the
+        launcher already gone, taskkill answered "not found", the GUI called
+        it a success, skipped its own fallback, printed nothing -- and Tristan
+        had to kill the job by hand. A non-zero exit is a failure."""
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr("subprocess.run",
+                            lambda *a, **k: _Completed(rc, stderr=why))
         assert kill_process_tree_by_pid(4321) is False
 
 
@@ -301,6 +326,31 @@ class TestOptimizationTabCancelsTheRunInFlight:
         assert tab._emit_log_tail(tmp_path / "nope.gui.log", 0) == 0
 
 
+class _FakeQProcess:
+    """A QProcess stand-in. `state()` is what the cancel path reads; PID is
+    captured at click time and must survive the launcher exiting."""
+
+    def __init__(self, pid=777, running=True):
+        from PySide6.QtCore import QProcess
+        self._pid = pid
+        self._running = running
+        self._QProcess = QProcess
+        self.events = []
+
+    def state(self):
+        return (self._QProcess.Running if self._running
+                else self._QProcess.NotRunning)
+
+    def processId(self):
+        return self._pid
+
+    def terminate(self):
+        self.events.append("terminate")
+
+    def kill(self):
+        self.events.append("kill")
+
+
 class TestJobTabCancelDoesNotFreezeTheWindow:
     """M3: the Job tab's Cancel ran `abaqus terminate` (subprocess timeout
     20 s), then waitForFinished(10000), then waitForFinished(2000) -- all on
@@ -314,16 +364,9 @@ class TestJobTabCancelDoesNotFreezeTheWindow:
         from gui.tabs.job_tab import JobTab
         return JobTab(ModelConfig(), lambda: Preferences())
 
-    def test_terminate_runs_off_the_gui_thread(self, tab, monkeypatch, qapp):
+    def test_terminate_runs_off_the_gui_thread(self, tab, qapp):
         gui_thread = threading.current_thread().ident
         ran_on = {}
-        monkeypatch.setattr(
-            "gui.tabs.job_tab.abaqus_terminate_job",
-            lambda *a: ran_on.setdefault("id", threading.current_thread().ident))
-        tab._pipeline = {"job_name": "J", "workdir": "/wd"}
-        monkeypatch.setattr(tab, "_get_prefs",
-                            lambda: type("P", (), {"abaqus_cmd": "abaqus"})())
-        # Drive the stage directly: _cancel_run's QMessageBox needs a user.
         from gui.core.async_call import run_async
         run_async(lambda: ran_on.setdefault(
             "id", threading.current_thread().ident), lambda _r: None, tab)
@@ -334,7 +377,8 @@ class TestJobTabCancelDoesNotFreezeTheWindow:
         killed = []
         monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
                             lambda pid: killed.append(pid) or True)
-        tab._proc = None                    # pipeline already cleaned up
+        tab._proc = _FakeQProcess(running=False)
+        tab._cancel_pid = 777
         tab._force_kill()
         qapp.processEvents()
         assert killed == []
@@ -343,46 +387,85 @@ class TestJobTabCancelDoesNotFreezeTheWindow:
     def test_the_tree_kill_is_tried_before_the_single_process(self, tab,
                                                               monkeypatch,
                                                               qapp):
-        from PySide6.QtCore import QProcess
-        killed, fallback = [], []
-
-        class _P:
-            def state(self):
-                return QProcess.Running
-            def processId(self):
-                return 777
-            def terminate(self):
-                fallback.append("terminate")
-
-        tab._proc = _P()
+        killed = []
+        proc = _FakeQProcess()
+        tab._proc = proc
+        tab._cancel_pid = 777
         monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
                             lambda pid: killed.append(pid) or True)
         tab._force_kill()
         assert _pump(qapp, lambda: bool(killed))
         assert killed == [777]
         # taskkill answered, so the single-process escalation stays unused.
-        assert fallback == []
+        assert proc.events == []
 
     def test_posix_falls_back_to_terminate_then_kill(self, tab, monkeypatch,
                                                      qapp):
-        from PySide6.QtCore import QProcess
-        events = []
-
-        class _P:
-            def state(self):
-                return QProcess.Running
-            def processId(self):
-                return 778
-            def terminate(self):
-                events.append("terminate")
-            def kill(self):
-                events.append("kill")
-
-        tab._proc = _P()
+        proc = _FakeQProcess(pid=778)
+        tab._proc = proc
+        tab._cancel_pid = 778
         # kill_process_tree_by_pid returns False off Windows.
         monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
                             lambda pid: False)
         tab._force_kill()
-        assert _pump(qapp, lambda: "terminate" in events)
+        assert _pump(qapp, lambda: "terminate" in proc.events)
         tab._escalate_kill()                # the 2 s timer, fired by hand
-        assert events == ["terminate", "kill"]
+        assert proc.events == ["terminate", "kill"]
+
+    def test_a_refused_tree_kill_is_said_out_loud(self, tab, monkeypatch,
+                                                  qapp):
+        """REGRESSION (17/09, job test_cancel_2). The tree kill failed, the
+        GUI said nothing, and the solver survived. Silence is the defect: the
+        panel must name what to look for in the task manager."""
+        tab._proc = _FakeQProcess()
+        tab._cancel_pid = 777
+        monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
+                            lambda pid: False)
+        tab._force_kill()
+        assert _pump(qapp, lambda: "could not be killed"
+                     in tab.txt_output.toPlainText())
+        panel = tab.txt_output.toPlainText()
+        assert "standard.exe" in panel and "ABQcaeK.exe" in panel
+
+    def test_no_cid_goes_straight_to_the_kill(self, tab, monkeypatch, qapp,
+                                              tmp_path):
+        """`abaqus terminate` reads <job>.cid to find the solver. With no .cid
+        there is nothing to ask, and asking costs a thread hop the launcher
+        may not survive -- which is how the 17/09 cancel lost its job."""
+        from PySide6.QtWidgets import QMessageBox
+        asked = []
+        monkeypatch.setattr("gui.tabs.job_tab.abaqus_terminate_job",
+                            lambda *a: asked.append(a) or True)
+        monkeypatch.setattr(QMessageBox, "question",
+                            staticmethod(lambda *a, **k: QMessageBox.Yes))
+        killed = []
+        monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
+                            lambda pid: killed.append(pid) or True)
+        tab._proc = _FakeQProcess(pid=999)
+        tab._pipeline = {"job_name": "J", "workdir": str(tmp_path)}
+        tab._cancel_run()
+        assert _pump(qapp, lambda: bool(killed))
+        assert asked == [], "asked Abaqus to terminate a job with no .cid"
+        assert killed == [999]
+        assert "no J.cid yet" in tab.txt_output.toPlainText()
+
+    def test_the_pid_is_captured_at_click_time(self, tab, monkeypatch, qapp,
+                                               tmp_path):
+        """The launcher can exit inside the terminate round-trip. Reading its
+        PID afterwards yields nothing to kill, so it is read at the click."""
+        from PySide6.QtWidgets import QMessageBox
+        monkeypatch.setattr(QMessageBox, "question",
+                            staticmethod(lambda *a, **k: QMessageBox.Yes))
+        monkeypatch.setattr("gui.tabs.job_tab.kill_process_tree_by_pid",
+                            lambda pid: True)
+        (tmp_path / "J.cid").write_text("host:1\n")
+        monkeypatch.setattr("gui.tabs.job_tab.abaqus_terminate_job",
+                            lambda *a: False)
+        tab._proc = _FakeQProcess(pid=1234)
+        tab._pipeline = {"job_name": "J", "workdir": str(tmp_path)}
+        tab._cancel_run()
+        assert tab._cancel_pid == 1234
+        # The launcher now exits; the captured PID must be what is used.
+        tab._proc = None
+        assert _pump(qapp, lambda: "did not answer"
+                     in tab.txt_output.toPlainText())

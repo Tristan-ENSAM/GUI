@@ -133,13 +133,25 @@ def kill_process_tree_by_pid(pid: int) -> bool:
     if os.name != "nt":
         return False
     try:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
-                       capture_output=True, check=False)
-        return True
+        completed = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(int(pid))],
+            capture_output=True, check=False)
     except Exception:
         log_swallowed("killing the process tree of pid %r" % pid,
                       level=logging.DEBUG)
         return False
+    if completed.returncode == 0:
+        return True
+    # taskkill exits non-zero when the PID is already gone ("process not
+    # found") or when it may not be touched ("access denied"). Reporting that
+    # as success is how a surviving solver went unnoticed: the caller skipped
+    # its own fallback and said nothing. The message is kept because it names
+    # which of the two happened, and the two need different answers.
+    detail = (completed.stderr or completed.stdout or b"")
+    logging.getLogger(__name__).warning(
+        "taskkill on pid %s failed (rc=%s): %s", pid, completed.returncode,
+        detail.decode("cp1252", errors="replace").strip())
+    return False
 
 
 def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> None:

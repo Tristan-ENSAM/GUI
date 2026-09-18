@@ -571,10 +571,73 @@ deux peut recevoir `ECHILD`. L'appel est déjà sous `try/except` et le chemin
 est best-effort, mais **ce n'est pas prouvé sans course, c'est jugé
 acceptable** — la cible est Windows.
 
-**Couverture :** 12 tests dans `tests/test_abaqus_terminate.py`, dont un qui
+**Couverture :** 17 tests dans `tests/test_abaqus_terminate.py`, dont un qui
 mesure directement la propriété en cause — le slot d'annulation rend la main
 en moins d'une seconde alors que le faux `abaqus terminate` est encore bloqué.
 Tous avec des doubles ; aucun solveur réel.
+
+#### Essais réels du 18/09 — trois succès, un échec, et ce que l'échec a révélé
+
+Quatre annulations exécutées par Tristan sur son installation. C'est la
+première fois de cette revue que ces chemins tournent contre un vrai Abaqus.
+
+| Essai | Onglet | Moment | Résultat |
+|---|---|---|---|
+| 1 | Optimization | après progression du `.sta` | **OK** — voie propre ; `***ERROR: Process terminated by external request`, `no bundle (rc=0)`, run compté comme échoué |
+| 2 | Optimization | avant le `.cid` | **OK** — repli : `Abaqus did not answer; killing the process tree`, `no bundle (rc=1)` |
+| 3 | Job | après progression du `.sta` | **OK** — voie propre ; le job meurt, extraction sautée |
+| 4 | Job | annulation rapide | **ÉCHEC** — *« le job était encore d'exécution, j'ai dû le kill à la main »* |
+
+**Diagnostic de l'essai 4.** Le journal montre `[CANCEL] asking Abaqus to
+terminate job test_cancel_2`, puis `[FAILED] Abaqus exit code: 1`, puis
+`[CANCELLED by user]` précédé de DEUX lignes vides. Comme `_append_output`
+insère le texte verbatim, ce compte identifie la branche : deux lignes vides
+correspondent à `_after_tree_kill`, donc `kill_process_tree_by_pid` a bien été
+appelée et a répondu « succès ». Or le solveur a survécu.
+
+**FAIT (lu dans le code, pas déduit du journal) :** `kill_process_tree_by_pid`
+faisait `subprocess.run([...], check=False)` puis `return True`
+inconditionnellement. Le code de retour de `taskkill` était ignoré. Or
+`taskkill` sort en non-zéro quand le PID n'existe plus (« process not found »)
+ou quand il est intouchable (« access denied »). **Un échec était donc rapporté
+comme un succès**, le repli mono-processus ne se déclenchait jamais, et rien
+n'était écrit dans le panneau.
+
+**HYPOTHÈSE sur la cause première**, cohérente avec le journal mais non
+prouvée : `abaqus cae` avait déjà rendu la main (`exit code: 1` s'affiche
+AVANT `[CANCELLED by user]`) quand `taskkill /T` a visé son PID. Un lanceur
+mort ne nomme plus aucun arbre : le noyau CAE et le solveur qu'il avait
+engendrés étaient déjà ré-attachés ailleurs.
+
+**TROIS CORRECTIONS (18/09) :**
+
+1. `kill_process_tree_by_pid` retourne `completed.returncode == 0` et
+   journalise la sortie de `taskkill` en cas d'échec. Un échec redevient un
+   échec.
+2. Le PID du lanceur est **capturé au clic**, plus au retour de l'appel
+   asynchrone. Entre les deux, `abaqus cae` peut mourir.
+3. Le `.cid` est testé **synchronement** dans `_cancel_run` : sans lui,
+   `abaqus terminate` n'a rien à signaler, donc on va directement au kill sans
+   payer un aller-retour de thread que le lanceur peut ne pas survivre. Et le
+   panneau annonce désormais chaque étape — `no <job>.cid yet`,
+   `Abaqus did not answer`, `the process tree could not be killed; check for a
+   surviving standard.exe / explicit.exe / ABQcaeK.exe`. **Ce mutisme était le
+   défaut le plus coûteux** : il m'a empêché de diagnostiquer l'essai 4
+   autrement que par le nombre de lignes vides.
+
+**CE QUI N'EST PAS ÉTABLI.** Que ces trois corrections suffisent. La cause
+première reste une course entre la sortie du lanceur et le `taskkill`, et je
+ne peux pas l'observer depuis cet environnement. Les corrections 2 et 3
+réduisent la fenêtre, la 1 rend l'échec visible — elles ne la ferment pas
+formellement. **Si un lanceur meurt avant le kill, aucun `taskkill /T` par PID
+ne peut plus atteindre l'arbre.** Répéter l'essai 4 est le seul moyen de
+trancher, et si l'échec persiste le panneau nommera maintenant l'étape fautive.
+
+**Option non appliquée, parce qu'elle est dangereuse et que ce n'est pas à moi
+de la choisir** : tuer par nom d'image (`taskkill /F /IM standard.exe`)
+atteindrait un arbre orphelin, mais tuerait aussi **tout autre job Abaqus
+tournant sur la machine**, y compris ceux d'un collègue sur un poste partagé.
+
 
 **M4 — `MASSEUL`/`VOLEUL` sont absents de l'ODB : le contrôle de conservation
 de masse eulérienne n'existe pas dans les résultats.**
@@ -1629,3 +1692,20 @@ des chemins devenus asynchrones (l'attente d'un signal remplace la lecture
 immédiate de l'état), et 6 ont été ajoutés, dont
 `test_the_slot_returns_before_the_blocking_call_finishes`, qui mesure
 directement la propriété en cause. Aucun test supprimé. 600 + 6 = 606.
+
+### Relevé après les essais réels du 18/09
+
+```
+QT_QPA_PLATFORM=offscreen pytest -q --ignore=tests/test_mesh_pipeline.py
+  600 passed in 200.95s (0:03:20)
+
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_mesh_pipeline.py
+  11 passed in 196.74s (0:03:16)
+```
+
+**611 réussis, 0 ignoré, 0 échec**, contre 606. +5 : trois tests de
+non-régression nommant explicitement l'essai 4 (`taskkill` refusé → `False`,
+sur deux codes de sortie réels ; le panneau qui annonce l'échec ; l'absence de
+`.cid` qui court-circuite le `terminate`), un pour la capture du PID au clic,
+et la doublure `_Completed` qui a remplacé un `return None` devenu invalide
+puisque le code de retour est désormais lu.

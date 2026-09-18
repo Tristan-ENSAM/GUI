@@ -267,6 +267,7 @@ class JobTab(QWidget):
         # frequent enough to feel responsive without hammering the
         # filesystem; the .sta is only updated once per output frame
         # anyway (typically every few seconds of wall time).
+        self._cancel_pid = None     # launcher PID, captured on Cancel
         self._sta_timer = QTimer(self)
         self._sta_timer.setInterval(800)
         self._sta_timer.timeout.connect(self._poll_sta)
@@ -788,14 +789,34 @@ class JobTab(QWidget):
             abq = self._get_prefs().abaqus_cmd
         except Exception:
             abq = None
-        if job_name and workdir and abq:
+        # Captured NOW, not when the callback lands. `abaqus cae` can exit
+        # within the round-trip, and once it has, its PID names nothing:
+        # taskkill /T has no tree left to walk and the kernel and solver it
+        # spawned are already reparented. A cancel on 17/09 lost a job exactly
+        # that way -- the launcher reported exit code 1, the solver kept
+        # running, and the tree kill hit a dead number.
+        self._cancel_pid = self._proc.processId()
+
+        # `abaqus terminate` reads <job>.cid to find the running solver, so
+        # with no .cid there is nothing to ask politely -- and asking costs a
+        # thread hop the launcher may not survive. Check it here, and go
+        # straight to the kill when the answer is already known.
+        cid_ready = False
+        if job_name and workdir:
+            try:
+                cid_ready = (Path(workdir) / ("%s.cid" % job_name)).is_file()
+            except Exception:
+                log_swallowed("looking for the job's .cid",
+                              level=logging.DEBUG)
+        if cid_ready and abq:
             self._append_output(
                 "\n[CANCEL] asking Abaqus to terminate job %s\n" % job_name)
             run_async(lambda: abaqus_terminate_job(abq, job_name, workdir),
                       self._after_terminate, self)
         else:
-            # `abaqus terminate` needs a job name and a working directory, so
-            # a Cancel during the model build has nothing to ask politely.
+            self._append_output(
+                "\n[CANCEL] no %s.cid yet: the solver is not running, "
+                "killing the process tree\n" % (job_name or "job"))
             self._force_kill()
 
     def _after_terminate(self, accepted):
@@ -805,31 +826,46 @@ class JobTab(QWidget):
             # exits first, _force_kill finds NotRunning and does nothing.
             QTimer.singleShot(10000, self._force_kill)
         else:
+            self._append_output(
+                "\n[CANCEL] Abaqus did not answer; killing the process tree "
+                "(licence tokens stay checked out)\n")
             self._force_kill()
 
     def _force_kill(self):
-        """Stage 2: kill the whole tree. No-op if the job already exited."""
-        if self._proc is None or self._proc.state() == QProcess.NotRunning:
+        """Stage 2: kill the whole tree, by the PID captured at click time."""
+        if self._proc is not None \
+                and self._proc.state() == QProcess.NotRunning:
             self._append_output("\n[CANCELLED by user]\n")
             return
-        # `abaqus terminate` only works once the solver has written
-        # <job>.cid, so Cancel during the model build (or during extraction)
-        # always lands here. QProcess.terminate()/kill() reach only the direct
-        # child, which on Windows leaves the solver processes Abaqus spawned
-        # alive; kill the whole tree by PID there instead. taskkill is a
-        # subprocess, so it goes off-thread like the terminate did.
-        pid = self._proc.processId()
+        # QProcess.terminate()/kill() reach only the direct child, which on
+        # Windows leaves the solver processes Abaqus spawned alive; kill the
+        # whole tree by PID there instead. taskkill is a subprocess, so it
+        # goes off-thread like the terminate did.
+        pid = self._cancel_pid
+        if not pid:
+            self._append_output("\n[CANCELLED by user]\n")
+            return
         run_async(lambda: kill_process_tree_by_pid(pid),
                   self._after_tree_kill, self)
 
     def _after_tree_kill(self, killed):
-        """POSIX, or taskkill unavailable: fall back to the single process."""
-        if not killed and self._proc is not None \
-                and self._proc.state() != QProcess.NotRunning:
-            # terminate() sends WM_CLOSE which Abaqus may ignore, so escalate
-            # to kill() after 2 seconds -- again a timer, not a wait.
-            self._proc.terminate()
-            QTimer.singleShot(2000, self._escalate_kill)
+        """POSIX, or taskkill refused: fall back to the single process.
+
+        `killed` is now the truth: kill_process_tree_by_pid used to return
+        True whenever taskkill merely RAN, so a "process not found" or an
+        "access denied" was reported as a success and this fallback never
+        fired -- silently, which is how a surviving solver went unreported.
+        """
+        if not killed:
+            self._append_output(
+                "\n[CANCEL] the process tree could not be killed; check for "
+                "a surviving standard.exe / explicit.exe / ABQcaeK.exe\n")
+            if self._proc is not None \
+                    and self._proc.state() != QProcess.NotRunning:
+                # terminate() sends WM_CLOSE which Abaqus may ignore, so
+                # escalate to kill() after 2 seconds -- a timer, not a wait.
+                self._proc.terminate()
+                QTimer.singleShot(2000, self._escalate_kill)
         self._append_output("\n\n[CANCELLED by user]\n")
 
     def _escalate_kill(self):
