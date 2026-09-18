@@ -233,6 +233,120 @@ class TestConvergenceDriver:
         assert not res.converged
 
 
+# --- Reverberation ceiling / filter controls ---------------------------------
+def _real_cfg(ms=1000.0, fc=25600.0, elem=0.002):
+    """A real ModelConfig at the production point (Ti-6Al-4V, ms = 1000,
+    field cutoff 25.6 kHz, 2 um mesh), so the driver can derive the ceiling
+    and the filter ratio from it."""
+    from gui.core.model_config import ModelConfig
+    c = ModelConfig()
+    c.euler_material.update({"E": 113800.0, "nu": 0.342, "rho": 4.43e-9})
+    c.elem_size = elem
+    c.step.mass_scaling_enabled = True
+    c.step.mass_scaling_factor = ms
+    c.step.output_filter_cutoff_hz = fc
+    return c
+
+
+class TestReverberationCeiling:
+    """The 90.6*elem_size ceiling used to refuse this study before run 1."""
+
+    ZOI = (-0.04, 0.04, -0.04, 0.04)
+    # hypot(0.2, 0.2) = 0.2828 mm, against the old 90.6*0.002 = 0.1812 mm and
+    # the physical 1.300 mm.
+    DIMS = DomainDims(0.1, 0.1, 0.1, 0.1)
+
+    def _events(self):
+        evs = []
+        return evs, (lambda ev: evs.append(ev))
+
+    def test_old_ceiling_refused_it_before_any_run(self):
+        res = run_domain_convergence(
+            _runner(lam=0.02), _real_cfg(), self.ZOI, self.DIMS,
+            grid_step=0.01, elem_size=0.002, margin_elems=1,
+            diagonal_ceiling=90.6 * 0.002)
+        assert res.stopped_by == "diagonal" and res.n_runs == 0
+
+    def test_new_ceiling_lets_it_start(self):
+        res = run_domain_convergence(
+            _runner(lam=0.02), _real_cfg(), self.ZOI, self.DIMS,
+            grid_step=0.01, elem_size=0.002, margin_elems=1,
+            max_iterations=2)
+        assert res.stopped_by != "diagonal"
+        assert res.n_runs > 0
+
+    def test_ceiling_derived_from_cfg_is_the_physical_one(self):
+        from gui.core.domain_sizing import config_diagonal_limit
+        assert config_diagonal_limit(_real_cfg()) == pytest.approx(1.300,
+                                                                   rel=2e-3)
+
+    def test_k_tightens_the_ceiling_back_to_a_refusal(self):
+        # k is a parameter: a large enough k refuses the same domain again.
+        # L_max(k) = 1.300/k * 3 mm; k = 15 -> 0.26 mm < 0.283 mm.
+        res = run_domain_convergence(
+            _runner(lam=0.02), _real_cfg(), self.ZOI, self.DIMS,
+            grid_step=0.01, elem_size=0.002, margin_elems=1,
+            reverb_margin_k=15.0)
+        assert res.stopped_by == "diagonal" and res.n_runs == 0
+
+    def test_unbounded_and_warned_when_the_cfg_cannot_give_a_ceiling(self):
+        evs, cb = self._events()
+        res = run_domain_convergence(
+            _runner(lam=0.02), _Cfg(), self.ZOI, self.DIMS,
+            grid_step=0.01, elem_size=0.002, margin_elems=1,
+            max_iterations=1, progress_cb=cb)
+        kinds = [e.get("kind") for e in evs
+                 if e.get("phase") == "domain_convergence_warning"]
+        assert "no_ceiling" in kinds
+        assert res.stopped_by != "diagonal" and res.n_runs > 0
+
+
+class TestFilterControls:
+    """fc*dt > 1e-3 is an Abaqus RECOMMENDATION (warn); fc < 0.5/dt is the
+    only HARD limit (block)."""
+
+    ZOI = (-0.04, 0.04, -0.04, 0.04)
+    DIMS = DomainDims(0.1, 0.1, 0.1, 0.1)
+
+    def _run(self, cfg, **kw):
+        evs = []
+        res = run_domain_convergence(
+            _runner(lam=0.02), cfg, self.ZOI, self.DIMS,
+            grid_step=0.01, elem_size=0.002, margin_elems=1,
+            max_iterations=1, progress_cb=evs.append, **kw)
+        warns = {e.get("kind"): e.get("message", "")
+                 for e in evs if e.get("phase") == "domain_convergence_warning"}
+        return res, warns
+
+    def test_below_the_1e3_recommendation_warns_but_does_not_block(self):
+        cfg = _real_cfg()
+        # Production point: fc*dt = 25600 * 1.723e-10 * sqrt(1000) ~ 1.4e-4.
+        res, warns = self._run(cfg)
+        assert "iir_ratio" in warns
+        assert "not blocking" in warns["iir_ratio"]
+        assert "two-stage" in warns["iir_ratio"]     # the documented remedy
+        assert res.stopped_by != "nyquist"
+        assert res.n_runs > 0                        # the study actually ran
+
+    def test_nyquist_blocks_before_any_run(self):
+        # dt = dt0*sqrt(ms) ~ 5.45e-9 s -> half the sampling rate is ~9.2e7 Hz.
+        cfg = _real_cfg(fc=2.0e8)
+        res, warns = self._run(cfg)
+        assert res.stopped_by == "nyquist"
+        assert res.n_runs == 0
+        assert "nyquist" in warns and "BLOCKING" in warns["nyquist"]
+
+    def test_comfortable_ratio_warns_about_nothing(self):
+        # ms = 1e8 -> dt = 1.723e-6 s -> fc*dt = 4.4e-2: above 1e-3, below 0.5.
+        cfg = _real_cfg(ms=1.0e8)
+        _res, warns = self._run(cfg, diagonal_ceiling=10.0)
+        assert "iir_ratio" not in warns and "nyquist" not in warns
+
+    def test_unknown_filter_ratio_warns_and_does_not_block(self):
+        _res, warns = self._run(_Cfg())
+        assert "filter_unknown" in warns
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

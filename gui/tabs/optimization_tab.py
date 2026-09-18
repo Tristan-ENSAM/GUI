@@ -48,7 +48,8 @@ from gui.sensitivity.run_worker import (
     abaqus_terminate_job, build_abaqus_args, kill_process_tree_by_pid,
     script_log_path)
 from gui.core.domain_sizing import (
-    DIMENSION_NAMES, diagonal, diagonal_limit)
+    DIMENSION_NAMES, diagonal, REVERB_MARGIN_K, config_diagonal_limit,
+    config_filter_check)
 from gui.results.reader import ResultsBundle
 from gui.widgets.geometry_preview import GeometryPreview
 
@@ -129,6 +130,21 @@ class OptimizationTab(QWidget):
         self.sp_margin = QSpinBox(); self.sp_margin.setRange(0, 50)
         self.sp_margin.setValue(0)
         dg.addWidget(self.sp_margin, r0, 1)
+        dg.addWidget(QLabel("Reverb. margin k:"), r0, 2)
+        self.le_reverb_k = QLineEdit("%g" % REVERB_MARGIN_K)
+        self.le_reverb_k.setFixedWidth(58)
+        self.le_reverb_k.setToolTip(
+            "Safety margin k between the domain cavity mode and the output\n"
+            "filter cutoff. The growth ceiling is the largest diagonal whose\n"
+            "reverberation peak still sits k times ABOVE the cutoff:\n"
+            "    c_d   = sqrt(E(1-nu) / (rho(1+nu)(1-2nu)))\n"
+            "    c_eff = c_d / sqrt(mass scaling)\n"
+            "    L_max = c_eff / (2 k fc)\n"
+            "The cavity law f = c_eff/(2L) is measured (3 campaigns at\n"
+            "ms = 1000, agreement better than 8 % with no free parameter).\n"
+            "k = 3 is an INHERITED, unjustified coefficient: change it here to\n"
+            "calibrate it against the margin measured on a real domain.")
+        dg.addWidget(self.le_reverb_k, r0, 3)
         dg.addWidget(QLabel("Centroid step:"), r0, 5)
         self.le_grid_step = QLineEdit(); self.le_grid_step.setPlaceholderText(
             "= element size")
@@ -140,6 +156,11 @@ class OptimizationTab(QWidget):
         self.lbl_init = QLabel("—")
         self.lbl_init.setStyleSheet("font-weight: bold;")
         dg.addWidget(self.lbl_init, r0 + 1, 0, 1, 4)
+        self.lbl_ceiling = QLabel("—")
+        self.lbl_ceiling.setWordWrap(True)
+        self.lbl_ceiling.setStyleSheet("color:#6b7280;")
+        dg.addWidget(self.lbl_ceiling, r0 + 2, 0, 1, 9)
+        self.le_reverb_k.editingFinished.connect(self._refresh_ceiling_label)
         # (added to the left column below)
 
         # ---- Convergence criterion -------------------------------------
@@ -467,6 +488,7 @@ class OptimizationTab(QWidget):
         # The Inputs-from-model panel was removed; refreshing now just redraws
         # the preview from the current config (kept for _rebind_cfg callers).
         self._load_opt_from_cfg()
+        self._refresh_ceiling_label()
         self._draw_preview()
 
     def compute_initial(self):
@@ -897,6 +919,38 @@ class OptimizationTab(QWidget):
     # ===================================================================
     # 4 - Eulerian domain sizing by convergence (grow outward, ZOI fixed)
     # ===================================================================
+    def _reverb_k(self):
+        """Safety margin k of the reverberation ceiling, read from the field.
+
+        Falls back to the module default when the field is empty or unusable;
+        a non-positive k would disable the ceiling silently, so it is refused
+        the same way."""
+        k = self._float_or(self.le_reverb_k, REVERB_MARGIN_K)
+        return k if k > 0.0 else REVERB_MARGIN_K
+
+    def _refresh_ceiling_label(self):
+        """Show the reverberation ceiling L_max and the filter-ratio verdict.
+
+        Both are computed analytically from the config (no run needed):
+        L_max = c_eff / (2 k fc) with c_eff = c_d / sqrt(mass scaling)."""
+        k = self._reverb_k()
+        lim = config_diagonal_limit(self.cfg, margin_k=k)
+        if lim is None:
+            txt = ("Reverberation ceiling: not computable (needs E, nu, rho, "
+                   "the mass-scaling factor and the filter cutoff) \u2014 the "
+                   "study will treat the domain as unbounded.")
+        else:
+            txt = ("Reverberation ceiling: diagonal \u2264 %.4g mm "
+                   "(k = %g, f_reverb = c_eff/(2L) \u2265 k\u00b7fc)"
+                   % (lim, k))
+        chk = config_filter_check(self.cfg)
+        if chk is not None and chk.computable and not chk.nyquist_ok:
+            txt += "\n\u26a0 " + chk.message
+        elif chk is not None and chk.computable and not chk.iir_advised_ok:
+            txt += ("\n\u2139 fc\u00b7dt = %.4g < 1e-3 (Abaqus recommendation "
+                    "only \u2014 does not block the study)." % chk.ratio)
+        self.lbl_ceiling.setText(txt)
+
     def _on_run_domain_convergence(self):
         val = self._validate_launch()
         if val is None:
@@ -920,6 +974,11 @@ class OptimizationTab(QWidget):
             "grow_elems": 4, "max_iterations": 8,
             "initial_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
                              "l_wp": dims.l_wp, "l_void": dims.l_void}}
+        k = self._reverb_k()
+        ceiling = config_diagonal_limit(self.cfg, margin_k=k)
+        fchk = config_filter_check(self.cfg)
+        study_cfg["reverb_margin_k"] = k
+        study_cfg["diagonal_ceiling"] = ceiling
         run_dir = self._study_run_dir(wd, "domainsizing", study_cfg)
         run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "domainsizing")
         self._cancel_evt.clear()
@@ -931,13 +990,21 @@ class OptimizationTab(QWidget):
         self._log_ui("  ZOI  x[%.4g,%.4g] y[%.4g,%.4g]" % zoi)
         self._log_ui("  mesh %.4g mm (held fixed) | margin %d elem"
                      % (elem, int(self.sp_margin.value())))
+        if ceiling is None:
+            self._log_ui("  reverberation ceiling: NOT COMPUTABLE \u2014 domain "
+                         "treated as unbounded")
+        else:
+            self._log_ui("  reverberation ceiling: diagonal \u2264 %.4g mm "
+                         "(k = %g)" % (ceiling, k))
+        if fchk is not None and fchk.computable:
+            self._log_ui("  output filter: %s" % fchk.message)
         self._log_ui("=" * 68)
         self._dc_worker = DomainConvergenceWorker(
             run_bundle=run_bundle, base_cfg=self.cfg, zoi=zoi, initial_dims=dims,
             grid_step=self.grid_step(), elem_size=elem, tolerances=tol,
             field_vars=("EVF", "TEMP", "V1", "V2"), evf_threshold=0.5,
             grow_elems=4, margin_elems=int(self.sp_margin.value()),
-            max_iterations=8)
+            max_iterations=8, diagonal_ceiling=ceiling, reverb_margin_k=k)
         self._dc_worker.progress.connect(self._on_dc_progress)
         self._dc_worker.finished_ok.connect(self._on_dc_done)
         self._dc_worker.failed.connect(self._on_fail)
@@ -945,6 +1012,9 @@ class OptimizationTab(QWidget):
         self._dc_worker.start()
 
     def _on_dc_progress(self, ev):
+        if ev.get("phase") == "domain_convergence_warning":
+            self._log_ui("  \u26a0 %s" % ev.get("message", ""))
+            return
         if ev.get("phase") != "domain_convergence":
             return
         d = ev.get("dims", {})
@@ -962,6 +1032,9 @@ class OptimizationTab(QWidget):
                          "by the boundaries",
             "diagonal": "STOPPED at the reverberation ceiling before "
                         "independence could be reached",
+            "nyquist": "NOT STARTED: the filter cutoff is at or above half "
+                       "the sampling frequency, so Abaqus would not filter "
+                       "at all (lower the cutoff or the mass-scaling factor)",
             "zoi_outside": "the ZOI is not inside the initial domain (enlarge "
                            "the domain or reduce the margin)",
             "max_iter": "stopped at the iteration cap, NOT converged",

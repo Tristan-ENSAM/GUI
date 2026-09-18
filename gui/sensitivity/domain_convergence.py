@@ -56,7 +56,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.domain_sizing import (
-    DomainDims, DIMENSION_NAMES, diagonal, diagonal_limit,
+    DomainDims, DIMENSION_NAMES, diagonal, REVERB_MARGIN_K,
+    config_diagonal_limit, config_filter_check,
 )
 from gui.sensitivity.mesh_opt import roi_grid, nearest_samples
 from gui.sensitivity.runner_core import eulerian_instance
@@ -279,7 +280,8 @@ class ConvergenceResult:
     converged: bool
     iterations: List[ConvergenceIteration] = field(default_factory=list)
     n_runs: int = 0
-    stopped_by: str = ""    # "converged"|"diagonal"|"max_iter"|"cancelled"|"zoi_outside"
+    # "converged"|"diagonal"|"nyquist"|"max_iter"|"cancelled"|"zoi_outside"
+    stopped_by: str = ""
 
 
 def _binding_change(changes: Dict[str, float],
@@ -308,6 +310,8 @@ def run_domain_convergence(
         grow_elems: int = 4, margin_elems: int = 1,
         max_iterations: int = 8,
         force_channel: str = "RF1_RP",
+        diagonal_ceiling: Optional[float] = None,
+        reverb_margin_k: float = REVERB_MARGIN_K,
         should_cancel: Optional[Callable] = None,
         progress_cb: Optional[Callable] = None) -> ConvergenceResult:
     """Grow the domain OUTWARD until pushing each boundary no longer moves the ZOI.
@@ -324,7 +328,21 @@ def run_domain_convergence(
         a starting domain that fails this returns stopped_by="zoi_outside";
       * `grow_elems` >= 1 (sub-element growth leaves the mesh unchanged, so it
         would produce zero variation);
-      * growth stops at the reverberation ceiling diagonal_limit(elem_size).
+      * growth stops at the REVERBERATION ceiling, i.e. the largest diagonal
+        whose cavity mode c_eff/(2 L) still sits `reverb_margin_k` times above
+        the output-filter cutoff (`domain_sizing.reverberation_diagonal_limit`).
+        Pass `diagonal_ceiling` (mm) to override it; leave it None to derive it
+        from `cfg` (material, mass-scaling factor, filter cutoff). When it is
+        not derivable, the domain is treated as UNBOUNDED and a warning event
+        is emitted -- no ceiling is invented.
+
+    The runtime output filter is also checked once, before any run
+    (`domain_sizing.filter_ratio_check`):
+      * HARD, blocks with stopped_by="nyquist": fc >= 0.5/dt means Abaqus
+        performs no filtering at all;
+      * ADVISORY, warns only: fc*dt below the 1e-3 Abaqus RECOMMENDS. This used
+        to be enforced indirectly (it is what produced the old 90.6*elem_size
+        ceiling) and no longer blocks anything.
 
     tolerances default to 2 % per quantity. Cost: up to 1 + len(growable) runs
     per iteration.
@@ -338,10 +356,41 @@ def run_domain_convergence(
     dims = initial_dims
     result = ConvergenceResult(dims=dims, converged=False)
 
+    def _warn(kind: str, message: str) -> None:
+        if progress_cb:
+            progress_cb({"phase": "domain_convergence_warning",
+                         "kind": kind, "message": message})
+
+    # --- Runtime output filter: one HARD control, one advisory --------------
+    fchk = config_filter_check(cfg)
+    if fchk is None or not fchk.computable:
+        _warn("filter_unknown",
+              "Output-filter ratio not computable from the config (material, "
+              "mesh or cutoff missing): neither the Nyquist control nor the "
+              "IIR recommendation could be evaluated.")
+    elif not fchk.nyquist_ok:
+        result.stopped_by = "nyquist"
+        _warn("nyquist", fchk.message)
+        return result
+    elif not fchk.iir_advised_ok:
+        _warn("iir_ratio", fchk.message)
+
+    # --- Reverberation ceiling ---------------------------------------------
+    if diagonal_ceiling is None:
+        diagonal_ceiling = config_diagonal_limit(cfg, margin_k=reverb_margin_k)
+    if diagonal_ceiling is None or diagonal_ceiling <= 0.0:
+        _warn("no_ceiling",
+              "Reverberation ceiling not computable (need E, nu, rho, the "
+              "mass-scaling factor and the filter cutoff): the domain is "
+              "treated as unbounded.")
+        ceiling = float("inf")
+    else:
+        ceiling = float(diagonal_ceiling)
+
     if not zoi_inside(dims, zoi, margin):
         result.stopped_by = "zoi_outside"
         return result
-    if diagonal(dims) > diagonal_limit(elem_size):
+    if diagonal(dims) > ceiling:
         result.stopped_by = "diagonal"
         return result
 
@@ -357,7 +406,6 @@ def run_domain_convergence(
                           window=window, evf_threshold=evf_threshold,
                           force_channel=force_channel)
 
-    ceiling = diagonal_limit(elem_size)
     for _ in range(max_iterations):
         if should_cancel is not None and should_cancel():
             result.stopped_by = "cancelled"
