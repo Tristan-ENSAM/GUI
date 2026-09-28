@@ -5,10 +5,12 @@ DIC tab — compute (or import) velocity fields from the visible image sequence.
 Workflow:
   1. Load the visible sequence (from the session, or pick a folder).
   2. Set the scale mm/px (from the visible calibration, or manual).
-  3. Draw a search ROI on the reference frame (material region).
-  4. Choose the engine (local subset; global q4dic later) and its parameters.
+  3. Draw a search ROI on the reference frame (« Select ROI », then drag), or
+     take the whole image (« Full image »), then validate it.
+  4. Choose the engine (local subset or global Q4) and its parameters.
   5. Run -> velocity fields (mm/s, model frame) shown as a heatmap with a time
-     slider and a profile-extraction tool.
+     slider and a profile-extraction tool. « Cancel » stops the run after the
+     current image pair.
   6. Save -> <stem>_dic.npz + .json, recorded in session.dic_field_path.
      Import -> load an external field file into the viewer.
 
@@ -20,7 +22,7 @@ import os
 import logging
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QLabel, QComboBox,
     QPushButton, QSpinBox, QCheckBox, QSplitter, QFileDialog, QMessageBox,
@@ -41,13 +43,32 @@ from gui.widgets.num_input import DecimalSpinBox, WheelStepSlider
 from gui.core.logging_util import log_swallowed
 
 
+class _DicCancelled(Exception):
+    """Raised from a worker's per-pair callback to abort the engine loop when
+    the user asked to cancel. Carries (pairs done, total pairs)."""
+
+    def __init__(self, done, total):
+        super().__init__("cancelled")
+        self.done = int(done)
+        self.total = int(total)
+
+
+def _raise_if_cancelled(thread, info):
+    """Abort the engine loop (between two image pairs) once the UI requested
+    an interruption of ``thread``."""
+    if thread.isInterruptionRequested():
+        raise _DicCancelled(info["index"] + 1, info["n_pairs"])
+
+
 class _DicWorker(QThread):
     """Runs compute_dic_fields off the UI thread, reporting per-pair progress
-    and a detailed per-frame log (valid-point count, mean ZNCC, timing, ETA)."""
+    and a detailed per-frame log (valid-point count, mean ZNCC, timing, ETA).
+    ``requestInterruption()`` cancels the run after the current image pair."""
     sig_progress = Signal(int, int)
     sig_log = Signal(str)
     sig_done = Signal(object)
     sig_failed = Signal(str)
+    sig_cancelled = Signal(int, int)
 
     def __init__(self, seq, pts, params, fps, mmpp, w, h, trig, keep=None,
                  mask_per_frame=False, mask_params=None):
@@ -69,6 +90,7 @@ class _DicWorker(QThread):
             "Frame %d/%d | %d/%d valid | mean ZNCC %s | %.2f s/frame | ETA %s"
             % (i, n, info["n_valid"], info["n_total"], z_txt,
                info["frame_s"], _fmt_eta(eta)))
+        _raise_if_cancelled(self, info)
 
     def run(self):
         seq, pts, params, fps, mmpp, w, h, trig, keep = self._args
@@ -81,6 +103,8 @@ class _DicWorker(QThread):
                 progress=lambda i, n: self.sig_progress.emit(i, n),
                 on_frame=self._on_frame)
             self.sig_done.emit(res)
+        except _DicCancelled as c:
+            self.sig_cancelled.emit(c.done, c.total)
         except Exception as e:                       # pragma: no cover
             self.sig_failed.emit(str(e))
 
@@ -89,11 +113,13 @@ class _DicGlobalWorker(QThread):
     """Runs compute_dic_global_fields off the UI thread, reporting per-pair
     progress and a detailed per-frame log (iterations, residual, timing, ETA).
     Mirrors _DicWorker but for the global Q4 engine, which takes the ROI (it
-    builds its own mesh) instead of a precomputed point grid."""
+    builds its own mesh) instead of a precomputed point grid.
+    ``requestInterruption()`` cancels the run after the current image pair."""
     sig_progress = Signal(int, int)
     sig_log = Signal(str)
     sig_done = Signal(object)
     sig_failed = Signal(str)
+    sig_cancelled = Signal(int, int)
 
     def __init__(self, seq, roi, params, fps, mmpp, w, h, trig, sigma_f=None):
         super().__init__()
@@ -113,6 +139,7 @@ class _DicGlobalWorker(QThread):
             "Frame %d/%d | %d iter | residual %s | %s | %.2f s/frame | ETA %s"
             % (i, n, info["n_iter"], res_txt, conv, info["frame_s"],
                _fmt_eta(eta)))
+        _raise_if_cancelled(self, info)
 
     def run(self):
         seq, roi, params, fps, mmpp, w, h, trig, sigma_f = self._args
@@ -123,6 +150,8 @@ class _DicGlobalWorker(QThread):
                 progress=lambda i, n: self.sig_progress.emit(i, n),
                 on_frame=self._on_frame)
             self.sig_done.emit(res)
+        except _DicCancelled as c:
+            self.sig_cancelled.emit(c.done, c.total)
         except Exception as e:                       # pragma: no cover
             self.sig_failed.emit(str(e))
 
@@ -185,11 +214,11 @@ class DICTab(QWidget):
         g = QGroupBox("Visible sequence")
         v = QVBoxLayout(g)
         row = QHBoxLayout()
-        b1 = QPushButton("Load from session")
-        b1.clicked.connect(self._load_from_session)
-        b2 = QPushButton("Choose folder…")
-        b2.clicked.connect(self._choose_folder)
-        row.addWidget(b1); row.addWidget(b2)
+        self.b_load_session = QPushButton("Load from session")
+        self.b_load_session.clicked.connect(self._load_from_session)
+        self.b_choose_folder = QPushButton("Choose folder…")
+        self.b_choose_folder.clicked.connect(self._choose_folder)
+        row.addWidget(self.b_load_session); row.addWidget(self.b_choose_folder)
         v.addLayout(row)
         self.lbl_seq = QLabel("(no sequence)")
         self.lbl_seq.setStyleSheet("color:#666;"); self.lbl_seq.setWordWrap(True)
@@ -251,10 +280,27 @@ class DICTab(QWidget):
         v.addLayout(frow)
         self._preview_frame_idx = 0
 
-        row = QHBoxLayout()
-        self.lbl_roi = QLabel("Load a sequence, then drag a rectangle.")
+        self.lbl_roi = QLabel("Load a sequence, then click « Select ROI ».")
         self.lbl_roi.setStyleSheet("color:#666;"); self.lbl_roi.setWordWrap(True)
-        row.addWidget(self.lbl_roi, 1)
+        v.addWidget(self.lbl_roi)
+
+        row = QHBoxLayout()
+        # Explicit drawing mode: the rectangle selector only reacts while this
+        # button is down (otherwise nothing tells the user the image is
+        # clickable).
+        self.b_select_roi = QPushButton("Select ROI")
+        self.b_select_roi.setCheckable(True)
+        self.b_select_roi.setEnabled(False)
+        self.b_select_roi.setToolTip("Drag a rectangle on the image; drag its "
+                                     "handles to adjust it.")
+        self.b_select_roi.toggled.connect(self._on_select_mode)
+        row.addWidget(self.b_select_roi)
+        self.b_full_roi = QPushButton("Full image")
+        self.b_full_roi.setEnabled(False)
+        self.b_full_roi.setToolTip("Use the whole image as ROI.")
+        self.b_full_roi.clicked.connect(self._set_full_image_roi)
+        row.addWidget(self.b_full_roi)
+        row.addStretch(1)
         # nudge arrows (move the ROI by 1 px)
         self._nudge_btns = []
         for txt, dx, dy in (("←", -1, 0), ("↑", 0, -1), ("↓", 0, 1), ("→", 1, 0)):
@@ -271,6 +317,7 @@ class DICTab(QWidget):
         v.addLayout(row)
         self._selector = None
         self._roi_locked = False
+        self._roi_select_mode = False
         self._preview_artists = []
         return g
 
@@ -556,7 +603,14 @@ class DICTab(QWidget):
         self.b_run.setEnabled(False)
         self.b_run.setToolTip("Validate the ROI first.")
         self.b_run.clicked.connect(self._run_clicked)
-        v.addWidget(self.b_run)
+        self.b_cancel = QPushButton("Cancel")
+        self.b_cancel.setEnabled(False)
+        self.b_cancel.setToolTip("Stop the computation after the current image "
+                                 "pair (no field is kept).")
+        self.b_cancel.clicked.connect(self._cancel_clicked)
+        rrow = QHBoxLayout()
+        rrow.addWidget(self.b_run, 1); rrow.addWidget(self.b_cancel)
+        v.addLayout(rrow)
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         v.addWidget(self.progress)
@@ -582,13 +636,18 @@ class DICTab(QWidget):
             search=int(self.sp_search.value()), zncc_min=float(self.sp_zncc.value()),
             subpixel=True)
 
-    def _global_params(self) -> "dic_global_engine.DicGlobalParams":
-        tool_poly = None
+    def _tool_polygon(self):
+        """Tool polygon (pixel vertices) drawn in the Alignment tab, or None.
+        The global engine treats its inside as non-material."""
         ref_geo = getattr(self.session, "reference_geometry", None) or {}
         if isinstance(ref_geo, dict):
             tp = ref_geo.get("tool_polygon_px")
             if tp and len(tp) >= 3:
-                tool_poly = [list(map(float, v)) for v in tp]
+                return [list(map(float, v)) for v in tp]
+        return None
+
+    def _global_params(self) -> "dic_global_engine.DicGlobalParams":
+        tool_poly = self._tool_polygon()
         return dic_global_engine.DicGlobalParams(
             elem_size=int(self.sp_elem.value()),
             variant=str(self.cb_variant.currentData()),
@@ -630,8 +689,20 @@ class DICTab(QWidget):
         n = seq.n_frames
         self.lbl_seq.setText("%s  (%d frames)" % (source, n))
         self.spin_fps.setValue(float(seq.fps))
-        # Configure the preview scrubber for this sequence.
         self._preview_frame_idx = 0
+        # A validation belongs to the previous sequence: release it (otherwise
+        # the selector stays disabled and no rectangle can be drawn), and keep
+        # only the part of the previous ROI that lies inside the new image.
+        if self.b_validate.isChecked():
+            self.b_validate.setChecked(False)
+        if self._roi is not None:
+            self._roi = self._clip_roi(self._roi)
+            if self._roi is None:
+                self.lbl_roi.setText("Click « Select ROI », or "
+                                     "« Full image ».")
+        self.b_select_roi.setEnabled(n > 0)
+        self.b_full_roi.setEnabled(n > 0)
+        # Configure the preview scrubber for this sequence.
         self.sld_frame.blockSignals(True)
         self.sld_frame.setRange(0, max(0, n - 1))
         self.sld_frame.setValue(0)
@@ -656,13 +727,57 @@ class DICTab(QWidget):
             img = self._preview_frame_image()
             is_rgb = (img.ndim == 3 and img.shape[-1] in (3, 4))
             self._roi_ax.imshow(img, cmap=None if is_rgb else "gray")
-            # The rectangle selector is only meaningful while the ROI is not
-            # locked; rebuild it on each draw so it stays attached to the axes.
-            if not self._roi_locked:
-                self._selector = RectangleSelector(
-                    self._roi_ax, self._on_roi_select, useblit=False,
-                    interactive=True, button=[1])
+            # ax.clear() removed the selector's artists: attach a new selector
+            # and redraw the current ROI in it.
+            self._new_selector()
         self._preview_points()
+
+    def _new_selector(self):
+        """Attach a fresh rectangle selector to the (just cleared) axes. The
+        previous one is disconnected first: left connected, it kept reacting
+        to the mouse with artists no longer drawn."""
+        old = self._selector
+        if old is not None:
+            try:
+                old.set_active(False)
+                old.disconnect_events()
+            except Exception:
+                log_swallowed("detaching the previous ROI selector",
+                              level=logging.DEBUG)
+        self._selector = RectangleSelector(
+            self._roi_ax, self._on_roi_select, useblit=False,
+            interactive=True, button=[1])
+        self._sync_selector()
+
+    def _sync_selector(self):
+        """Put the selector in line with the state: rectangle = current ROI
+        (hidden when there is none or once validated, the validated ROI being
+        drawn in green), mouse input only in « Select ROI » mode."""
+        s = self._selector
+        if s is None:
+            return
+        try:
+            if self._roi is not None:
+                x, y, w, h = self._roi
+                s.extents = (x, x + w, y, y + h)
+                s.set_visible(not self._roi_locked)
+            else:
+                s.set_visible(False)
+            s.set_active(self._roi_select_mode and not self._roi_locked)
+        except Exception:
+            log_swallowed("syncing the ROI selector")
+        self._roi_canvas.draw_idle()
+
+    def _on_select_mode(self, on):
+        """« Select ROI » toggled: enable/disable drawing on the image."""
+        self._roi_select_mode = bool(on)
+        if on:
+            self._roi_canvas.setCursor(Qt.CursorShape.CrossCursor)
+            if self._roi is None:
+                self.lbl_roi.setText("Drag a rectangle on the image.")
+        else:
+            self._roi_canvas.unsetCursor()
+        self._sync_selector()
 
     def _on_roi_select(self, eclick, erelease):
         if self._roi_locked:
@@ -671,12 +786,54 @@ class DICTab(QWidget):
         x1, y1 = erelease.xdata, erelease.ydata
         if None in (x0, y0, x1, y1):
             return
-        self.set_roi((min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)))
+        if abs(x1 - x0) < 2 or abs(y1 - y0) < 2:
+            # A click without a drag: matplotlib hides the rectangle (after
+            # this callback returns). Keep the current ROI and redraw it.
+            QTimer.singleShot(0, self._sync_selector)
+            return
+        roi = self._clip_roi((min(x0, x1), min(y0, y1),
+                              abs(x1 - x0), abs(y1 - y0)))
+        if roi is not None:
+            self.set_roi(roi, sync_selector=False)
 
-    def set_roi(self, roi):
+    def set_roi(self, roi, sync_selector=True):
         self._roi = tuple(float(v) for v in roi)
         self.lbl_roi.setText("ROI: x=%.0f y=%.0f w=%.0f h=%.0f px" % self._roi)
+        if sync_selector:
+            self._sync_selector()
         self._preview_points()
+
+    def _full_image_roi(self):
+        """ROI covering the whole image, in pixel-centre coordinates (pixel
+        centres span 0..W-1 and 0..H-1), or None without a sequence."""
+        wh = self._image_size()
+        if wh is None:
+            return None
+        iw, ih = wh
+        return (0.0, 0.0, float(iw - 1), float(ih - 1))
+
+    def _set_full_image_roi(self):
+        if self._roi_locked:
+            return
+        roi = self._full_image_roi()
+        if roi is not None:
+            self.set_roi(roi)
+
+    def _clip_roi(self, roi):
+        """Clip (x, y, w, h) to the image pixel centres; None if less than
+        2 px remain in a direction (or unchanged without a sequence)."""
+        full = self._full_image_roi()
+        if full is None:
+            return tuple(roi)
+        _, _, xmax, ymax = full
+        x, y, w, h = roi
+        x0 = min(max(0.0, float(x)), xmax)
+        y0 = min(max(0.0, float(y)), ymax)
+        x1 = min(max(0.0, float(x) + float(w)), xmax)
+        y1 = min(max(0.0, float(y) + float(h)), ymax)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
 
     def _grid_preview(self):
         if self._roi is None:
@@ -705,27 +862,37 @@ class DICTab(QWidget):
         ny = mesh.n_elem_y + 1
         nodes = mesh.nodes.reshape(ny, nx, 2)
 
-        # Element coverage shading (mask on): compute validity on the displayed
-        # frame with the same intensity threshold as the solver.
+        # Element coverage shading: validity on the displayed frame with the
+        # same material mask as the solver (compute_dic_global_fields):
+        # intensity threshold when the mask is enabled, AND outside the tool
+        # polygon of the Alignment tab when one was drawn (the solver applies
+        # the polygon even with the mask disabled).
+        from matplotlib.patches import Polygon
         valid_elements = None
         n_valid = mesh.n_elements
-        if self.chk_mask.isChecked():
+        tool_poly = self._tool_polygon()
+        if self.chk_mask.isChecked() or tool_poly is not None:
             img = self._preview_frame_image()
             if img is not None:
-                mat = dic_global_engine.material_mask_intensity(
-                    img, float(self.sld_int.value()))
+                min_int = (float(self.sld_int.value())
+                           if self.chk_mask.isChecked() else 0.0)
+                mat = dic_global_engine.material_mask(img, min_int, tool_poly)
                 valid_elements = dic_global_engine.element_coverage_mask(
                     mesh, mat, float(self.sp_coverage.value()))
                 n_valid = int(valid_elements.sum())
-                from matplotlib.patches import Polygon
                 for e in range(mesh.n_elements):
                     if valid_elements[e]:
                         continue
                     coords = mesh.nodes[mesh.connectivity[e]]
                     poly = Polygon(coords, closed=True, facecolor="red",
-                                   edgecolor="none", alpha=0.25)
+                                   edgecolor="red", lw=0.5, alpha=0.4)
                     self._roi_ax.add_patch(poly)
                     self._preview_artists.append(poly)
+        if tool_poly is not None:
+            outline = Polygon(tool_poly, closed=True, fill=False,
+                              edgecolor="orange", lw=1.2, ls="--")
+            self._roi_ax.add_patch(outline)
+            self._preview_artists.append(outline)
 
         for j in range(nx):
             ln, = self._roi_ax.plot(nodes[:, j, 0], nodes[:, j, 1], "-",
@@ -741,6 +908,10 @@ class DICTab(QWidget):
                 "ROI: x=%.0f y=%.0f w=%.0f h=%.0f px  (%dx%d Q4, %d/%d elements "
                 "kept)" % (self._roi + (mesh.n_elem_x, mesh.n_elem_y,
                                         n_valid, mesh.n_elements)))
+            if hasattr(self, "lbl_mask"):
+                self.lbl_mask.setText("%d/%d elements kept (frame %d)"
+                                      % (n_valid, mesh.n_elements,
+                                         self._preview_frame_idx))
         else:
             self.lbl_roi.setText(
                 "ROI: x=%.0f y=%.0f w=%.0f h=%.0f px  (%dx%d Q4 elements, "
@@ -792,25 +963,26 @@ class DICTab(QWidget):
     def _image_size(self):
         if self._seq is None or self._seq.n_frames == 0:
             return None
+        # Cached per sequence: frames may be read from disk on each access.
+        cached = getattr(self, "_image_size_cache", None)
+        if cached is not None and cached[0] is self._seq:
+            return cached[1]
         f0 = self._seq.frame(0)
-        return int(f0.shape[1]), int(f0.shape[0])      # (w, h)
+        wh = (int(f0.shape[1]), int(f0.shape[0]))       # (w, h)
+        self._image_size_cache = (self._seq, wh)
+        return wh
 
     def _nudge_roi(self, dx, dy):
         if self._roi is None or self._roi_locked:
             return
         x, y, w, h = self._roi
         nx, ny = x + dx, y + dy
-        wh = self._image_size()
-        if wh is not None:                              # keep ROI inside image
-            iw, ih = wh
-            nx = min(max(0.0, nx), max(0.0, iw - w))
-            ny = min(max(0.0, ny), max(0.0, ih - h))
-        self.set_roi((nx, ny, w, h))
-        if self._selector is not None:
-            try:
-                self._selector.extents = (nx, nx + w, ny, ny + h)
-            except Exception:
-                log_swallowed("nudge ROI selector")
+        full = self._full_image_roi()
+        if full is not None:                            # keep ROI inside image
+            _, _, xmax, ymax = full
+            nx = min(max(0.0, nx), max(0.0, xmax - w))
+            ny = min(max(0.0, ny), max(0.0, ymax - h))
+        self.set_roi((nx, ny, w, h))                    # also moves the selector
 
     def _lock_params(self, lock):
         """Freeze engine + mask parameters (they define the frozen grid/mask)."""
@@ -825,15 +997,25 @@ class DICTab(QWidget):
                 w.setEnabled(not lock)
 
     def _on_validate(self, on):
+        if on and self._roi is None:
+            # Nothing drawn: validate the whole image, and show it (the run
+            # would otherwise fall back to it silently).
+            full = self._full_image_roi()
+            if full is not None:
+                self.set_roi(full)
         self._roi_locked = bool(on)
         self.b_validate.setText("ROI validated \u2713" if on else "Validate ROI")
-        if self._selector is not None:
-            self._selector.set_active(not on)
+        if on and self.b_select_roi.isChecked():
+            self.b_select_roi.setChecked(False)          # leave drawing mode
+        has_seq = self._seq is not None and self._seq.n_frames > 0
+        self.b_select_roi.setEnabled(not on and has_seq)
+        self.b_full_roi.setEnabled(not on and has_seq)
         for b in self._nudge_btns:
             b.setEnabled(not on)
         self._lock_params(on)
         # Run requires a validated ROI
         self.b_run.setEnabled(on)
+        self._sync_selector()
         self._preview_points()
 
     def _prefill_scale(self):
@@ -856,8 +1038,7 @@ class DICTab(QWidget):
         if self._seq is None or self._seq.n_frames < 2:
             raise ValueError("need a sequence of at least 2 frames")
         if self._roi is None:
-            f0 = self._seq.frame(0)
-            self._roi = (0.0, 0.0, float(f0.shape[1]), float(f0.shape[0]))
+            self._roi = self._full_image_roi()
         p = self._params()
         margin = p.subset // 2 + p.search
         pts = dic_engine.make_grid(self._roi, p.step, margin=margin)
@@ -871,8 +1052,7 @@ class DICTab(QWidget):
         if self._seq is None or self._seq.n_frames < 2:
             raise ValueError("need a sequence of at least 2 frames")
         if self._roi is None:
-            f0 = self._seq.frame(0)
-            self._roi = (0.0, 0.0, float(f0.shape[1]), float(f0.shape[0]))
+            self._roi = self._full_image_roi()
         # Validate the ROI can hold at least one element (clear error early).
         dic_global_engine.build_mesh_on_roi(self._roi, int(self.sp_elem.value()))
         return self._roi
@@ -929,9 +1109,26 @@ class DICTab(QWidget):
 
     def _set_busy(self, busy):
         self.b_run.setEnabled(not busy and self._roi_locked)
+        self.b_cancel.setEnabled(busy)
         self.b_validate.setEnabled(not busy)   # cannot un-validate while running
         self.b_import.setEnabled(not busy)
+        # The worker reads the sequence: no sequence change while it runs.
+        self.b_load_session.setEnabled(not busy)
+        self.b_choose_folder.setEnabled(not busy)
         self.progress.setVisible(busy)
+
+    def _cancel_clicked(self):
+        w = getattr(self, "_worker", None)
+        if w is None or not w.isRunning():
+            return
+        w.requestInterruption()
+        self.b_cancel.setEnabled(False)
+        self.lbl_status.setText("Cancelling after the current image pair…")
+
+    def _on_dic_cancelled(self, done, total):
+        self._set_busy(False)
+        self.lbl_status.setText("Cancelled after %d/%d pairs (no field kept)."
+                                % (done, total))
 
     def _run_clicked(self):
         if not self._roi_locked:
@@ -975,6 +1172,7 @@ class DICTab(QWidget):
             self._worker.sig_log.connect(self._on_dic_log)
         self._worker.sig_done.connect(self._on_dic_done)
         self._worker.sig_failed.connect(self._on_dic_failed)
+        self._worker.sig_cancelled.connect(self._on_dic_cancelled)
         self._worker.start()
 
     def _on_dic_log(self, msg):
