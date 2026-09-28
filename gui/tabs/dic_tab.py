@@ -220,10 +220,61 @@ class DICTab(QWidget):
         self.b_choose_folder.clicked.connect(self._choose_folder)
         row.addWidget(self.b_load_session); row.addWidget(self.b_choose_folder)
         v.addLayout(row)
+        brow = QHBoxLayout()
+        brow.addWidget(QLabel("Bit depth:"))
+        self.sp_bits = QSpinBox()
+        self.sp_bits.setRange(1, 16)
+        self.sp_bits.setSuffix(" bits")
+        self.sp_bits.setValue(int(getattr(self.session.visible, "bit_depth", 8)))
+        self.sp_bits.setToolTip("Significant bits per pixel of the camera (e.g. "
+                                "12 for a 12-bit sensor saved in 16-bit files). "
+                                "The mask threshold spans 0..2^bits-1 raw grey "
+                                "levels. Prefilled from the session "
+                                "(Experimental data tab).")
+        self.sp_bits.valueChanged.connect(self._on_bit_depth_changed)
+        brow.addWidget(self.sp_bits)
+        brow.addStretch(1)
+        v.addLayout(brow)
         self.lbl_seq = QLabel("(no sequence)")
         self.lbl_seq.setStyleSheet("color:#666;"); self.lbl_seq.setWordWrap(True)
         v.addWidget(self.lbl_seq)
+        self.lbl_bits = QLabel("")
+        self.lbl_bits.setWordWrap(True)
+        v.addWidget(self.lbl_bits)
+        self._frame0_info = None          # (dtype name, max grey level)
         return g
+
+    def _max_grey(self) -> int:
+        """Largest grey level for the current bit depth (2**bits - 1)."""
+        return (1 << int(self.sp_bits.value())) - 1
+
+    def _on_bit_depth_changed(self, *_):
+        """New bit depth: rescale the mask-threshold slider to the raw range
+        0..2^bits-1 (the current value is kept, clipped) and re-check it
+        against the loaded images."""
+        if hasattr(self, "sld_int"):
+            self.sld_int.setRange(0, self._max_grey())
+            self.sld_int.setToolTip("Raw grey level, 0..%d (%d bits)."
+                                    % (self._max_grey(), self.sp_bits.value()))
+        self._update_bit_depth_check()
+
+    def _update_bit_depth_check(self):
+        """Compare the declared bit depth with frame 0 (dtype, max level) and
+        warn when pixels exceed 2^bits-1 (declared depth too low)."""
+        info = self._frame0_info
+        if info is None:
+            self.lbl_bits.setText("")
+            return
+        dtype, vmax = info
+        txt = "Frame 0: %s, max grey level %s (range 0..%d)." % (
+            dtype, ("%g" % vmax), self._max_grey())
+        if vmax > self._max_grey():
+            self.lbl_bits.setStyleSheet("color:#b00;")
+            self.lbl_bits.setText(txt + " Pixels exceed 2^bits-1: bit depth "
+                                  "too low?")
+        else:
+            self.lbl_bits.setStyleSheet("color:#666;")
+            self.lbl_bits.setText(txt)
 
     def _build_scale_group(self):
         g = QGroupBox("Scale & timing")
@@ -458,7 +509,9 @@ class DICTab(QWidget):
         self.chk_mask = QCheckBox("Enable mask")
         self.chk_mask.toggled.connect(self._preview_points)
         self.sld_int = WheelStepSlider(Qt.Orientation.Horizontal)
-        self.sld_int.setRange(0, 255); self.sld_int.setValue(25)
+        self.sld_int.setRange(0, self._max_grey()); self.sld_int.setValue(25)
+        self.sld_int.setToolTip("Raw grey level, 0..%d (%d bits)."
+                                % (self._max_grey(), self.sp_bits.value()))
         self.sld_int.setSingleStep(1); self.sld_int.setPageStep(1)
         self.sld_int.valueChanged.connect(self._preview_points)
         self.lbl_int = QLabel("25")
@@ -669,6 +722,7 @@ class DICTab(QWidget):
             QMessageBox.information(self, "Sequence", "No visible sequence in "
                                     "the session (set it in Acquisition).")
             return
+        self.sp_bits.setValue(int(getattr(self.session.visible, "bit_depth", 8)))
         self._load_path(path, self.session.visible.fps)
 
     def _choose_folder(self):
@@ -690,6 +744,11 @@ class DICTab(QWidget):
         self.lbl_seq.setText("%s  (%d frames)" % (source, n))
         self.spin_fps.setValue(float(seq.fps))
         self._preview_frame_idx = 0
+        self._frame0_info = None
+        if n:
+            f0 = np.asarray(seq.frame(0))
+            self._frame0_info = (str(f0.dtype), float(np.nanmax(f0)))
+        self._update_bit_depth_check()
         # A validation belongs to the previous sequence: release it (otherwise
         # the selector stays disabled and no rectangle can be drawn), and keep
         # only the part of the previous ROI that lies inside the new image.
@@ -988,7 +1047,7 @@ class DICTab(QWidget):
         """Freeze engine + mask parameters (they define the frozen grid/mask)."""
         widgets = [getattr(self, n, None) for n in (
             "cb_engine", "sp_subset", "sp_step", "sp_search", "sp_zncc",
-            "chk_mask", "sld_int",
+            "chk_mask", "sld_int", "sp_bits",
             "sp_elem", "cb_variant", "cb_pattern", "chk_uinit", "chk_uncert",
             "sp_maxiter", "sp_tol", "sp_pyr_levels", "sp_pyr_sigma",
             "sp_coverage", "chk_convect")]
@@ -1066,6 +1125,9 @@ class DICTab(QWidget):
             "image_size": [int(w), int(h)],
             "roi_px": list(self._roi),
             "engine": self.cb_engine.currentData(),
+            # Declared camera bit depth: the mask threshold is a raw grey
+            # level in 0..2**bit_depth - 1.
+            "bit_depth": int(self.sp_bits.value()),
         }
         if self._is_global():
             meta["dic_global"] = self._global_params().to_json_dict()

@@ -43,6 +43,11 @@ class StreamCfg:
     path:        str   = ""          # cutting acquisition (dir / tiff / video / .npz)
     noload_path: str   = ""          # no-load acquisition (for noise)
     fps:         float = 1000.0      # frames per second
+    # Significant bits per pixel of the camera (e.g. 12 for a 12-bit sensor
+    # stored in 16-bit files): grey levels span 0 .. 2**bit_depth - 1. It
+    # cannot be read reliably from the files (a uint16 container may hold
+    # 10/12/14/16-bit data), so the user enters it at import.
+    bit_depth:   int   = 8
 
 
 @dataclass
