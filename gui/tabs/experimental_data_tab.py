@@ -207,10 +207,22 @@ class AcquisitionTab(QWidget):
         spin_fps.valueChanged.connect(self._pull)
         form.addRow("Frame rate:", spin_fps)
 
+        spin_bits = QSpinBox()
+        spin_bits.setRange(1, 16)
+        spin_bits.setSuffix(" bits")
+        spin_bits.setValue(int(cfg.bit_depth))
+        spin_bits.setToolTip("Significant bits per pixel of the camera (e.g. 12 "
+                             "for a 12-bit sensor saved in 16-bit files). Sets "
+                             "the grey-level range 0..2^bits-1 used by the DIC "
+                             "mask threshold.")
+        spin_bits.valueChanged.connect(self._pull)
+        form.addRow("Bit depth:", spin_bits)
+
         # stash widgets for apply/pull
         setattr(self, "_%s_path" % key, fld_path)
         setattr(self, "_%s_noload" % key, fld_noload)
         setattr(self, "_%s_fps" % key, spin_fps)
+        setattr(self, "_%s_bits" % key, spin_bits)
         return g
 
     def _build_force_row(self) -> QGroupBox:
@@ -271,6 +283,8 @@ class AcquisitionTab(QWidget):
         s.notes = self.fld_notes.text().strip()
         s.visible.fps = float(self._visible_fps.value())
         s.ir.fps = float(self._ir_fps.value())
+        s.visible.bit_depth = int(self._visible_bits.value())
+        s.ir.bit_depth = int(self._ir_bits.value())
         s.forces.fps = float(self._forces_fps.value())
         s.forces.col_t = int(self._col_t.value())
         s.forces.col_fc = int(self._col_fc.value())
@@ -284,7 +298,8 @@ class AcquisitionTab(QWidget):
         widgets = [self.fld_name, self.fld_material, self.spin_speed,
                    self.spin_trigger, self.fld_notes,
                    self._visible_path, self._visible_noload, self._visible_fps,
-                   self._ir_path, self._ir_noload, self._ir_fps,
+                   self._visible_bits,
+                   self._ir_path, self._ir_noload, self._ir_fps, self._ir_bits,
                    self._forces_path, self._forces_noload, self._forces_fps,
                    self._col_t, self._col_fc, self._col_ff]
         for w in widgets:
@@ -298,9 +313,11 @@ class AcquisitionTab(QWidget):
             self._visible_path.setText(s.visible.path)
             self._visible_noload.setText(s.visible.noload_path)
             self._visible_fps.setValue(s.visible.fps)
+            self._visible_bits.setValue(int(s.visible.bit_depth))
             self._ir_path.setText(s.ir.path)
             self._ir_noload.setText(s.ir.noload_path)
             self._ir_fps.setValue(s.ir.fps)
+            self._ir_bits.setValue(int(s.ir.bit_depth))
             self._forces_path.setText(s.forces.path)
             self._forces_noload.setText(s.forces.noload_path)
             self._forces_fps.setValue(s.forces.fps)
