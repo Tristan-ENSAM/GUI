@@ -52,6 +52,15 @@ from scipy.ndimage import gaussian_filter
 
 from gui.core.alignment import pixel_to_model
 
+# Default dilation (px) of the saturation mask: pixels next to a saturated
+# area are contaminated too (cubic-spline ringing across the clipped edge,
+# plus the motion of the pair). Chosen from a measurement, not a literature
+# value: a stationary saturated half-image, 1.5 px speckle, 0.3 px motion,
+# gave a max error on the neighbouring textured nodes of 0.084 / 0.046 /
+# 0.010 / 0.0027 / 0.0023 px for 0 / 1 / 2 / 3 / 5 px (0.0025 px without
+# any saturation). Increase it for larger motions per pair.
+SAT_MARGIN_PX = 3
+
 
 # =============================================================================
 # Parameters
@@ -135,6 +144,13 @@ class DicGlobalParams:
         excluded like a masked element (its orphan nodes -> NaN, invalid).
         0 disables it. Default 1e-3 (design choice, same rule as the local
         engine).
+    saturation_level : float or None
+        Grey level at or above which a pixel is saturated (e.g. 4095 for a
+        12-bit camera); None disables the saturation mask. Saturated pixels
+        of the reference OR the deformed image, dilated by
+        ``saturation_margin`` px, are left out of the residual and of the
+        normalisation statistics; an element whose remaining fraction is
+        below ``coverage_threshold`` is excluded.
     grey_correction : bool
         Estimate a global grey-level gain/offset (a, b) over the ROI with the
         displacement (two extra unknowns): r = f - [(1+a) g(x+u) + b].
@@ -165,6 +181,8 @@ class DicGlobalParams:
     min_std_rel: float = 1e-3
     init_search: int = 0
     grey_correction: bool = True
+    saturation_level: Optional[float] = None
+    saturation_margin: int = SAT_MARGIN_PX
 
     def to_json_dict(self) -> dict:
         return asdict(self)
@@ -179,13 +197,49 @@ def _to_gray_f64(img: np.ndarray) -> np.ndarray:
     return a.astype(np.float64)
 
 
-def roi_stats(img: np.ndarray, region=None) -> Tuple[float, float]:
-    """(mean, std) of the grey levels of ``img`` over ``region``."""
+def roi_stats(img: np.ndarray, region=None,
+              pixel_mask: Optional[np.ndarray] = None) -> Tuple[float, float]:
+    """(mean, std) of the grey levels of ``img`` over ``region``, restricted
+    to the usable pixels of ``pixel_mask`` (bool image, True = usable) when
+    given (e.g. saturated pixels left out of the statistics)."""
     g = _to_gray_f64(img)
-    s = g if region is None else g[region]
+    if pixel_mask is not None:
+        m = np.asarray(pixel_mask, bool)
+        if region is not None:
+            m = m[region]
+            g = g[region]
+        s = g[m]
+    else:
+        s = g if region is None else g[region]
     if s.size == 0:
-        s = g
+        s = _to_gray_f64(img)
     return float(s.mean()), float(s.std())
+
+
+def saturation_mask(image: np.ndarray, level: float,
+                    margin: int = SAT_MARGIN_PX) -> np.ndarray:
+    """Bool image, True where the grey level is >= ``level`` (saturated:
+    the sensor clipped, the pixel carries no displacement information),
+    dilated by ``margin`` px. For a 12-bit camera ``level`` = 4095."""
+    g = _to_gray_f64(image)
+    m = g >= float(level)
+    if margin > 0 and m.any():
+        from scipy.ndimage import binary_dilation
+        m = binary_dilation(m, iterations=int(margin))
+    return m
+
+
+def _downsample_mask(mask: np.ndarray, n_levels: int) -> List[np.ndarray]:
+    """Usable-pixel mask per pyramid level: a coarse pixel is usable only if
+    the native pixels feeding it (Gaussian sigma ~1 px before each 2x
+    decimation) are usable -> erosion by 2 px, then decimation."""
+    from scipy.ndimage import binary_erosion
+    out = [np.asarray(mask, bool)]
+    cur = out[0]
+    for _ in range(n_levels - 1):
+        cur = binary_erosion(cur, iterations=2, border_value=1)[::2, ::2]
+        out.append(cur)
+    return out
 
 
 def normalize_with(img: np.ndarray, mu: float, sd: float) -> np.ndarray:
@@ -901,7 +955,8 @@ def newton_raphson(mesh: Q4Mesh, interp_g: BicubicInterpolator, f: np.ndarray,
                    valid_elements: Optional[np.ndarray] = None,
                    min_step: float = 1.0 / 16.0,
                    grey_correction: bool = True,
-                   line_search: bool = True
+                   line_search: bool = True,
+                   pixel_mask: Optional[np.ndarray] = None
                    ) -> Dict[str, object]:
     """Gauss-Newton minimisation of the global grey-level residual
 
@@ -920,6 +975,10 @@ def newton_raphson(mesh: Q4Mesh, interp_g: BicubicInterpolator, f: np.ndarray,
     ``variant='hild'``: grad g(x+u) and g(x+u) replaced by grad f(x) and
     f(x) in G (constant matrix, factorised once; modified Gauss-Newton,
     Correli-Q4-like).
+
+    ``pixel_mask`` (bool image of f's shape, True = usable): pixels flagged
+    False (e.g. saturated, see ``saturation_mask``) are left out of the
+    residual; an element left without any pixel is treated as excluded.
 
     Step control: the cost at the new iterate is checked at the next
     assembly; if it increased, the step is halved (backtracking) down to
@@ -949,13 +1008,25 @@ def newton_raphson(mesh: Q4Mesh, interp_g: BicubicInterpolator, f: np.ndarray,
     U = (np.zeros(n_dof) if U_init is None
          else np.nan_to_num(np.asarray(U_init, float), nan=0.0).copy())
 
+    op = mesh.pixel_operator(valid_elements)
+    if pixel_mask is not None and op["n_pix"]:
+        pm = np.asarray(pixel_mask, bool)
+        keep = pm[np.clip(op["y"].astype(int), 0, pm.shape[0] - 1),
+                  np.clip(op["x"].astype(int), 0, pm.shape[1] - 1)]
+        if not keep.all():
+            op = {"x": op["x"][keep], "y": op["y"][keep],
+                  "elem": op["elem"][keep], "Bx": op["Bx"][keep],
+                  "By": op["By"][keep], "n_pix": int(keep.sum())}
+            # elements left without pixels carry no data -> excluded
+            has_px = np.bincount(op["elem"], minlength=mesh.n_elements) > 0
+            valid_elements = has_px if valid_elements is None else (
+                np.asarray(valid_elements, bool) & has_px)
     orphan_dof = _orphan_dof(mesh, valid_elements)
     n_ab = 2 if grey_correction else 0
     n_z = n_dof + n_ab
     orphan_z = None
     if orphan_dof is not None:
         orphan_z = np.concatenate([orphan_dof, np.zeros(n_ab, bool)])
-    op = mesh.pixel_operator(valid_elements)
     xp, yp, Bx, By = op["x"], op["y"], op["Bx"], op["By"]
     n_pixels = max(op["n_pix"], 1)
     H_img, W_img = f.shape
@@ -1132,7 +1203,8 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
                               sigma_f: Optional[float] = None,
                               reg_rel: float = 1e-6,
                               valid_elements: Optional[np.ndarray] = None,
-                              grey_correction: bool = True
+                              grey_correction: bool = True,
+                              pixel_mask: Optional[np.ndarray] = None
                               ) -> Dict[str, object]:
     """Coarse-to-fine Q4-DIC solve over a Gaussian pyramid.
 
@@ -1173,14 +1245,15 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
     # brightness/contrast change between the frames is estimated by the
     # solver (grey_correction).
     if n_levels == 1:
-        mu, sd = roi_stats(f, roi_region(mesh, np.shape(f)))
+        mu, sd = roi_stats(f, roi_region(mesh, np.shape(f)), pixel_mask)
         sol = newton_raphson(
             mesh=mesh,
             interp_g=BicubicInterpolator(normalize_with(g, mu, sd)),
             f=normalize_with(f, mu, sd),
             U_init=U_init, max_iter=max_iter, tol=tol,
             variant=variant, sigma_f=sigma_f, reg_rel=reg_rel,
-            valid_elements=valid_elements, grey_correction=grey_correction)
+            valid_elements=valid_elements, grey_correction=grey_correction,
+            pixel_mask=pixel_mask)
         sol["history"] = [{"level": 0, "residuals": sol["residuals"],
                            "corrections": sol["corrections"],
                            "converged": sol["converged"]}]
@@ -1195,11 +1268,14 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
 
     raw_f = build_gaussian_pyramid(f, n_levels, sigma)
     raw_g = build_gaussian_pyramid(g, n_levels, sigma)
+    pyr_mask = (_downsample_mask(pixel_mask, n_levels)
+                if pixel_mask is not None else [None] * n_levels)
     pyr_f, pyr_g = [], []
     for lv in range(n_levels):
         sc = 2 ** lv
         m_lv = mesh if lv == 0 else _scaled_mesh(mesh, 1.0 / sc)
-        mu, sd = roi_stats(raw_f[lv], roi_region(m_lv, raw_f[lv].shape))
+        mu, sd = roi_stats(raw_f[lv], roi_region(m_lv, raw_f[lv].shape),
+                           pyr_mask[lv])
         pyr_f.append(normalize_with(raw_f[lv], mu, sd))
         pyr_g.append(normalize_with(raw_g[lv], mu, sd))
 
@@ -1241,7 +1317,8 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
             # coarse levels its columns are nearly collinear with the
             # displacement ones (ill-conditioned; made the coarse solve
             # diverge in tests)
-            grey_correction=grey_correction and level == 0)
+            grey_correction=grey_correction and level == 0,
+            pixel_mask=pyr_mask[level])
 
         U = sol["U"]
         last_residuals = sol["residuals"]
@@ -1555,6 +1632,18 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
             mat = material_mask(f_raw, min_int, tool_poly if has_tool else None)
             valid_elements = element_coverage_mask(
                 mesh_calc, mat, params.coverage_threshold)
+        pix_mask = None
+        sat_level = getattr(params, "saturation_level", None)
+        if sat_level is not None:
+            margin = int(getattr(params, "saturation_margin", SAT_MARGIN_PX))
+            sat = (saturation_mask(f_raw, sat_level, margin)
+                   | saturation_mask(g_raw, sat_level, margin))
+            if sat.any():
+                pix_mask = ~sat
+                cov = element_coverage_mask(mesh_calc, pix_mask,
+                                            params.coverage_threshold)
+                valid_elements = cov if valid_elements is None else (
+                    valid_elements & cov)
         if min_std_rel > 0:
             tex = element_texture_mask(mesh_calc, f_raw, min_std_rel)
             valid_elements = tex if valid_elements is None else (valid_elements & tex)
@@ -1578,7 +1667,8 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
             max_iter=params.max_iter, tol=params.tol, variant=params.variant,
             sigma_f=sigma_f, reg_rel=params.reg_rel,
             valid_elements=valid_elements,
-            grey_correction=bool(getattr(params, "grey_correction", True)))
+            grey_correction=bool(getattr(params, "grey_correction", True)),
+            pixel_mask=pix_mask)
         U = sol["U"]                            # measured displacement
         U_prev = U
         if params.incremental:
