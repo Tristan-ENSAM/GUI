@@ -174,6 +174,20 @@ class RunResult:
     analyses: dict                 # {qoi_id: analysis dict (method-specific)}
     failures: List[int] = field(default_factory=list)   # failed run indices
     bundles: Optional[list] = None # kept bundles if keep_bundles=True
+    # Runs actually launched (solve_fn called). Lower than Y.shape[0] only
+    # when the campaign was cancelled: the rows never run are neither
+    # successes nor failures.
+    n_attempted: int = 0
+    cancelled: bool = False
+
+    @property
+    def n_ok(self) -> int:
+        """Runs launched that produced usable results."""
+        return self.n_attempted - len(self.failures)
+
+    @property
+    def n_not_run(self) -> int:
+        return int(self.Y.shape[0]) - self.n_attempted
 
 
 def extract_qois(bundle, qoi_specs, warmup_frac: float = 0.0) -> dict:
@@ -218,12 +232,16 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
     Y = np.full((n, len(qoi_ids)), np.nan, dtype=float)
     failures: List[int] = []
     bundles = [None] * n if keep_bundles else None
+    n_attempted = 0
+    cancelled = False
 
     for i, cfg in enumerate(configs):
         if should_cancel is not None and should_cancel():
+            cancelled = True
             break
         if progress is not None:
             progress(i, n)
+        n_attempted += 1
         bundle = solve_fn(cfg, i)
         if bundle is None:
             failures.append(i)
@@ -237,6 +255,9 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
         # its field for field QoI; flag as failure only when nothing useful
         if len(qoi_ids) and np.all(np.isnan(Y[i, :])) and not want_fields:
             failures.append(i)
+    # A cancel that lands during the LAST run leaves the loop without a break.
+    if not cancelled and should_cancel is not None and should_cancel():
+        cancelled = True
     if progress is not None:
         progress(n, n)
 
@@ -247,12 +268,17 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
             if plan_kind == "jacobian":
                 analyses[qid] = jac.analyze(plan, y)
             else:
-                res_dict, n_bad = mp.analyze_safe(plan, y)
+                # Only complete trajectories are analysed: a failed or
+                # never-run row spoils its trajectory (see analyze_complete).
+                res_dict, info = mp.analyze_complete(plan, y)
                 if res_dict is None:
-                    analyses[qid] = {"error": "too few successful runs"}
+                    analyses[qid] = dict(
+                        info, error="too few complete trajectories "
+                        "(%d/%d, need 2)" % (info["n_used"],
+                                             info["n_trajectories"]))
                 else:
                     res_dict = dict(res_dict)
-                    res_dict["n_repaired"] = n_bad
+                    res_dict.update(info)
                     analyses[qid] = res_dict
         except Exception as e:                          # pragma: no cover
             analyses[qid] = {"error": str(e)}
@@ -279,7 +305,8 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
 
     return RunResult(plan_kind=plan_kind, qoi_ids=qoi_ids_all,
                      param_paths=list(plan.param_paths), Y=Y,
-                     analyses=analyses, failures=failures, bundles=bundles)
+                     analyses=analyses, failures=failures, bundles=bundles,
+                     n_attempted=n_attempted, cancelled=cancelled)
 
 
 def jacobian_ranking(result: RunResult, qoi_id: str):

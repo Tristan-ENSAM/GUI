@@ -45,9 +45,17 @@ current value (`default_display_bounds`) to pre-fill those fields.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 from gui.core import units
+from gui.core import unit_system as _us
+
+
+def current_system(temp_unit: str = "C"):
+    """Snapshot of the active display UnitSystem with its temperature base
+    set to `temp_unit`. A copy: later Settings changes do not alter it."""
+    return dataclasses.replace(units.active_system(), temp=temp_unit)
 
 
 # ---------------------------------------------------------------------------
@@ -119,27 +127,38 @@ class ParamSpec:
     abs_range: float = 0.0
 
     # -- conversions --
-    def to_display(self, stored: float, temp_unit: str = "C") -> float:
+    # `system` pins the conversion to one UnitSystem instead of the app-wide
+    # active one. A plan passes the system it was generated under, so the
+    # values it holds keep their meaning even if Settings change afterwards.
+    def to_display(self, stored: float, temp_unit: str = "C",
+                   system=None) -> float:
+        system = system if system is not None else current_system(temp_unit)
         if self.is_temp:
-            return units.temp_from_abaqus(stored, temp_unit)
+            return system.from_internal("temperature", stored)
         if self.mat_key:
-            return units.abaqus_to_gui(self.mat_key, stored, temp_unit)
+            return system.from_internal(_us.field_kind(self.mat_key), stored)
         return stored / self.factor if self.factor else stored
 
-    def to_stored(self, displayed: float, temp_unit: str = "C") -> float:
+    def to_stored(self, displayed: float, temp_unit: str = "C",
+                  system=None) -> float:
+        system = system if system is not None else current_system(temp_unit)
         if self.is_temp:
-            return units.temp_to_abaqus(displayed, temp_unit)
+            return system.to_internal("temperature", displayed)
         if self.mat_key:
-            val = units.gui_to_abaqus(self.mat_key, displayed, temp_unit)
+            val = system.to_internal(_us.field_kind(self.mat_key), displayed)
             return int(round(val)) if self.dtype == "int" else val
         val = displayed * self.factor
         return int(round(val)) if self.dtype == "int" else val
 
-    def unit_str(self, temp_unit: str = "C") -> str:
-        """Live display unit: material keys resolve through the active unit
-        system; other params keep their authored `display_unit`."""
+    def unit_str(self, temp_unit: str = "C", system=None) -> str:
+        """Live display unit: material keys resolve through the unit system,
+        temperatures follow its temperature base; other params keep their
+        authored `display_unit`."""
+        system = system if system is not None else current_system(temp_unit)
         if self.mat_key:
-            return units.display_unit(self.mat_key, temp_unit)
+            return system.unit_label(_us.field_kind(self.mat_key))
+        if self.is_temp:
+            return system.unit_label("temperature")
         return self.display_unit
 
 
@@ -282,12 +301,15 @@ def default_display_bounds(cfg, spec: ParamSpec,
     return (lo, hi)
 
 
-def get_display(cfg, spec: ParamSpec, temp_unit: str = "C") -> float:
+def get_display(cfg, spec: ParamSpec, temp_unit: str = "C",
+                system=None) -> float:
     """Current value of `spec` in DISPLAYED units."""
-    return spec.to_display(float(get_stored(cfg, spec.path)), temp_unit)
+    return spec.to_display(float(get_stored(cfg, spec.path)), temp_unit,
+                           system=system)
 
 
 def apply_display(cfg, spec: ParamSpec, displayed: float,
-                  temp_unit: str = "C") -> None:
+                  temp_unit: str = "C", system=None) -> None:
     """Write a DISPLAYED value back into the cfg (converting to stored)."""
-    set_stored(cfg, spec.path, spec.to_stored(displayed, temp_unit))
+    set_stored(cfg, spec.path, spec.to_stored(displayed, temp_unit,
+                                              system=system))

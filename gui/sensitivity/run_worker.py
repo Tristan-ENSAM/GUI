@@ -270,6 +270,20 @@ class SensitivityRunWorker(QObject):
         threading.Thread(target=self._cancel_blocking,
                          args=(job, self._proc), daemon=True).start()
 
+    def stop_blocking(self) -> None:
+        """Synchronous cancel, for when the application is closing.
+
+        cancel() hands the Abaqus shutdown to a daemon thread so the window
+        stays responsive; at exit that thread would be killed with the
+        interpreter and the solver left running with its licence tokens. Here
+        the two stages run inline: the caller accepts the wait (up to ~30 s).
+        """
+        self._cancel = True
+        job = self._current_job
+        if job:
+            self.log.emit("[CANCEL] closing: terminating job %s\n" % job)
+            self._cancel_blocking(job, self._proc)
+
     def _cancel_blocking(self, job: str, proc) -> None:
         """The blocking half of cancel(), off the GUI thread.
 
