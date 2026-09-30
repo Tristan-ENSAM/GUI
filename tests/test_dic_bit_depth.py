@@ -93,3 +93,22 @@ class TestDicTab:
         tab.b_validate.setChecked(True)
         assert not tab.sp_bits.isEnabled()
         assert tab._build_meta(64, 64)["bit_depth"] == 12
+
+
+class TestSaturationControls:
+
+    def test_level_follows_bit_depth_and_reaches_params(self, qapp):
+        tab = DICTab(ExperimentSession())
+        assert tab.chk_sat.isChecked()
+        assert tab.sp_sat.value() == 255
+        tab.sp_bits.setValue(12)
+        assert tab.sp_sat.value() == 4095          # was at max -> follows
+        assert tab._params().saturation_level == 4095.0
+        assert tab._global_params().saturation_level == 4095.0
+        assert tab._global_params().saturation_margin == 3
+        tab.sp_sat.setValue(4000)
+        tab.sp_bits.setValue(14)
+        assert tab.sp_sat.value() == 4000          # user value kept
+        tab.chk_sat.setChecked(False)
+        assert tab._params().saturation_level is None
+        assert tab._global_params().saturation_level is None

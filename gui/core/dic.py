@@ -30,7 +30,7 @@ The result arrays follow gui/results/FORMAT.md (experimental DIC section):
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Tuple
+from typing import Optional, Tuple
 import time
 import numpy as np
 
@@ -56,7 +56,16 @@ class DicParams:
                      displacements, see the DIC audit).
     `min_std_rel`: a subset (or its match) whose grey-level std is below
     ``min_std_rel * ptp(reference frame)`` is rejected (textureless or
-    saturated: ZNCC is undefined there)."""
+    saturated: ZNCC is undefined there).
+    `saturation_level` (e.g. 4095 for 12 bits; None = off): pixels at or
+    above it are saturated; the saturated areas of each image are dilated
+    by `saturation_margin` px. They are left out of the iterative sub-pixel
+    refinement, and a subset (in the reference) or its match (in the
+    deformed image) holding a larger fraction of them than
+    `saturation_max_frac` (default 0.5, the Q4 coverage threshold) is
+    rejected. Measured: rejecting any subset touching a saturated pixel kept
+    only 34 % of the points for 2 % of scattered saturated pixels, for a
+    mean error of 0.0012 -> 0.0007 px."""
     engine: str = "local"        # "local" (here) | "global" (q4dic, later)
     subset: int = 31             # subset side in px (odd, >=5)
     step: int = 16               # grid spacing in px
@@ -65,6 +74,9 @@ class DicParams:
     subpixel: bool = True
     subpixel_method: str = "icgn"
     min_std_rel: float = 1e-3
+    saturation_level: Optional[float] = None
+    saturation_margin: int = 3
+    saturation_max_frac: float = 0.5
 
     def to_json_dict(self) -> dict:
         return asdict(self)
@@ -142,7 +154,7 @@ def _subpixel_gauss(c: np.ndarray, iy: int, ix: int) -> Tuple[float, float]:
 
 def _icgn_translation(tmpl: np.ndarray, coeffs: np.ndarray, cx: float,
                       cy: float, u0: Tuple[float, float], max_iter: int = 20,
-                      tol: float = 1e-4):
+                      tol: float = 1e-4, use: Optional[np.ndarray] = None):
     """Sub-pixel translation by Gauss-Newton on the ZNSSD criterion, with the
     gradient of the reference subset kept fixed (inverse-compositional
     Hessian, additive translation update). The deformed image is sampled by
@@ -151,15 +163,21 @@ def _icgn_translation(tmpl: np.ndarray, coeffs: np.ndarray, cx: float,
     ``(cx, cy)`` is the subset centre (integer px) in the reference, ``u0``
     the integer-peak displacement. Returns (u, zncc, ok): u = (dx, dy) px,
     zncc the ZNCC at the solution, ok False when the iteration fails
-    (singular Hessian, divergence beyond 1 px from u0, no convergence)."""
+    (singular Hessian, divergence beyond 1 px from u0, no convergence).
+    ``use`` (bool, subset shape): pixels taking part in the criterion (e.g.
+    unsaturated ones); all pixels when None."""
     from scipy.ndimage import map_coordinates
     half = tmpl.shape[0] // 2
     yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(float)
-    f = tmpl.astype(float)
+    f_full = tmpl.astype(float)
+    gy, gx = np.gradient(f_full)
+    if use is None:
+        use = np.ones(f_full.shape, bool)
+    yy = yy[use]; xx = xx[use]
+    f = f_full[use]
     fm = f - f.mean()
     fn = float(np.sqrt((fm ** 2).sum()))
-    gy, gx = np.gradient(f)
-    J = np.column_stack([gx.ravel(), gy.ravel()])
+    J = np.column_stack([gx[use], gy[use]])
     Hs = J.T @ J
     if fn <= 0 or abs(np.linalg.det(Hs)) < 1e-12:
         return np.array(u0, float), float("nan"), False
@@ -191,7 +209,10 @@ def _icgn_translation(tmpl: np.ndarray, coeffs: np.ndarray, cx: float,
 def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
                     subset: int = 31, search: int = 16, zncc_min: float = 0.5,
                     subpixel: bool = True, subpixel_method: str = "icgn",
-                    min_std_rel: float = 1e-3, return_info: bool = False):
+                    min_std_rel: float = 1e-3, return_info: bool = False,
+                    saturation_level: Optional[float] = None,
+                    saturation_margin: int = 3,
+                    saturation_max_frac: float = 0.5):
     """Local subset ZNCC displacement of each point from `ref` to `cur`.
 
     Conventions: image axes (x = column, y = row, y downward); a point is a
@@ -204,6 +225,9 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
       - its subset (or the search window) is not fully inside the image,
       - the subset or its match is textureless (std < min_std_rel * ptp(ref);
         ZNCC is undefined there and OpenCV returns 1 for two flat patches),
+      - (``saturation_level`` given) the subset or its match holds more than
+        ``saturation_max_frac`` of saturated pixels (dilated by
+        ``saturation_margin`` px),
       - the integer peak lies on the border of the search range (the true
         displacement may be beyond ``search``; no sub-pixel is possible),
       - the ICGN refinement fails (``subpixel_method='icgn'``),
@@ -216,8 +240,8 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
       score : (n_points,) ZNCC (at the refined position for 'icgn', else the
               integer peak)
     With ``return_info=True`` a 4th item is returned: a dict of (n_points,)
-    bool arrays 'edge' (peak on the search border), 'flat' (textureless) and
-    'icgn_failed'.
+    bool arrays 'edge' (peak on the search border), 'flat' (textureless),
+    'saturated' and 'icgn_failed'.
     """
     import cv2
     s = int(subset)
@@ -233,6 +257,18 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
     if sr < 1:
         raise ValueError("search must be >= 1 px")
     min_std = float(min_std_rel) * float(np.ptp(R))
+    sat_R = sat_C = None
+    if saturation_level is not None:
+        from scipy.ndimage import binary_dilation
+        sat_R = R >= float(saturation_level)
+        sat_C = C >= float(saturation_level)
+        if saturation_margin > 0:
+            if sat_R.any():
+                sat_R = binary_dilation(sat_R, iterations=int(saturation_margin))
+            if sat_C.any():
+                sat_C = binary_dilation(sat_C, iterations=int(saturation_margin))
+        if not (sat_R.any() or sat_C.any()):
+            sat_R = sat_C = None
     use_icgn = subpixel and subpixel_method == "icgn"
     coeffs = None
     if use_icgn:
@@ -245,6 +281,7 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
     score = np.full(n, np.nan)
     edge = np.zeros(n, bool)
     flat = np.zeros(n, bool)
+    saturated = np.zeros(n, bool)
     failed = np.zeros(n, bool)
     for k in range(n):
         ix, iy = int(centres[k, 0]), int(centres[k, 1])
@@ -252,6 +289,11 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         if ix - half < 0 or iy - half < 0 or ix + half >= W or iy + half >= H:
             continue
         tmpl = R[iy - half:iy + half + 1, ix - half:ix + half + 1]
+        if sat_R is not None and float(
+                sat_R[iy - half:iy + half + 1, ix - half:ix + half + 1].mean()
+        ) > saturation_max_frac:
+            saturated[k] = True
+            continue
         if float(tmpl.std()) <= min_std:
             flat[k] = True
             continue
@@ -264,6 +306,11 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         corr = cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED)
         _, peak, _, maxloc = cv2.minMaxLoc(corr)
         cx, cy = maxloc            # top-left of best match within `corr`
+        if sat_C is not None and float(
+                sat_C[y0 + cy:y0 + cy + s, x0 + cx:x0 + cx + s].mean()
+        ) > saturation_max_frac:
+            saturated[k] = True
+            continue
         if float(win[cy:cy + s, cx:cx + s].std()) <= min_std:
             flat[k] = True
             continue
@@ -276,7 +323,14 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         if edge[k] or not subpixel:
             dx, dy = float(dx0), float(dy0)
         elif use_icgn:
-            u, zi, ok = _icgn_translation(tmpl, coeffs, ix, iy, (dx0, dy0))
+            use = None
+            if sat_R is not None:
+                # unsaturated in the reference subset AND at the matched
+                # (integer) position in the deformed image
+                use = ~(sat_R[iy - half:iy + half + 1, ix - half:ix + half + 1]
+                        | sat_C[y0 + cy:y0 + cy + s, x0 + cx:x0 + cx + s])
+            u, zi, ok = _icgn_translation(tmpl, coeffs, ix, iy, (dx0, dy0),
+                                          use=use)
             if ok:
                 dx, dy = float(u[0]), float(u[1])
                 zn = zi
@@ -292,6 +346,7 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         valid[k] = (zn >= zncc_min) and not edge[k] and not failed[k]
     if return_info:
         return disp, valid, score, {"edge": edge, "flat": flat,
+                                    "saturated": saturated,
                                     "icgn_failed": failed}
     return disp, valid, score
 
@@ -425,7 +480,10 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
             zncc_min=params.zncc_min, subpixel=params.subpixel,
             subpixel_method=getattr(params, "subpixel_method", "icgn"),
             min_std_rel=getattr(params, "min_std_rel", 1e-3),
-            return_info=True)
+            return_info=True,
+            saturation_level=getattr(params, "saturation_level", None),
+            saturation_margin=getattr(params, "saturation_margin", 3),
+            saturation_max_frac=getattr(params, "saturation_max_frac", 0.5))
         ok = ok & keep                          # masked-out points are invalid
         # ZNCC peak as the per-point DIC quality/score (kept even where the
         # correlation is below threshold, so low-quality zones are visible);
@@ -473,6 +531,7 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
                       "mean_zncc": mean_zncc,
                       "n_edge": int((cinfo["edge"] & keep).sum()),
                       "n_flat": int((cinfo["flat"] & keep).sum()),
+                      "n_saturated": int((cinfo["saturated"] & keep).sum()),
                       "elapsed_s": now - t_start,
                       "frame_s": now - t_frame0})
 
@@ -544,7 +603,10 @@ def velocity_fields(frames, points: np.ndarray, params: DicParams,
             subset=params.subset, search=params.search,
             zncc_min=params.zncc_min, subpixel=params.subpixel,
             subpixel_method=getattr(params, "subpixel_method", "icgn"),
-            min_std_rel=getattr(params, "min_std_rel", 1e-3))
+            min_std_rel=getattr(params, "min_std_rel", 1e-3),
+            saturation_level=getattr(params, "saturation_level", None),
+            saturation_margin=getattr(params, "saturation_margin", 3),
+            saturation_max_frac=getattr(params, "saturation_max_frac", 0.5))
         vx = disp[:, 0] * mm_per_px / dt            # +x is +x in both frames
         vy = -disp[:, 1] * mm_per_px / dt           # image y down -> model y up
         V1[i] = vx

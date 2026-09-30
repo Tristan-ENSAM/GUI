@@ -385,3 +385,69 @@ def test_export_single_npz_with_mesh(tmp_path):
     assert d["meta"]["description"] == "eulerian_fixed_nodes"
     assert "mesh_connectivity" not in d["meta"]["fields"]
     assert "Vx_eul" in d
+
+
+# --- saturation mask ------------------------------------------------------
+def _stationary_saturated_half():
+    img = REF.copy(); img[:, 64:] = 4095.0
+    g = fshift(REF, 0.3, 0); g[:, 64:] = 4095.0
+    return img, g
+
+
+@pytest.mark.parametrize("levels", [1, 2])
+def test_S1_saturation_mask_removes_edge_bias(levels):
+    """A saturated area that does not move while the texture does: without
+    the mask the neighbouring textured nodes are biased (measured 0.084 px);
+    with the mask (level 4095, margin 3) they match the unsaturated case."""
+    img, g = _stationary_saturated_half()
+    off = run_seq([img, g], ROI, 128, 128, elem_size=24, pyramid_levels=levels)
+    on = run_seq([img, g], ROI, 128, 128, elem_size=24, pyramid_levels=levels,
+                 saturation_level=4095.0)
+    tex = on["nodes_px"][:, 0] <= 40
+    err_off = np.nanmax(np.abs(off["fields"]["Ux"][0][tex] - 0.3))
+    err_on = np.nanmax(np.abs(on["fields"]["Ux"][0][tex] - 0.3))
+    assert err_off > 0.05                        # the bias exists without mask
+    assert err_on < 0.005                        # (R: 0.0027; 0.0025 unsaturated)
+    assert on["converged"][0] and on["valid"][0][tex].all()
+
+
+def test_S2_saturation_mask_helpers():
+    img = np.zeros((20, 20)); img[10, 10] = 4095.0
+    m = dg.saturation_mask(img, 4095.0, margin=2)
+    assert m[10, 10] and m[10, 12] and m[12, 10] and not m[10, 13]
+    assert not dg.saturation_mask(img, 4095.0, margin=0)[10, 11]
+    # statistics without the saturated pixels
+    a = REF.copy(); a[:, 64:] = 4095.0
+    region = (slice(16, 112), slice(16, 112))
+    mu_all, _ = dg.roi_stats(a, region)
+    mu_ok, _ = dg.roi_stats(a, region, ~dg.saturation_mask(a, 4095.0, 0))
+    assert mu_ok == pytest.approx(REF[16:112, 16:64].mean(), rel=1e-9)
+    assert mu_all > mu_ok
+
+
+def test_S3_pixel_mask_drops_pixels_and_empty_elements():
+    mesh = dg.build_mesh_on_roi(ROI, 24)
+    f = dg.normalize_image(REF)
+    g = dg.normalize_image(fshift(REF, 0.3, 0))
+    pm = np.ones(REF.shape, bool); pm[:, 64:] = False       # right half unusable
+    s = dg.newton_raphson(mesh, dg.BicubicInterpolator(g), f, pixel_mask=pm)
+    ux = s["U"][0::2]
+    right = mesh.nodes[:, 0] > 64
+    assert np.isnan(ux[right]).all()                          # orphans -> NaN
+    assert np.nanmax(np.abs(ux[~right] - 0.3)) < 5e-3
+    assert np.isnan(s["elem_rms"][[e for e in range(mesh.n_elements)
+                                   if mesh.nodes[mesh.connectivity[e]][:, 0].min() >= 64]]).all()
+
+
+def test_S4_scattered_saturation_keeps_nodes():
+    """Isolated saturated speckle highlights (2 % of the pixels): the mask
+    only drops those pixels, no node is lost and the error does not grow."""
+    H = W = 192
+    ref = speckle(H, W, radius=1.5, seed=1)
+    clip = np.percentile(ref, 98)
+    f = np.minimum(ref, clip); g = np.minimum(fshift(ref, 0.3, 0.1), clip)
+    r = run_seq([f, g], (16, 16, 160, 160), W, H, elem_size=16,
+                saturation_level=float(clip))
+    v = r["valid"][0]
+    assert v.mean() > 0.99
+    assert np.nanmean(np.abs(r["fields"]["Ux"][0][v] - 0.3)) < 2e-3      # (R: 0.0008)

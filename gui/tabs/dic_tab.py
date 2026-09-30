@@ -261,6 +261,12 @@ class DICTab(QWidget):
             self.sld_int.setRange(0, self._max_grey())
             self.sld_int.setToolTip("Raw grey level, 0..%d (%d bits)."
                                     % (self._max_grey(), self.sp_bits.value()))
+        if hasattr(self, "sp_sat"):
+            # keep "at the maximum" at the (new) maximum
+            at_max = self.sp_sat.value() >= self.sp_sat.maximum()
+            self.sp_sat.setRange(1, self._max_grey())
+            if at_max:
+                self.sp_sat.setValue(self._max_grey())
         self._update_bit_depth_check()
 
     def _update_bit_depth_check(self):
@@ -559,6 +565,31 @@ class DICTab(QWidget):
         self.sld_int.valueChanged.connect(self._preview_points)
         self.lbl_int = QLabel("25")
         self.sld_int.valueChanged.connect(lambda v: self.lbl_int.setText(str(v)))
+        # Saturation mask (both engines): grey levels >= level are clipped by
+        # the sensor and carry no displacement information.
+        self.chk_sat = QCheckBox("Saturation mask")
+        self.chk_sat.setChecked(True)
+        self.chk_sat.setToolTip(
+            "Leave out saturated pixels (grey level >= the level below, "
+            "dilated by the margin) in the reference and the deformed image. "
+            "Global Q4: removed from the residual, elements with too little "
+            "left excluded. Local: subsets touching them are rejected.")
+        self.sp_sat = QSpinBox()
+        self.sp_sat.setRange(1, self._max_grey())
+        self.sp_sat.setValue(self._max_grey())
+        self.sp_sat.setToolTip("Saturation level (raw grey level; default "
+                               "2^bits - 1).")
+        self.sp_sat_margin = QSpinBox(); self.sp_sat_margin.setRange(0, 20)
+        self.sp_sat_margin.setValue(3); self.sp_sat_margin.setSuffix(" px")
+        self.sp_sat_margin.setToolTip(
+            "Dilation of the saturated areas: interpolation ringing and the "
+            "motion of the pair contaminate the neighbouring pixels (3 px "
+            "measured sufficient for ~0.3 px/pair; increase for larger "
+            "motions).")
+        for w in (self.chk_sat, self.sp_sat, self.sp_sat_margin):
+            (w.toggled if w is self.chk_sat else w.valueChanged).connect(
+                self._preview_points)
+        self.chk_sat.toggled.connect(self._update_engine_summary)
         self.lbl_mask = QLabel("")
         self.lbl_mask.setStyleSheet("color:#666;")
 
@@ -629,6 +660,11 @@ class DICTab(QWidget):
         ri = QHBoxLayout(); ri.addWidget(self.sld_int, 1); ri.addWidget(self.lbl_int)
         wi = QWidget(); wi.setLayout(ri)
         form.addRow("Min intensity:", wi)
+        form.addRow(self.chk_sat)
+        rs = QHBoxLayout(); rs.addWidget(QLabel(">=")); rs.addWidget(self.sp_sat, 1)
+        rs.addWidget(QLabel("margin")); rs.addWidget(self.sp_sat_margin)
+        ws = QWidget(); ws.setLayout(rs)
+        form.addRow("Saturation:", ws)
         form.addRow(self.lbl_mask)
         outer.addWidget(mg)
 
@@ -668,6 +704,8 @@ class DICTab(QWidget):
                                        int(self.sp_search.value()),
                                        float(self.sp_zncc.value()),
                                        self.cb_subpix.currentData()))
+        if getattr(self, "chk_sat", None) is not None and self.chk_sat.isChecked():
+            txt += " \u00b7 sat\u2265%d" % int(self.sp_sat.value())
         if self.chk_mask.isChecked():
             txt += " \u00b7 mask on"
             if self._is_global():
@@ -715,6 +753,33 @@ class DICTab(QWidget):
             image, pts, win=win,
             min_intensity=float(self.sld_int.value()))
 
+    def _saturation_level(self):
+        """Saturation level (raw grey level) or None when the mask is off."""
+        if not hasattr(self, "chk_sat") or not self.chk_sat.isChecked():
+            return None
+        return float(self.sp_sat.value())
+
+    def _saturation_keep(self, pts, image):
+        """Preview of the local engine's saturation rule on ``image``: False
+        for points whose subset is more than half (dilated) saturated, as
+        in ``DicParams.saturation_max_frac``."""
+        lvl = self._saturation_level()
+        if lvl is None or image is None or pts is None or len(pts) == 0:
+            return np.ones(0 if pts is None else len(pts), bool)
+        sat = dic_global_engine.saturation_mask(
+            image, lvl, int(self.sp_sat_margin.value()))
+        if not sat.any():
+            return np.ones(len(pts), bool)
+        half = int(self.sp_subset.value()) // 2
+        H, W = sat.shape
+        c = dic_engine.pixel_centres(pts).astype(int)
+        keep = np.ones(len(pts), bool)
+        for k, (x, y) in enumerate(c):
+            patch = sat[max(0, y - half):min(H, y + half + 1),
+                        max(0, x - half):min(W, x + half + 1)]
+            keep[k] = patch.size > 0 and float(patch.mean()) <= 0.5
+        return keep
+
     def _build_run_group(self):
         g = QGroupBox("Run / save")
         v = QVBoxLayout(g)
@@ -753,7 +818,9 @@ class DICTab(QWidget):
             engine=self.cb_engine.currentData(),
             subset=int(self.sp_subset.value()), step=int(self.sp_step.value()),
             search=int(self.sp_search.value()), zncc_min=float(self.sp_zncc.value()),
-            subpixel=True, subpixel_method=str(self.cb_subpix.currentData()))
+            subpixel=True, subpixel_method=str(self.cb_subpix.currentData()),
+            saturation_level=self._saturation_level(),
+            saturation_margin=int(self.sp_sat_margin.value()))
 
     def _tool_polygon(self):
         """Tool polygon (pixel vertices) drawn in the Alignment tab, or None.
@@ -783,7 +850,9 @@ class DICTab(QWidget):
                          and self.cb_pattern.currentData()),
             init_search=int(self.sp_init_search.value()),
             grey_correction=bool(self.chk_grey.isChecked()),
-            tool_polygon=tool_poly)
+            tool_polygon=tool_poly,
+            saturation_level=self._saturation_level(),
+            saturation_margin=int(self.sp_sat_margin.value()))
 
     def _load_from_session(self):
         path = self.session.visible.path
@@ -999,12 +1068,17 @@ class DICTab(QWidget):
         valid_elements = None
         n_valid = mesh.n_elements
         tool_poly = self._tool_polygon()
-        if self.chk_mask.isChecked() or tool_poly is not None:
+        sat_level = self._saturation_level()
+        if self.chk_mask.isChecked() or tool_poly is not None \
+                or sat_level is not None:
             img = self._preview_frame_image()
             if img is not None:
                 min_int = (float(self.sld_int.value())
                            if self.chk_mask.isChecked() else 0.0)
                 mat = dic_global_engine.material_mask(img, min_int, tool_poly)
+                if sat_level is not None:
+                    mat &= ~dic_global_engine.saturation_mask(
+                        img, sat_level, int(self.sp_sat_margin.value()))
                 valid_elements = dic_global_engine.element_coverage_mask(
                     mesh, mat, float(self.sp_coverage.value()))
                 n_valid = int(valid_elements.sum())
@@ -1065,7 +1139,8 @@ class DICTab(QWidget):
             return
         pts = self._grid_preview()
         if pts is not None and len(pts):
-            keep = self._keep_mask(pts, self._preview_frame_image())
+            img_prev = self._preview_frame_image()
+            keep = self._keep_mask(pts, img_prev) & self._saturation_keep(pts, img_prev)
             kept = pts[keep]; excl = pts[~keep]
             color = "lime" if self._roi_locked else "cyan"
             if len(kept):
@@ -1118,6 +1193,7 @@ class DICTab(QWidget):
             "cb_engine", "sp_subset", "sp_step", "sp_search", "sp_zncc",
             "cb_subpix",
             "chk_mask", "sld_int", "sp_bits",
+            "chk_sat", "sp_sat", "sp_sat_margin",
             # chk_uncert stays disabled (not wired: no sigma_f source yet)
             "sp_elem", "cb_variant", "cb_pattern", "chk_uinit",
             "sp_maxiter", "sp_tol", "sp_pyr_levels", "sp_pyr_sigma",

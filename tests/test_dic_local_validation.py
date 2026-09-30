@@ -226,3 +226,47 @@ def test_mask_window_is_the_subset():
     pt = np.array([[50.0, 50.0]])                # subset 21 -> cols 40..60
     assert not point_mask(img, pt, win=21, min_intensity=2500)[0]
     assert point_mask(img, pt, win=21 // 2, min_intensity=2500)[0]
+
+
+# ---------------------------------------------------------------------------
+# Saturation mask
+# ---------------------------------------------------------------------------
+def test_saturation_stationary_edge():
+    """Saturated half that does not move: without the mask the points next
+    to it are strongly biased (measured 0.31 px); with it they are either
+    rejected (more than half saturated) or accurate."""
+    ref = speckle(192, 192, radius=1.5, seed=1)
+    f = ref.copy(); f[:, 96:] = 4095.0
+    g = fshift(ref, 0.3, 0); g[:, 96:] = 4095.0
+    pts = make_grid((0, 0, 191, 191), 8, margin=14)
+    d, ok, _ = correlate_local(f, g, pts, 11, 3, zncc_min=0.5)
+    assert np.nanmax(np.abs(d[ok, 0] - 0.3)) > 0.1
+    d, ok, _, info = correlate_local(f, g, pts, 11, 3, zncc_min=0.5,
+                                     saturation_level=4095.0, return_info=True)
+    assert info["saturated"].any()
+    assert np.nanmax(np.abs(d[ok, 0] - 0.3)) < 5e-3                   # (R: 0.0022)
+
+
+def test_saturation_scattered_highlights_keep_points():
+    """2 % of scattered saturated pixels: most points are kept (only their
+    saturated pixels leave the refinement) and the error does not grow."""
+    ref = speckle(192, 192, radius=1.5, seed=1)
+    clip = np.percentile(ref, 98)
+    f = np.minimum(ref, clip); g = np.minimum(fshift(ref, 0.3, 0.1), clip)
+    pts = make_grid((0, 0, 191, 191), 8, margin=14)
+    d0, ok0, _ = correlate_local(f, g, pts, 11, 3, zncc_min=0.5)
+    d1, ok1, _ = correlate_local(f, g, pts, 11, 3, zncc_min=0.5,
+                                 saturation_level=float(clip))
+    assert ok1.mean() > 0.85                                            # (R: 93 %)
+    assert np.nanmean(np.abs(d1[ok1, 0] - 0.3)) <= np.nanmean(np.abs(d0[ok0, 0] - 0.3))
+
+
+def test_saturation_params_reach_the_engine():
+    p = DicParams(subset=11, search=3, saturation_level=4095.0)
+    ref = speckle()
+    f = ref.copy(); f[:, 80:] = 4095.0
+    g = fshift(ref, 0.2, 0); g[:, 80:] = 4095.0
+    pts = np.array([[150.0, 80.0], [40.0, 80.0]])
+    res = compute_dic_fields([f, g], pts, p, fps=1.0, mm_per_px=1.0,
+                             img_w=160, img_h=160)
+    assert not res["valid"][0, 0] and res["valid"][0, 1]
