@@ -36,9 +36,10 @@ Conventions reused from the GUI_Abaqus side (NOT from q4dic):
     closure ``e_zz = -(e_xx + e_yy)`` -- both identical to ``dic._equiv`` so the
     local and global engines feed the viewer with the same definitions.
 
-NOTE (scope of this batch): the mesh is built on the full ROI bounding box. The
-material/tool mask and the per-element validity/convection handling (q4dic
-``segmentation.py``) are deferred to a later batch, as agreed.
+Functional actually minimised: C(U) = sum_p [f(x_p) - g(x_p + u(x_p))]^2 over
+the pixels p owned by the valid elements (each pixel counted once), f and g
+normalised (zero mean, unit std) with statistics taken on the ROI. The system
+is assembled as sparse matrices (H = G^T G, h = G^T r) and solved by sparse LU.
 """
 from __future__ import annotations
 
@@ -128,6 +129,23 @@ class DicGlobalParams:
         Pixel vertices of a closed polygon covering the tool. Pixels inside it
         are treated as non-material (excluded), in addition to the intensity
         threshold. Enables element exclusion even when ``mask_enabled`` is off.
+    min_std_rel : float
+        Texture threshold: an element whose grey-level std over its pixels is
+        <= ``min_std_rel * ptp(reference frame)`` (flat, saturated) is
+        excluded like a masked element (its orphan nodes -> NaN, invalid).
+        0 disables it. Default 1e-3 (design choice, same rule as the local
+        engine).
+    grey_correction : bool
+        Estimate a global grey-level gain/offset (a, b) over the ROI with the
+        displacement (two extra unknowns): r = f - [(1+a) g(x+u) + b].
+    init_search : int
+        When > 0, each pair is initialised by a local ZNCC correlation at the
+        nodes (subset = element size, half search range ``init_search`` px),
+        extending the capture range beyond the Gauss-Newton basin (about the
+        speckle size, x2 per pyramid level). 0 = no local initialisation.
+    convect : bool
+        Requires ``incremental=True`` (the total pattern already measures
+        from frame 0; accumulating its totals was inconsistent).
     """
     engine: str = "global"
     elem_size: int = 24
@@ -144,6 +162,9 @@ class DicGlobalParams:
     coverage_threshold: float = 0.5
     convect: bool = False
     tool_polygon: Optional[list] = None
+    min_std_rel: float = 1e-3
+    init_search: int = 0
+    grey_correction: bool = True
 
     def to_json_dict(self) -> dict:
         return asdict(self)
@@ -158,16 +179,56 @@ def _to_gray_f64(img: np.ndarray) -> np.ndarray:
     return a.astype(np.float64)
 
 
-def normalize_image(img: np.ndarray) -> np.ndarray:
-    """Zero-mean, unit-std normalisation (consistent with the ZNCC criterion;
-    q4dic/preprocessing.normalize_image). Falls back to mean subtraction only
-    when the image is flat."""
+def roi_stats(img: np.ndarray, region=None) -> Tuple[float, float]:
+    """(mean, std) of the grey levels of ``img`` over ``region``."""
     g = _to_gray_f64(img)
-    mu = float(g.mean())
-    sd = float(g.std())
+    s = g if region is None else g[region]
+    if s.size == 0:
+        s = g
+    return float(s.mean()), float(s.std())
+
+
+def normalize_with(img: np.ndarray, mu: float, sd: float) -> np.ndarray:
+    """Affine grey-level map (img - mu) / sd (mean subtraction if sd ~ 0).
+    Apply the SAME (mu, sd) -- taken on the reference ROI -- to f and g:
+    separate maps would create a grey-level mismatch whenever the content
+    of the region differs between the two images (i.e. under motion)."""
+    g = _to_gray_f64(img)
     if sd < 1e-12:
         return g - mu
     return (g - mu) / sd
+
+
+def normalize_image(img: np.ndarray, region=None) -> np.ndarray:
+    """Zero-mean, unit-std normalisation (a global affine grey-level
+    correction; the functional minimised is then the SSD of the normalised
+    images, not a per-element ZNSSD). ``region`` (tuple of slices or bool
+    mask) restricts the mean/std to the correlated area: statistics over the
+    whole image changed the grey levels inside the ROI whenever content
+    changed OUTSIDE it (chip, tool, background), which biased the solution.
+    Falls back to mean subtraction only when the region is flat."""
+    g = _to_gray_f64(img)
+    s = g if region is None else g[region]
+    if s.size == 0:
+        s = g
+    mu = float(s.mean())
+    sd = float(s.std())
+    if sd < 1e-12:
+        return g - mu
+    return (g - mu) / sd
+
+
+def roi_region(mesh: "Q4Mesh", shape: Tuple[int, int], margin: float = 0.0):
+    """Slices of the bounding box of the mesh nodes, expanded by ``margin``
+    px and clipped to the image: the area used for the normalisation
+    statistics (use the same area for f and g)."""
+    H, W = shape[:2]
+    m = int(np.ceil(max(0.0, float(margin))))
+    y0 = max(0, int(np.floor(mesh.nodes[:, 1].min())) - m)
+    y1 = min(H, int(np.ceil(mesh.nodes[:, 1].max())) + 1 + m)
+    x0 = max(0, int(np.floor(mesh.nodes[:, 0].min())) - m)
+    x1 = min(W, int(np.ceil(mesh.nodes[:, 0].max())) + 1 + m)
+    return (slice(y0, y1), slice(x0, x1))
 
 
 # =============================================================================
@@ -224,6 +285,41 @@ def gauss_points_2d(n_gauss: int = 2) -> Tuple[np.ndarray, np.ndarray]:
             (w_xi * w_eta).ravel())
 
 
+def inverse_bilinear(coords: np.ndarray, x: np.ndarray, y: np.ndarray,
+                     n_iter: int = 20, tol: float = 1e-12):
+    """Natural coordinates (xi, eta) of physical points (x, y) in a general
+    Q4 whose nodes ``coords`` (4, 2) follow the 1-2-3-4 numbering; Newton
+    iterations on x(xi, eta) = x. Returns (xi, eta, inside) with inside =
+    |xi|, |eta| <= 1 (+1e-9). Exact in one step for a parallelogram."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    xi = np.zeros_like(x)
+    eta = np.zeros_like(x)
+    cx = coords[:, 0]
+    cy = coords[:, 1]
+    for _ in range(n_iter):
+        N = shape_functions_grid(xi, eta)
+        rx = N.T @ cx - x
+        ry = N.T @ cy - y
+        dxi = 0.25 * np.array([-(1 - eta), (1 - eta), (1 + eta), -(1 + eta)])
+        deta = 0.25 * np.array([-(1 - xi), -(1 + xi), (1 + xi), (1 - xi)])
+        a = dxi.T @ cx
+        b = deta.T @ cx
+        c = dxi.T @ cy
+        d = deta.T @ cy
+        det = a * d - b * c
+        det = np.where(np.abs(det) < 1e-300, 1e-300, det)
+        sxi = (d * rx - b * ry) / det
+        seta = (-c * rx + a * ry) / det
+        xi = xi - sxi
+        eta = eta - seta
+        if np.max(np.abs(sxi), initial=0.0) < tol and \
+                np.max(np.abs(seta), initial=0.0) < tol:
+            break
+    inside = (np.abs(xi) <= 1 + 1e-9) & (np.abs(eta) <= 1 + 1e-9)
+    return xi, eta, inside
+
+
 # =============================================================================
 # Structured Q4 mesh  (ported from q4dic/mesh.py:Q4Mesh)
 # =============================================================================
@@ -259,6 +355,10 @@ class Q4Mesh:
         self.n_nodes = self.nodes.shape[0]
         self.n_elements = self.connectivity.shape[0]
         self.n_dof = 2 * self.n_nodes
+        # Rectangular, axis-aligned elements (False once convected): selects
+        # the affine (exact) or the isoparametric (Newton) inverse mapping.
+        self.axis_aligned = True
+        self._px_cache = {}
 
     def _generate_nodes(self) -> np.ndarray:
         nx = self.n_elem_x + 1
@@ -291,34 +391,70 @@ class Q4Mesh:
 
     def physical_to_natural(self, x: np.ndarray, y: np.ndarray,
                             elem_idx: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Map physical (x, y) to natural (xi, eta) for an axis-aligned element.
-        Uses the element's min corner so xi, eta span [-1, 1] across it."""
+        """Map physical (x, y) to natural (xi, eta) in an element. Exact
+        affine map for an axis-aligned rectangle (min corner -> (-1, -1));
+        isoparametric Newton inversion for a general (convected) Q4."""
         node_coords = self.nodes[self.connectivity[elem_idx]]
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        if not self.axis_aligned:
+            xi, eta, _ = inverse_bilinear(node_coords, x, y)
+            return xi, eta
         x_min = node_coords[:, 0].min()
         y_min = node_coords[:, 1].min()
-        xi = 2.0 * (x - x_min) / self.elem_size_x - 1.0
-        eta = 2.0 * (y - y_min) / self.elem_size_y - 1.0
+        sx = node_coords[:, 0].max() - x_min
+        sy = node_coords[:, 1].max() - y_min
+        xi = 2.0 * (x - x_min) / sx - 1.0
+        eta = 2.0 * (y - y_min) / sy - 1.0
         return xi, eta
+
+    def _owned_pixels(self, elem_idx: int):
+        """(x, y, xi, eta) of the integer pixels OWNED by the element, cached.
+
+        Every pixel of the meshed area belongs to exactly one element: an
+        element owns the half-open cell [-1, 1) x [-1, 1) in natural
+        coordinates, closed (<= 1) on the last column / row of the mesh.
+        (A closed cell counted the pixels of shared edges twice and of shared
+        corners four times, i.e. a weighted functional.) Axis-aligned
+        elements use the exact affine map; general (convected) quads the
+        isoparametric inversion, restricted to pixels inside the quad."""
+        hit = self._px_cache.get(elem_idx)
+        if hit is not None:
+            return hit
+        c = self.nodes[self.connectivity[elem_idx]]
+        ie, je = divmod(int(elem_idx), self.n_elem_x)
+        last_x = je == self.n_elem_x - 1
+        last_y = ie == self.n_elem_y - 1
+        x_px = np.arange(np.ceil(c[:, 0].min() - 1e-9),
+                         np.floor(c[:, 0].max() + 1e-9) + 1, dtype=float)
+        y_px = np.arange(np.ceil(c[:, 1].min() - 1e-9),
+                         np.floor(c[:, 1].max() + 1e-9) + 1, dtype=float)
+        xx, yy = np.meshgrid(x_px, y_px)
+        xx = xx.ravel(); yy = yy.ravel()
+        xi, eta = self.physical_to_natural(xx, yy, elem_idx)
+        tol = 1e-9
+        keep = (xi >= -1 - tol) & (eta >= -1 - tol)
+        keep &= (xi <= 1 + tol) if last_x else (xi < 1 - tol)
+        keep &= (eta <= 1 + tol) if last_y else (eta < 1 - tol)
+        out = (xx[keep], yy[keep], np.clip(xi[keep], -1, 1),
+               np.clip(eta[keep], -1, 1))
+        self._px_cache[elem_idx] = out
+        return out
 
     def get_pixel_points_in_element(self, elem_idx: int
                                     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Integer pixel coordinates contained in an element. Pixel-wise
-        quadrature (q4dic/Besnard) is more faithful to the discrete image than
-        Gauss quadrature for the grey-level residual."""
-        node_coords = self.nodes[self.connectivity[elem_idx]]
-        x_min, x_max = node_coords[:, 0].min(), node_coords[:, 0].max()
-        y_min, y_max = node_coords[:, 1].min(), node_coords[:, 1].max()
-        x_px = np.arange(np.ceil(x_min), np.floor(x_max) + 1, dtype=float)
-        y_px = np.arange(np.ceil(y_min), np.floor(y_max) + 1, dtype=float)
-        xx, yy = np.meshgrid(x_px, y_px)
-        return xx.ravel(), yy.ravel()
+        """Integer pixel coordinates owned by an element (each pixel of the
+        mesh belongs to exactly one element, see ``_owned_pixels``).
+        Pixel-wise quadrature (q4dic/Besnard) is more faithful to the discrete
+        image than Gauss quadrature for the grey-level residual."""
+        x, y, _, _ = self._owned_pixels(elem_idx)
+        return x, y
 
     def build_shape_matrix_at_pixels(self, elem_idx: int
                                      ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Shape matrix [N] (2, 8, n_pixels) at all pixels of an element, with
         the pixel coordinates. Row 0 maps nodal DOF to ux, row 1 to uy."""
-        x_pts, y_pts = self.get_pixel_points_in_element(elem_idx)
-        xi, eta = self.physical_to_natural(x_pts, y_pts, elem_idx)
+        x_pts, y_pts, xi, eta = self._owned_pixels(elem_idx)
         N = shape_functions_grid(xi, eta)             # (4, n_pts)
         n_pts = x_pts.size
         N_mat = np.zeros((2, 8, n_pts))
@@ -326,6 +462,52 @@ class Q4Mesh:
             N_mat[0, 2 * i, :] = N[i]
             N_mat[1, 2 * i + 1, :] = N[i]
         return N_mat, x_pts, y_pts
+
+    def pixel_operator(self, valid_elements: Optional[np.ndarray] = None):
+        """Vectorised pixel-level operator over the owned pixels of the valid
+        elements (cached per mask): dict with
+          x, y   : (n_pix,) integer pixel coordinates (float arrays)
+          elem   : (n_pix,) owning element
+          Bx, By : sparse (n_pix, n_dof) with u_x(pix) = Bx @ U,
+                   u_y(pix) = By @ U (Q4 shape functions)
+        Same mathematics as ``build_shape_matrix_at_pixels`` for every
+        element, stacked, so the Gauss-Newton system is assembled as
+        H = G^T G, h = G^T r with G = diag(gx) Bx + diag(gy) By."""
+        import scipy.sparse as sp
+        key = None if valid_elements is None else \
+            np.asarray(valid_elements, bool).tobytes()
+        cache = self._px_cache.setdefault("_ops", {})
+        if key in cache:
+            return cache[key]
+        xs, ys, es, rows, cols, vals = [], [], [], [], [], []
+        n0 = 0
+        for e in range(self.n_elements):
+            if valid_elements is not None and not valid_elements[e]:
+                continue
+            x, y, xi, eta = self._owned_pixels(e)
+            n = x.size
+            if n == 0:
+                continue
+            N = shape_functions_grid(xi, eta)            # (4, n)
+            nodes = self.connectivity[e]
+            r = np.arange(n0, n0 + n)
+            for a in range(4):
+                rows.append(r); cols.append(np.full(n, nodes[a])); vals.append(N[a])
+            xs.append(x); ys.append(y); es.append(np.full(n, e))
+            n0 += n
+        if n0 == 0:
+            op = {"x": np.empty(0), "y": np.empty(0), "elem": np.empty(0, int),
+                  "Bx": sp.csr_matrix((0, self.n_dof)),
+                  "By": sp.csr_matrix((0, self.n_dof)), "n_pix": 0}
+        else:
+            rows = np.concatenate(rows); nodes_ = np.concatenate(cols)
+            vals = np.concatenate(vals)
+            Bx = sp.csr_matrix((vals, (rows, 2 * nodes_)), shape=(n0, self.n_dof))
+            By = sp.csr_matrix((vals, (rows, 2 * nodes_ + 1)), shape=(n0, self.n_dof))
+            op = {"x": np.concatenate(xs), "y": np.concatenate(ys),
+                  "elem": np.concatenate(es), "Bx": Bx, "By": By, "n_pix": n0}
+        cache[key] = op
+        return op
 
 
 def build_mesh_on_roi(roi: Tuple[float, float, float, float],
@@ -394,23 +576,42 @@ def element_coverage_mask(mesh: Q4Mesh, material_mask: np.ndarray,
                           coverage_threshold: float = 0.5) -> np.ndarray:
     """Per-element validity from material coverage (Besnard/Hild segmentation).
 
-    For each element, the fraction of material pixels inside its bounding box
-    is compared to ``coverage_threshold``; the element is kept when
+    For each element, the fraction of material pixels among the pixels it
+    OWNS (the pixels its residual uses, also for a convected quad) is
+    compared to ``coverage_threshold``; the element is kept when
     ``frac >= coverage_threshold``. Returns a (n_elements,) bool array.
     """
     H, W = material_mask.shape
     valid = np.zeros(mesh.n_elements, dtype=bool)
     for e in range(mesh.n_elements):
-        coords = mesh.nodes[mesh.connectivity[e]]
-        x0 = int(np.clip(np.floor(coords[:, 0].min()), 0, W - 1))
-        x1 = int(np.clip(np.ceil(coords[:, 0].max()), 0, W - 1))
-        y0 = int(np.clip(np.floor(coords[:, 1].min()), 0, H - 1))
-        y1 = int(np.clip(np.ceil(coords[:, 1].max()), 0, H - 1))
-        if x1 <= x0 or y1 <= y0:
+        x, y = mesh.get_pixel_points_in_element(e)
+        inside = (x >= 0) & (x <= W - 1) & (y >= 0) & (y <= H - 1)
+        if not inside.any():
             continue
-        frac = material_mask[y0:y1 + 1, x0:x1 + 1].mean()
+        frac = material_mask[y[inside].astype(int), x[inside].astype(int)].mean()
         valid[e] = frac >= coverage_threshold
     return valid
+
+
+def element_texture_mask(mesh: Q4Mesh, image: np.ndarray,
+                         min_std_rel: float = 1e-3) -> np.ndarray:
+    """Per-element texture validity: an element whose grey-level std over
+    its owned pixels is <= ``min_std_rel * ptp(image)`` carries no image
+    information (flat, saturated) and is excluded like a masked element
+    (its nodes become orphans -> NaN, invalid) instead of being "measured"
+    as its initial guess. Returns a (n_elements,) bool array."""
+    g = _to_gray_f64(image)
+    H, W = g.shape
+    thr = float(min_std_rel) * float(np.ptp(g))
+    ok = np.zeros(mesh.n_elements, dtype=bool)
+    for e in range(mesh.n_elements):
+        x, y = mesh.get_pixel_points_in_element(e)
+        inside = (x >= 0) & (x <= W - 1) & (y >= 0) & (y <= H - 1)
+        if inside.sum() < 2:
+            continue
+        v = g[y[inside].astype(int), x[inside].astype(int)]
+        ok[e] = float(v.std()) > thr
+    return ok
 
 
 def active_nodes_from_elements(mesh: Q4Mesh, valid_elements: np.ndarray
@@ -445,22 +646,28 @@ def convect_mesh(mesh: Q4Mesh, U: np.ndarray) -> Q4Mesh:
     new.nodes = mesh.nodes.copy()
     new.nodes[:, 0] += dx
     new.nodes[:, 1] += dy
+    # General quads from now on: isoparametric inverse map, fresh pixel cache.
+    new.axis_aligned = False
+    new._px_cache = {}
     return new
 
 
 def check_jacobian(mesh: Q4Mesh) -> np.ndarray:
-    """Per-element validity from the sign of the Jacobian determinant at the
-    element centre (xi=eta=0). For a well-formed Q4 element det(J) > 0; a
-    convected mesh whose element folds over gives det(J) <= 0 (q4dic
-    segmentation.check_jacobian). Returns a (n_elements,) bool array."""
-    dN = shape_function_derivatives(0.0, 0.0)        # (2, 4)
+    """Per-element validity from the sign of the Jacobian determinant. For a
+    Q4, det(J) is linear in xi and in eta (no xi*eta term), so its minimum
+    over the element is reached at a corner: the element is valid iff
+    det(J) > 0 at its 4 corners (the centre alone misses corner fold-overs).
+    Returns a (n_elements,) bool array."""
+    corners = ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
+    dNs = [shape_function_derivatives(xi, eta) for xi, eta in corners]
     valid = np.ones(mesh.n_elements, dtype=bool)
     for e in range(mesh.n_elements):
         coords = mesh.nodes[mesh.connectivity[e]]    # (4, 2)
-        J = dN @ coords                              # (2, 2)
-        det_J = J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0]
-        if det_J <= 0:
-            valid[e] = False
+        for dN in dNs:
+            J = dN @ coords                          # (2, 2)
+            if J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0] <= 0:
+                valid[e] = False
+                break
     return valid
 
 
@@ -621,11 +828,16 @@ def assemble_h_only(mesh: Q4Mesh, interp_g: BicubicInterpolator,
     return h_global, total_residual
 
 
-def compute_uncertainty(H_global: np.ndarray, sigma_f: float, n_dof: int
+def compute_uncertainty(H_global, sigma_f: float, n_dof: int
                         ) -> Tuple[np.ndarray, np.ndarray]:
     """Analytic displacement covariance ``Cov = 2 sigma_f^2 [H]^-1`` and per-DOF
-    std ``sqrt(diag(Cov))`` (Hild & Roux). A small relative floor is added to
-    [H] for conditioning. Even DOF = ux, odd DOF = uy."""
+    std ``sqrt(diag(Cov))`` (Hild & Roux). ``H_global`` may be dense or
+    sparse. A small relative floor is added to [H] for conditioning. Even
+    DOF = ux, odd DOF = uy. ``sigma_f`` must be in the grey-level units of
+    the images the solver used (normalised images: sigma_GL / std)."""
+    import scipy.sparse as sp
+    if sp.issparse(H_global):
+        H_global = H_global.toarray()
     reg = 1e-10 * np.trace(H_global) / max(n_dof, 1)
     H_reg = H_global + reg * np.eye(n_dof)
     try:
@@ -641,16 +853,27 @@ def compute_uncertainty(H_global: np.ndarray, sigma_f: float, n_dof: int
 # Newton-Raphson solver  (ported from q4dic/solver.py:newton_raphson)
 # =============================================================================
 
-def _regularise_and_constrain(H_global: np.ndarray, reg_rel: float, n_dof: int,
-                              orphan_dof: Optional[np.ndarray]) -> np.ndarray:
-    """Return the regularised Hessian used for the linear solve.
+def _regularise_and_constrain(H_global, reg_rel: float, n_dof: int,
+                              orphan_dof: Optional[np.ndarray]):
+    """Return the regularised Hessian used for the linear solve (dense or
+    sparse, same type as the input).
 
     Adds the relative diagonal floor ``reg_rel * trace([H])/n_dof`` for
-    conditioning. For orphan DOF (nodes touching only excluded elements) the
+    conditioning. It damps the STEP only: at the fixed point dU = 0, which
+    requires h = 0 (exact stationarity of the cost), so it does not bias the
+    solution. For orphan DOF (nodes touching only excluded elements) the
     row/column is zeroed and a unit pivot is set, so the linear solve yields
-    ``dU = 0`` there (the RHS is also zeroed by the caller). This keeps the
-    system non-singular without letting orphan DOF pollute their neighbours.
+    ``dU = 0`` there (the RHS is also zeroed by the caller).
     """
+    import scipy.sparse as sp
+    if sp.issparse(H_global):
+        reg = reg_rel * float(H_global.diagonal().sum()) / max(n_dof, 1)
+        H_reg = (H_global + reg * sp.identity(n_dof, format="csc")).tocsc()
+        if orphan_dof is not None and orphan_dof.any():
+            keep = sp.diags((~orphan_dof).astype(float))
+            H_reg = (keep @ H_reg @ keep
+                     + sp.diags(orphan_dof.astype(float))).tocsc()
+        return H_reg
     reg = reg_rel * np.trace(H_global) / max(n_dof, 1)
     H_reg = H_global + reg * np.eye(n_dof)
     if orphan_dof is not None and orphan_dof.any():
@@ -661,118 +884,198 @@ def _regularise_and_constrain(H_global: np.ndarray, reg_rel: float, n_dof: int,
     return H_reg
 
 
+def _orphan_dof(mesh: Q4Mesh, valid_elements: Optional[np.ndarray]):
+    if valid_elements is None:
+        return None
+    orphan_nodes = ~active_nodes_from_elements(mesh, valid_elements)
+    orphan = np.zeros(mesh.n_dof, dtype=bool)
+    orphan[0::2] = orphan_nodes
+    orphan[1::2] = orphan_nodes
+    return orphan
+
+
 def newton_raphson(mesh: Q4Mesh, interp_g: BicubicInterpolator, f: np.ndarray,
                    U_init: Optional[np.ndarray] = None, max_iter: int = 30,
                    tol: float = 1e-4, variant: str = "standard",
                    sigma_f: Optional[float] = None, reg_rel: float = 1e-6,
-                   valid_elements: Optional[np.ndarray] = None
+                   valid_elements: Optional[np.ndarray] = None,
+                   min_step: float = 1.0 / 16.0,
+                   grey_correction: bool = True,
+                   line_search: bool = True
                    ) -> Dict[str, object]:
-    """Modified Newton-Raphson / Gauss-Newton minimisation of the global
-    grey-level residual.
+    """Gauss-Newton minimisation of the global grey-level residual
 
-    Parameters
-    ----------
-    mesh : Q4Mesh
-    interp_g : BicubicInterpolator
-        Interpolator of the deformed image g.
-    f : np.ndarray
-        Reference image (normalised, full integer grid).
-    U_init : np.ndarray, optional
-        Initial nodal displacement (n_dof,); zeros if None.
-    max_iter, tol : int, float
-        Iteration cap and threshold on ``||dU||`` (pixels).
-    variant : str
-        'standard' or 'hild' (see DicGlobalParams).
-    sigma_f : float, optional
-        If given, the analytic covariance is computed at convergence.
-    reg_rel : float
-        Relative conditioning floor on [H].
+        C(U, a, b) = sum_{pixels p owned by valid elements} r_p^2,
+        r_p = f(x_p) - [(1 + a) g(x_p + u(x_p)) + b],  u(x) = sum_a N_a(x) u_a,
 
-    Returns
-    -------
-    dict with keys:
-        'U'            : (n_dof,) nodal displacement (pixels)
-        'residuals'    : list of normalised residuals per iteration
-        'corrections'  : list of ||dU|| per iteration
-        'n_iter'       : iterations performed
-        'converged'    : bool
-        'cov'          : (n_dof, n_dof) or None
-        'sigma_u'      : (n_dof,) or None
+    each pixel counted once. (a, b) is a global grey-level gain/offset
+    correction over the ROI (``grey_correction=True``; a = b = 0 fixed
+    otherwise): it absorbs the brightness/contrast mismatch left by the
+    normalisation, exactly (two extra unknowns of the same least-squares
+    problem, not an ad hoc rescaling).
+
+    Linearisation (``variant='standard'``, exact Gauss-Newton): the columns
+    of -J_r are (1+a) grad g(x+u) . N for U, g(x+u) for a and 1 for b, so
+    (J^T J) dz = -J^T r reads H dz = h with H = G^T G, h = G^T r.
+    ``variant='hild'``: grad g(x+u) and g(x+u) replaced by grad f(x) and
+    f(x) in G (constant matrix, factorised once; modified Gauss-Newton,
+    Correli-Q4-like).
+
+    Step control: the cost at the new iterate is checked at the next
+    assembly; if it increased, the step is halved (backtracking) down to
+    ``min_step``, below which the solve stops (``stop_reason='stagnation'``,
+    not converged). Convergence: max nodal correction |dU|_node < ``tol``
+    (px), independent of the mesh size.
+
+    Returns a dict with keys:
+        'U'              : (n_dof,) nodal displacement (px); NaN on orphans
+        'residuals'      : RMS residual at each accepted iterate (before its step)
+        'corrections'    : max nodal |dU| (px) of each applied step
+        'n_iter'         : steps applied
+        'converged'      : bool
+        'stop_reason'    : 'converged' | 'max_iter' | 'stagnation' | 'singular'
+        'n_backtracks'   : int
+        'grey_ab'        : (a, b) grey-level gain/offset at the solution
+        'residual_final' : RMS residual at the returned U
+        'elem_rms'       : (n_elements,) RMS residual per element at the
+                           returned U (NaN for excluded elements)
+        'cov', 'sigma_u' : analytic covariance / std (sigma_f given) or None
     """
+    import scipy.sparse as sp
+    import scipy.sparse.linalg as spl
     if variant not in ("standard", "hild"):
         raise ValueError("variant must be 'standard' or 'hild'")
     n_dof = mesh.n_dof
     U = (np.zeros(n_dof) if U_init is None
          else np.nan_to_num(np.asarray(U_init, float), nan=0.0).copy())
 
+    orphan_dof = _orphan_dof(mesh, valid_elements)
+    n_ab = 2 if grey_correction else 0
+    n_z = n_dof + n_ab
+    orphan_z = None
+    if orphan_dof is not None:
+        orphan_z = np.concatenate([orphan_dof, np.zeros(n_ab, bool)])
+    op = mesh.pixel_operator(valid_elements)
+    xp, yp, Bx, By = op["x"], op["y"], op["Bx"], op["By"]
+    n_pixels = max(op["n_pix"], 1)
+    H_img, W_img = f.shape
+    f_vals = f[np.clip(yp.astype(int), 0, H_img - 1),
+               np.clip(xp.astype(int), 0, W_img - 1)]
+    ones = np.ones(op["n_pix"])
+
+    def split(z):
+        if n_ab:
+            return z[:n_dof], z[n_dof], z[n_dof + 1]
+        return z, 0.0, 0.0
+
+    def residual(z):
+        Uv, a_, b_ = split(z)
+        xd = xp + Bx @ Uv
+        yd = yp + By @ Uv
+        gv = interp_g.evaluate(xd, yd)
+        return f_vals - ((1.0 + a_) * gv + b_), xd, yd, gv
+
+    def build_G(gx, gy, gv, a_):
+        G = (1.0 + a_) * (sp.diags(gx) @ Bx + sp.diags(gy) @ By)
+        if n_ab:
+            G = sp.hstack([G, sp.csr_matrix(gv[:, None]),
+                           sp.csr_matrix(ones[:, None])])
+        return G.tocsr()
+
+    z = np.concatenate([U, np.zeros(n_ab)])
+    lu_fixed = None
+    H_fixed = None
+    G_fixed = None
+    if variant == "hild":
+        gx, gy = BicubicInterpolator(f).gradient(xp, yp)
+        G_fixed = build_G(gx, gy, f_vals, 0.0)
+        H_fixed = (G_fixed.T @ G_fixed).tocsc()
+        try:
+            lu_fixed = spl.splu(_regularise_and_constrain(
+                H_fixed, reg_rel, n_z, orphan_z))
+        except RuntimeError:
+            lu_fixed = None
+
     residuals: List[float] = []
     corrections: List[float] = []
-    cov = None
-    sigma_u = None
-
-    # Orphan DOF: nodes touching only excluded elements get no image data, so
-    # their rows/cols in [H] are empty. We constrain them (dU forced to 0) and
-    # mark their displacement NaN on output (Option A: explicit "no data").
-    orphan_dof = None
-    if valid_elements is not None:
-        active_nodes = active_nodes_from_elements(mesh, valid_elements)
-        orphan_nodes = ~active_nodes
-        orphan_dof = np.zeros(n_dof, dtype=bool)
-        orphan_dof[0::2] = orphan_nodes
-        orphan_dof[1::2] = orphan_nodes
-
-    interp_f = BicubicInterpolator(f) if variant == "hild" else None
-
-    # 'hild': assemble [H] once.
-    H_fixed = None
-    H_fixed_reg = None
-    if variant == "hild":
-        H_fixed, _, _ = assemble_global(mesh, interp_g, U, f, interp_f, "hild",
-                                        valid_elements=valid_elements)
-        H_fixed_reg = _regularise_and_constrain(
-            H_fixed, reg_rel, n_dof, orphan_dof)
-
-    n_pixels = sum(mesh.get_pixel_points_in_element(e)[0].size
-                   for e in range(mesh.n_elements)
-                   if valid_elements is None or valid_elements[e])
-
     converged = False
-    H_global = None
-    for k in range(max_iter):
+    stop_reason = "max_iter"
+    n_backtracks = 0
+    H_global = H_fixed
+    z_acc = z.copy()
+    C_acc = None
+    dz_last = None
+    step = 1.0
+    k = 0
+    while k < max_iter:
+        r, xd, yd, gv = residual(z)
+        C = float(r @ r)
+        if line_search and C_acc is not None and C > C_acc * (1.0 + 1e-12):
+            # the last step increased the cost: backtrack
+            if step * 0.5 < min_step:
+                z = z_acc
+                stop_reason = "stagnation"
+                break
+            step *= 0.5
+            n_backtracks += 1
+            z = z_acc + step * dz_last
+            corrections[-1] = corrections[-1] * 0.5
+            continue
+        z_acc = z.copy()
+        C_acc = C
+        residuals.append(float(np.sqrt(C / n_pixels)))
         if variant == "hild":
-            h_global, total_res = assemble_h_only(
-                mesh, interp_g, U, f, interp_f, valid_elements=valid_elements)
-            H_global = H_fixed
-            H_reg = H_fixed_reg
+            h_global = G_fixed.T @ r
         else:
-            H_global, h_global, total_res = assemble_global(
-                mesh, interp_g, U, f, interp_f, "standard",
-                valid_elements=valid_elements)
-            H_reg = _regularise_and_constrain(
-                H_global, reg_rel, n_dof, orphan_dof)
-
-        if orphan_dof is not None:
-            h_global = h_global.copy()
-            h_global[orphan_dof] = 0.0
-
-        residuals.append(float(np.sqrt(total_res / max(n_pixels, 1))))
-
+            gx, gy = interp_g.gradient(xd, yd)
+            G = build_G(gx, gy, gv, split(z)[1])
+            H_global = (G.T @ G).tocsc()
+            h_global = G.T @ r
+        if orphan_z is not None:
+            h_global = np.where(orphan_z, 0.0, h_global)
         try:
-            dU = np.linalg.solve(H_reg, h_global)
-        except np.linalg.LinAlgError:
+            if lu_fixed is not None:
+                dz = lu_fixed.solve(h_global)
+            else:
+                dz = spl.spsolve(_regularise_and_constrain(
+                    H_global, reg_rel, n_z, orphan_z), h_global)
+        except RuntimeError:
+            dz = np.full(n_z, np.nan)
+        if not np.all(np.isfinite(dz)):
+            stop_reason = "singular"
             break
-
-        U = U + dU
-        corr = float(np.linalg.norm(dU))
+        step = 1.0
+        dz_last = dz
+        z = z_acc + dz
+        k += 1
+        dU = dz[:n_dof]
+        corr = float(np.max(np.hypot(dU[0::2], dU[1::2]), initial=0.0))
         corrections.append(corr)
         if corr < tol:
             converged = True
+            stop_reason = "converged"
             break
 
-    if sigma_f is not None:
-        H_for_cov = H_fixed if variant == "hild" else H_global
-        if H_for_cov is not None:
-            cov, sigma_u = compute_uncertainty(H_for_cov, sigma_f, n_dof)
+    # Final residual and per-element RMS at the RETURNED solution.
+    r, _, _, _ = residual(z)
+    U, a_fin, b_fin = split(z)
+    U = U.copy()
+    residual_final = float(np.sqrt(float(r @ r) / n_pixels))
+    elem_rms = np.full(mesh.n_elements, np.nan)
+    if op["n_pix"]:
+        ssq = np.bincount(op["elem"], weights=r * r, minlength=mesh.n_elements)
+        cnt = np.bincount(op["elem"], minlength=mesh.n_elements)
+        has = cnt > 0
+        elem_rms[has] = np.sqrt(ssq[has] / cnt[has])
+
+    cov = None
+    sigma_u = None
+    if sigma_f is not None and H_global is not None:
+        # covariance of all unknowns; the displacement block is kept (it
+        # accounts for the correlation with the grey-level unknowns)
+        cov_z, su_z = compute_uncertainty(H_global, sigma_f, n_z)
+        cov = cov_z[:n_dof, :n_dof]
+        sigma_u = su_z[:n_dof]
 
     if orphan_dof is not None:
         U = U.copy()
@@ -783,12 +1086,22 @@ def newton_raphson(mesh: Q4Mesh, interp_g: BicubicInterpolator, f: np.ndarray,
 
     return {"U": U, "residuals": residuals, "corrections": corrections,
             "n_iter": len(corrections), "converged": converged,
+            "stop_reason": stop_reason, "n_backtracks": n_backtracks,
+            "grey_ab": (float(a_fin), float(b_fin)),
+            "residual_final": residual_final, "elem_rms": elem_rms,
             "cov": cov, "sigma_u": sigma_u}
 
 
 # =============================================================================
 # Multi-scale (Gaussian pyramid)  (ported from q4dic preprocessing + solver)
 # =============================================================================
+
+# Smallest element side (px) allowed at the coarsest pyramid level: a 1 px
+# element holds about one pixel for its 8 DOF. Design choice, not a
+# literature value (3 px elements still capture a large translation in
+# tests/test_dic_global.py::TestPyramid).
+MIN_COARSE_ELEM_PX = 2.0
+
 
 def build_gaussian_pyramid(img: np.ndarray, n_levels: int,
                            sigma: float = 1.0) -> List[np.ndarray]:
@@ -818,7 +1131,8 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
                               variant: str = "standard",
                               sigma_f: Optional[float] = None,
                               reg_rel: float = 1e-6,
-                              valid_elements: Optional[np.ndarray] = None
+                              valid_elements: Optional[np.ndarray] = None,
+                              grey_correction: bool = True
                               ) -> Dict[str, object]:
     """Coarse-to-fine Q4-DIC solve over a Gaussian pyramid.
 
@@ -852,22 +1166,42 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
     """
     if n_levels < 1:
         raise ValueError("n_levels must be >= 1")
+    # Normalisation: ONE affine grey-level map, with the statistics of the
+    # reference image over the meshed area, applied to f and g. Content
+    # changes outside the ROI no longer alter the grey levels inside it, and
+    # f and g keep the same map (grey-level conservation preserved). A real
+    # brightness/contrast change between the frames is estimated by the
+    # solver (grey_correction).
     if n_levels == 1:
+        mu, sd = roi_stats(f, roi_region(mesh, np.shape(f)))
         sol = newton_raphson(
-            mesh=mesh, interp_g=BicubicInterpolator(normalize_image(g)),
-            f=normalize_image(f), U_init=U_init, max_iter=max_iter, tol=tol,
+            mesh=mesh,
+            interp_g=BicubicInterpolator(normalize_with(g, mu, sd)),
+            f=normalize_with(f, mu, sd),
+            U_init=U_init, max_iter=max_iter, tol=tol,
             variant=variant, sigma_f=sigma_f, reg_rel=reg_rel,
-            valid_elements=valid_elements)
+            valid_elements=valid_elements, grey_correction=grey_correction)
         sol["history"] = [{"level": 0, "residuals": sol["residuals"],
                            "corrections": sol["corrections"],
                            "converged": sol["converged"]}]
         return sol
+    coarse = min(mesh.elem_size_x, mesh.elem_size_y) / 2 ** (n_levels - 1)
+    if coarse < MIN_COARSE_ELEM_PX:
+        raise ValueError(
+            "pyramid too deep: %d levels shrink the %g px elements to %.2g px "
+            "at the coarsest level (minimum %g px)"
+            % (n_levels, min(mesh.elem_size_x, mesh.elem_size_y), coarse,
+               MIN_COARSE_ELEM_PX))
 
-    # Per-level normalisation keeps the ZNCC-consistent contrast at each scale.
-    pyr_f = [normalize_image(im) for im in
-             build_gaussian_pyramid(f, n_levels, sigma)]
-    pyr_g = [normalize_image(im) for im in
-             build_gaussian_pyramid(g, n_levels, sigma)]
+    raw_f = build_gaussian_pyramid(f, n_levels, sigma)
+    raw_g = build_gaussian_pyramid(g, n_levels, sigma)
+    pyr_f, pyr_g = [], []
+    for lv in range(n_levels):
+        sc = 2 ** lv
+        m_lv = mesh if lv == 0 else _scaled_mesh(mesh, 1.0 / sc)
+        mu, sd = roi_stats(raw_f[lv], roi_region(m_lv, raw_f[lv].shape))
+        pyr_f.append(normalize_with(raw_f[lv], mu, sd))
+        pyr_g.append(normalize_with(raw_g[lv], mu, sd))
 
     U = None
     history: List[dict] = []
@@ -879,10 +1213,7 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
 
     for level in range(n_levels - 1, -1, -1):
         scale = 2 ** level
-        mesh_level = Q4Mesh(
-            x0=mesh.x0 / scale, y0=mesh.y0 / scale,
-            x1=mesh.x1 / scale, y1=mesh.y1 / scale,
-            n_elem_x=mesh.n_elem_x, n_elem_y=mesh.n_elem_y)
+        mesh_level = mesh if level == 0 else _scaled_mesh(mesh, 1.0 / scale)
 
         if U is None:
             # Seed the coarsest level. A caller-provided native-scale init is
@@ -905,7 +1236,12 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
             mesh=mesh_level, interp_g=BicubicInterpolator(pyr_g[level]),
             f=pyr_f[level], U_init=U_lvl, max_iter=max_iter, tol=tol,
             variant=variant, sigma_f=sigma_f_level, reg_rel=reg_rel,
-            valid_elements=valid_elements)
+            valid_elements=valid_elements,
+            # grey-level gain/offset at the native level only: on the smooth
+            # coarse levels its columns are nearly collinear with the
+            # displacement ones (ill-conditioned; made the coarse solve
+            # diverge in tests)
+            grey_correction=grey_correction and level == 0)
 
         U = sol["U"]
         last_residuals = sol["residuals"]
@@ -916,13 +1252,18 @@ def multiscale_newton_raphson(mesh: Q4Mesh, f: np.ndarray, g: np.ndarray,
             sigma_u = sol["sigma_u"]
         history.append({"level": level, "residuals": sol["residuals"],
                         "corrections": sol["corrections"],
-                        "converged": sol["converged"]})
+                        "converged": sol["converged"],
+                        "n_backtracks": sol.get("n_backtracks", 0)})
         if level > 0:
             U = U * 2.0              # coarse -> finer next level: 2x the pixels
 
     return {"U": U, "residuals": last_residuals,
             "corrections": last_corrections,
             "n_iter": len(last_corrections), "converged": converged,
+            "stop_reason": sol.get("stop_reason"),
+            "n_backtracks": sum(h.get("n_backtracks", 0) for h in history),
+            "residual_final": sol.get("residual_final"),
+            "elem_rms": sol.get("elem_rms"),
             "cov": cov, "sigma_u": sigma_u, "history": history}
 
 
@@ -938,63 +1279,74 @@ def _equiv(exx, eyy, exy):
     return np.sqrt(2.0 / 3.0 * (exx ** 2 + eyy ** 2 + ezz ** 2 + 2.0 * exy ** 2))
 
 
-def compute_strains_at_nodes(U: np.ndarray, mesh: Q4Mesh
+def compute_strains_at_nodes(U: np.ndarray, mesh: Q4Mesh,
+                             valid_elements: Optional[np.ndarray] = None,
+                             return_elements: bool = False
                              ) -> Dict[str, np.ndarray]:
     """Strain fields at the mesh nodes from the nodal displacement.
 
     Strains are evaluated at the 2x2 Gauss points of each element by
-    differentiating the Q4 shape functions, then averaged onto the nodes
-    (simple element-contribution averaging, q4dic/strains_gauss_to_nodes). The
-    shear is tensorial ``eps_xy = 0.5(du_x/dy + du_y/dx)`` and ``eps_vm`` uses
-    the e_zz closure, matching the local engine.
+    differentiating the Q4 shape functions with the element's TRUE Jacobian
+    (dN/dx = J^-1 dN/dxi, J = dN/dxi . node coords; exact for convected,
+    non-rectangular quads, identical to elem_size/2 for rectangles), averaged
+    over the element, then averaged onto the nodes over the elements that
+    touch them. Elements flagged False in ``valid_elements`` are left out of
+    the nodal average (they carry no measurement).
 
-    Returns a dict of (n_nodes,) arrays: 'eps_xx', 'eps_yy', 'eps_xy', 'eps_vm'.
-    All in pixel-based (dimensionless) strain; the mapping to the model frame
-    does not change strain values (uniform scale, axis flip only changes signs
-    of cross terms, handled in the field assembler).
+    The shear is tensorial ``eps_xy = 0.5(du_x/dy + du_y/dx)`` and ``eps_vm``
+    uses the e_zz closure, matching the local engine. Pixel-based
+    (dimensionless) strain; the axis flip to the model frame is handled by
+    the field assembler.
+
+    Returns a dict of (n_nodes,) arrays 'eps_xx', 'eps_yy', 'eps_xy',
+    'eps_vm' (NaN at nodes with no valid element); with
+    ``return_elements=True`` also 'elem_eps_xx', 'elem_eps_yy',
+    'elem_eps_xy' (n_elements,): the element means before nodal smoothing.
     """
     gauss_pts, _ = gauss_points_2d(2)
-    jxx = mesh.elem_size_x / 2.0           # rectangular-element Jacobian
-    jyy = mesh.elem_size_y / 2.0
+    dNs = [shape_function_derivatives(xi, eta) for xi, eta in gauss_pts]
+    ne = mesh.n_elements
+    e_xx = np.full(ne, np.nan)
+    e_yy = np.full(ne, np.nan)
+    e_xy = np.full(ne, np.nan)
+    for e in range(ne):
+        if valid_elements is not None and not valid_elements[e]:
+            continue
+        nodes = mesh.connectivity[e]
+        coords = mesh.nodes[nodes]
+        ux = U[2 * nodes]
+        uy = U[2 * nodes + 1]
+        sxx = syy = sxy = 0.0
+        for dN in dNs:
+            J = dN @ coords                       # (2, 2) d(x,y)/d(xi,eta)
+            dNxy = np.linalg.solve(J, dN)         # (2, 4) rows: d/dx, d/dy
+            sxx += dNxy[0] @ ux
+            syy += dNxy[1] @ uy
+            sxy += 0.5 * (dNxy[1] @ ux + dNxy[0] @ uy)
+        e_xx[e] = sxx / len(dNs)
+        e_yy[e] = syy / len(dNs)
+        e_xy[e] = sxy / len(dNs)
 
     acc = {k: np.zeros(mesh.n_nodes) for k in ("eps_xx", "eps_yy", "eps_xy")}
     count = np.zeros(mesh.n_nodes)
-
-    for e in range(mesh.n_elements):
-        node_ids = mesh.connectivity[e]
-        dof_ids = mesh.dof_indices(e)
-        U_elem = U[dof_ids]
-        ux_nodes = U_elem[0::2]
-        uy_nodes = U_elem[1::2]
-
-        # Average strain over the element's Gauss points (constant gradient
-        # within a rectangular Q4 only at the centre; averaging the Gauss
-        # points gives the element-mean strain, then spread to its 4 nodes).
-        exx_e = eyy_e = exy_e = 0.0
-        for (xi_g, eta_g) in gauss_pts:
-            dN = shape_function_derivatives(xi_g, eta_g)
-            dN_dx = dN[0] / jxx
-            dN_dy = dN[1] / jyy
-            exx_e += dN_dx @ ux_nodes
-            eyy_e += dN_dy @ uy_nodes
-            exy_e += 0.5 * (dN_dy @ ux_nodes + dN_dx @ uy_nodes)
-        ng = gauss_pts.shape[0]
-        exx_e /= ng
-        eyy_e /= ng
-        exy_e /= ng
-
-        for n in node_ids:
-            acc["eps_xx"][n] += exx_e
-            acc["eps_yy"][n] += eyy_e
-            acc["eps_xy"][n] += exy_e
+    for e in range(ne):
+        if not np.isfinite(e_xx[e]):
+            continue
+        for n in mesh.connectivity[e]:
+            acc["eps_xx"][n] += e_xx[e]
+            acc["eps_yy"][n] += e_yy[e]
+            acc["eps_xy"][n] += e_xy[e]
             count[n] += 1
-
-    count = np.where(count == 0, 1, count)
-    exx = acc["eps_xx"] / count
-    eyy = acc["eps_yy"] / count
-    exy = acc["eps_xy"] / count
-    return {"eps_xx": exx, "eps_yy": eyy, "eps_xy": exy,
-            "eps_vm": _equiv(exx, eyy, exy)}
+    with np.errstate(invalid="ignore", divide="ignore"):
+        exx = np.where(count > 0, acc["eps_xx"] / count, np.nan)
+        eyy = np.where(count > 0, acc["eps_yy"] / count, np.nan)
+        exy = np.where(count > 0, acc["eps_xy"] / count, np.nan)
+    out = {"eps_xx": exx, "eps_yy": eyy, "eps_xy": exy,
+           "eps_vm": _equiv(exx, eyy, exy)}
+    if return_elements:
+        out.update({"elem_eps_xx": e_xx, "elem_eps_yy": e_yy,
+                    "elem_eps_xy": e_xy})
+    return out
 
 
 def nodal_displacements(U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -1005,6 +1357,90 @@ def nodal_displacements(U: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 # =============================================================================
 # Sequence orchestration  ->  field arrays for the existing viewer
 # =============================================================================
+
+def eval_q4_field(mesh: Q4Mesh, U: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    """Bilinear evaluation of the nodal field ``U`` (n_dof,) at points
+    ``pts`` (n, 2) of an axis-aligned mesh, inside the Q4 approximation
+    space (no external interpolation). Points slightly outside the mesh use
+    the nearest border element (linear extrapolation). Returns (n, 2)."""
+    if not mesh.axis_aligned:
+        raise ValueError("eval_q4_field needs an axis-aligned mesh")
+    pts = np.asarray(pts, float).reshape(-1, 2)
+    ex, ey = mesh.elem_size_x, mesh.elem_size_y
+    # Points farther than one element outside the mesh (or non-finite, e.g.
+    # from a diverged solve) get NaN instead of a wild extrapolation.
+    ok = (np.all(np.isfinite(pts), axis=1)
+          & (pts[:, 0] >= mesh.x0 - ex) & (pts[:, 0] <= mesh.x1 + ex)
+          & (pts[:, 1] >= mesh.y0 - ey) & (pts[:, 1] <= mesh.y1 + ey))
+    out = np.full((pts.shape[0], 2), np.nan)
+    if not ok.any():
+        return out
+    q = pts[ok]
+    je = np.clip(np.floor((q[:, 0] - mesh.x0) / ex).astype(int), 0, mesh.n_elem_x - 1)
+    ie = np.clip(np.floor((q[:, 1] - mesh.y0) / ey).astype(int), 0, mesh.n_elem_y - 1)
+    e = ie * mesh.n_elem_x + je
+    x_min = mesh.x0 + je * ex
+    y_min = mesh.y0 + ie * ey
+    xi = 2.0 * (q[:, 0] - x_min) / ex - 1.0
+    eta = 2.0 * (q[:, 1] - y_min) / ey - 1.0
+    N = shape_functions_grid(xi, eta)                       # (4, n)
+    nodes = mesh.connectivity[e]                            # (n, 4)
+    out[ok, 0] = np.sum(N.T * U[2 * nodes], axis=1)
+    out[ok, 1] = np.sum(N.T * U[2 * nodes + 1], axis=1)
+    return out
+
+
+def eulerian_midpoint_displacement(mesh: Q4Mesh, dU: np.ndarray,
+                                   n_iter: int = 10) -> np.ndarray:
+    """Increment attributed to the FIXED node positions at the pair midpoint.
+
+    ``dU`` is the incremental field on a fixed (non-convected) mesh: dU(x_n)
+    is the motion, between frames i and i+1, of the material point located
+    at x_n in frame i. The Eulerian increment at x_n and t_{i+1/2} is
+    dU(X) with X + dU(X)/2 = x_n (the material point that is at x_n half-way
+    through the pair), solved by fixed-point iterations within the Q4 space.
+    To first order it equals dU(x_n) - 0.5 grad(dU) . dU. Returns (n_nodes, 2)
+    in px (NaN where dU is NaN)."""
+    X = mesh.nodes.copy()
+    for _ in range(n_iter):
+        d = eval_q4_field(mesh, dU, X)
+        X = mesh.nodes - 0.5 * np.nan_to_num(d, nan=0.0)
+    return eval_q4_field(mesh, dU, X)
+
+
+def _scaled_mesh(mesh: Q4Mesh, factor: float) -> Q4Mesh:
+    """Copy of ``mesh`` with every coordinate multiplied by ``factor`` (same
+    topology). Keeps convected (general) geometries general."""
+    if mesh.axis_aligned:
+        return Q4Mesh(x0=mesh.x0 * factor, y0=mesh.y0 * factor,
+                      x1=mesh.x1 * factor, y1=mesh.y1 * factor,
+                      n_elem_x=mesh.n_elem_x, n_elem_y=mesh.n_elem_y)
+    new = convect_mesh(mesh, np.zeros(mesh.n_dof))
+    new.nodes = mesh.nodes * factor
+    new.x0, new.y0, new.x1, new.y1 = (mesh.x0 * factor, mesh.y0 * factor,
+                                      mesh.x1 * factor, mesh.y1 * factor)
+    new.elem_size_x = mesh.elem_size_x * factor
+    new.elem_size_y = mesh.elem_size_y * factor
+    return new
+
+
+def _local_init(mesh: Q4Mesh, f_raw, g_raw, search: int) -> np.ndarray:
+    """Initial nodal displacement from a local ZNCC correlation at the nodes
+    (subset = element size, odd, >= 5; Gaussian sub-pixel). Nodes where it
+    fails get the median of the valid ones (0 if none)."""
+    from gui.core.dic import correlate_local
+    subset = max(5, int(round(min(mesh.elem_size_x, mesh.elem_size_y))) | 1)
+    d, ok, _ = correlate_local(f_raw, g_raw, mesh.nodes, subset=subset,
+                               search=int(search), zncc_min=0.5,
+                               subpixel_method="gauss")
+    U0 = np.zeros(mesh.n_dof)
+    if ok.any():
+        fill = np.nanmedian(d[ok], axis=0)
+        d = np.where(ok[:, None], d, fill[None, :])
+        U0[0::2] = d[:, 0]
+        U0[1::2] = d[:, 1]
+    return U0
+
 
 def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, float],
                               params: DicGlobalParams, fps: float, mm_per_px: float,
@@ -1017,48 +1453,44 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
     ``exp_field_io`` work unchanged.
 
     The measurement points are the MESH NODES (not a subset grid). Output arrays
-    are (n_pairs, n_nodes); node coordinates x, y are in the model frame (mm).
+    are (n_pairs, n_nodes); node coordinates x, y are in the model frame (mm),
+    at the reference (frame-0) node positions.
 
-    Parameters mirror ``compute_dic_fields`` where they overlap. ``sigma_f`` (if
-    given) enables the analytic per-node displacement uncertainty, returned as
-    extra fields ``sigma_Ux``/``sigma_Uy`` (mm).
+    Kinematic description of the per-pair fields (``description`` key):
+      - incremental, fixed mesh  -> 'eulerian_fixed_nodes': dU(x_n) is the
+        motion over the pair of the material point at x_n in frame i. The
+        extra fields Vx_eul/Vy_eul give the velocity attributed to the fixed
+        node at the pair midpoint (see ``eulerian_midpoint_displacement``),
+        the quantity to compare with a velocity on a fixed spatial grid.
+      - incremental, convected   -> 'lagrangian_reference_nodes': values
+        labelled by the reference node, measured at its convected position.
+      - total                    -> 'lagrangian_frame0': Ux/Uy are the total
+        displacement from frame 0; velocities and strain rates come from the
+        difference of consecutive totals (they were total / dt before).
 
-    ``progress(i_done, n_pairs)`` is the simple progress callback shared with the
-    local engine. ``on_frame(info)`` is an optional detailed callback invoked
-    once per completed pair with a dict::
+    ``progress(i_done, n_pairs)`` / ``on_frame(info)`` as before; ``info``
+    also carries 'stop_reason' and 'n_backtracks'.
 
-        {'index': i, 'n_pairs': N, 'n_iter': k, 'residual': r,
-         'converged': bool, 'elapsed_s': float, 'frame_s': float}
-
-    where ``frame_s`` is the wall-clock time of that pair and ``elapsed_s`` the
-    cumulative time since the start. It is meant to drive a status log and an
-    ETA in the UI; it has no effect on the computation.
-
-    Returns a dict with keys: x, y, t, valid, grid (None for an FE mesh),
-    fields, units, plus 'mesh' (the Q4Mesh) for downstream use.
-
-    Notes
-    -----
-    - Displacement sign: image y points down, model y points up, so
-      ``Uy_model = -uy_pixel * mm_per_px`` (as in the local engine).
-    - Strain components: a y-axis flip negates the cross derivative once, so the
-      tensorial ``eps_xy`` changes sign while ``eps_xx``/``eps_yy`` are
-      unchanged; ``eps_vm`` is invariant. We negate ``Exy`` on output to express
-      it in the model frame, consistent with the displacement convention.
-    - Only the INSTANTANEOUS strain rates (``Exx_dot``/``Eyy_dot``/``Exy_dot``/
-      ``Eeq_dot``) are produced; cumulated strain is omitted to match the local
-      engine (no physical meaning once material leaves the field of view).
-    - 'incremental' vs total and the U_init strategy follow ``params`` (they
-      still set which reference frame each pair uses).
+    Returns a dict with keys: x, y, t, valid (per node: converged AND finite
+    displacement), grid (None), fields, units, mesh, description, and the
+    mesh / diagnostics needed for export: nodes_px (n_nodes, 2),
+    connectivity (n_elem, 4), elem_size, n_iter, converged, stop_reason,
+    residual_final (n_pairs,), residual_elem (n_pairs, n_elem), elem_fields
+    (dict of (n_pairs, n_elem) element-mean strain rates, unsmoothed).
     """
     n_img = len(frames)
     if n_img < 2:
         raise ValueError("need a sequence of at least 2 frames")
     if params.variant not in ("standard", "hild"):
         raise ValueError("params.variant must be 'standard' or 'hild'")
+    convect = bool(getattr(params, "convect", False))
+    if convect and not params.incremental:
+        raise ValueError("convect requires the incremental pattern (the total "
+                         "pattern already measures from frame 0)")
 
     mesh = build_mesh_on_roi(roi, params.elem_size)
     n_nodes = mesh.n_nodes
+    n_elem = mesh.n_elements
     n_pairs = n_img - 1
     dt = 1.0 / fps if fps else 1.0
 
@@ -1068,23 +1500,37 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
     x_mm = xy[:, 0]
     y_mm = xy[:, 1]
 
+    eulerian = params.incremental and not convect
+    description = ("eulerian_fixed_nodes" if eulerian else
+                   "lagrangian_reference_nodes" if convect else
+                   "lagrangian_frame0")
     names = ["Ux", "Uy", "Umag", "Vx", "Vy", "Vmag",
              "Exx_dot", "Eyy_dot", "Exy_dot", "Eeq_dot", "residual"]
+    if eulerian:
+        names += ["Vx_eul", "Vy_eul"]
     want_sigma = sigma_f is not None
     if want_sigma:
         names += ["sigma_Ux", "sigma_Uy"]
     fields = {k: np.full((n_pairs, n_nodes), np.nan) for k in names}
+    elem_fields = {k: np.full((n_pairs, n_elem), np.nan)
+                   for k in ("Exx_dot", "Eyy_dot", "Exy_dot")}
+    residual_elem = np.full((n_pairs, n_elem), np.nan)
+    residual_final = np.full(n_pairs, np.nan)
+    n_iter = np.zeros(n_pairs, int)
+    converged = np.zeros(n_pairs, bool)
+    stop_reason = [""] * n_pairs
     valid = np.zeros((n_pairs, n_nodes), bool)
     t = np.zeros(n_pairs)
 
     f0_raw = frames[0] if not params.incremental else None
     U_prev: Optional[np.ndarray] = None
+    U_total_prev = np.zeros(mesh.n_dof)        # total pattern: previous total
     t_start = time.perf_counter()
-    use_pyramid = int(getattr(params, "pyramid_levels", 1)) > 1
     tool_poly = getattr(params, "tool_polygon", None)
     has_tool = tool_poly is not None and len(tool_poly) >= 3
     use_mask = bool(getattr(params, "mask_enabled", False)) or has_tool
-    convect = bool(getattr(params, "convect", False))
+    min_std_rel = float(getattr(params, "min_std_rel", 0.0) or 0.0)
+    init_search = int(getattr(params, "init_search", 0) or 0)
     U_cumul = np.zeros(mesh.n_dof)             # accumulated nodal displacement
 
     for i in range(n_pairs):
@@ -1096,12 +1542,12 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
             f_raw = f0_raw
             g_raw = frames[i + 1]
 
-        # Lagrangian convection: solve on the mesh displaced by the cumulated
-        # displacement of the previous pairs, so nodes follow the material.
+        # Lagrangian convection (incremental only): solve on the mesh
+        # displaced by the cumulated displacement, so nodes follow the material.
         mesh_calc = convect_mesh(mesh, U_cumul) if convect else mesh
 
         # Per-pair element validity: material coverage (intensity threshold
-        # AND outside the tool polygon) and, when convecting, the Jacobian sign.
+        # AND outside the tool polygon), texture, and the Jacobian sign.
         valid_elements = None
         if use_mask:
             min_int = (params.mask_min_intensity
@@ -1109,66 +1555,96 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
             mat = material_mask(f_raw, min_int, tool_poly if has_tool else None)
             valid_elements = element_coverage_mask(
                 mesh_calc, mat, params.coverage_threshold)
+        if min_std_rel > 0:
+            tex = element_texture_mask(mesh_calc, f_raw, min_std_rel)
+            valid_elements = tex if valid_elements is None else (valid_elements & tex)
         if convect:
             jac_ok = check_jacobian(mesh_calc)
             valid_elements = jac_ok if valid_elements is None else (
                 valid_elements & jac_ok)
 
-        U_init = U_prev if (params.u_init_previous and U_prev is not None) else None
-
-        if use_pyramid:
-            # The multi-scale solver normalises each pyramid level itself.
-            sol = multiscale_newton_raphson(
-                mesh=mesh_calc, f=f_raw, g=g_raw,
-                n_levels=int(params.pyramid_levels),
-                sigma=float(params.pyramid_sigma), U_init=U_init,
-                max_iter=params.max_iter, tol=params.tol,
-                variant=params.variant, sigma_f=sigma_f,
-                reg_rel=params.reg_rel, valid_elements=valid_elements)
+        if init_search > 0:
+            U_init = _local_init(mesh_calc, f_raw, g_raw, init_search)
+        elif params.u_init_previous and U_prev is not None:
+            U_init = U_prev
         else:
-            sol = newton_raphson(
-                mesh=mesh_calc, interp_g=BicubicInterpolator(normalize_image(g_raw)),
-                f=normalize_image(f_raw), U_init=U_init,
-                max_iter=params.max_iter, tol=params.tol, variant=params.variant,
-                sigma_f=sigma_f, reg_rel=params.reg_rel,
-                valid_elements=valid_elements)
-        U = sol["U"]                            # displacement of this pair
+            U_init = None
+
+        # One code path for single- and multi-scale (normalisation on the ROI).
+        sol = multiscale_newton_raphson(
+            mesh=mesh_calc, f=f_raw, g=g_raw,
+            n_levels=max(1, int(getattr(params, "pyramid_levels", 1))),
+            sigma=float(getattr(params, "pyramid_sigma", 1.0)), U_init=U_init,
+            max_iter=params.max_iter, tol=params.tol, variant=params.variant,
+            sigma_f=sigma_f, reg_rel=params.reg_rel,
+            valid_elements=valid_elements,
+            grey_correction=bool(getattr(params, "grey_correction", True)))
+        U = sol["U"]                            # measured displacement
         U_prev = U
+        if params.incremental:
+            dU_pair = U                         # increment i -> i+1
+        else:
+            dU_pair = U - U_total_prev          # total(i+1) - total(i)
+            U_total_prev = np.nan_to_num(U, nan=0.0)
         if convect:
-            # Accumulate for the next pair's convection (orphan NaN -> 0).
             U_cumul = U_cumul + np.nan_to_num(U, nan=0.0)
 
         ux_px, uy_px = nodal_displacements(U)
+        dux_px, duy_px = nodal_displacements(dU_pair)
         ux_mm = ux_px * mm_per_px
         uy_mm = -uy_px * mm_per_px              # image y down -> model y up
-
+        vx = dux_px * mm_per_px / dt
+        vy = -duy_px * mm_per_px / dt
         fields["Ux"][i] = ux_mm
         fields["Uy"][i] = uy_mm
         fields["Umag"][i] = np.hypot(ux_mm, uy_mm)
-        fields["Vx"][i] = ux_mm / dt
-        fields["Vy"][i] = uy_mm / dt
-        fields["Vmag"][i] = np.hypot(ux_mm, uy_mm) / dt
+        fields["Vx"][i] = vx
+        fields["Vy"][i] = vy
+        fields["Vmag"][i] = np.hypot(vx, vy)
+        if eulerian:
+            d_eul = eulerian_midpoint_displacement(mesh, dU_pair)
+            fields["Vx_eul"][i] = d_eul[:, 0] * mm_per_px / dt
+            fields["Vy_eul"][i] = -d_eul[:, 1] * mm_per_px / dt
 
-        st = compute_strains_at_nodes(U, mesh_calc)
+        # Strain RATES from the increment of the pair.
+        st = compute_strains_at_nodes(dU_pair, mesh_calc, valid_elements,
+                                      return_elements=True)
         exx = st["eps_xx"]
         eyy = st["eps_yy"]
         exy = -st["eps_xy"]                     # model-frame sign (see notes)
-        # Instantaneous strain rates only; cumulated strain is omitted to match
-        # the local engine (no physical meaning once material leaves the FOV).
         fields["Exx_dot"][i] = exx / dt
         fields["Eyy_dot"][i] = eyy / dt
         fields["Exy_dot"][i] = exy / dt
         fields["Eeq_dot"][i] = _equiv(exx, eyy, exy) / dt
+        elem_fields["Exx_dot"][i] = st["elem_eps_xx"] / dt
+        elem_fields["Eyy_dot"][i] = st["elem_eps_yy"] / dt
+        elem_fields["Exy_dot"][i] = -st["elem_eps_xy"] / dt
 
-        res = sol["residuals"][-1] if sol["residuals"] else np.nan
-        fields["residual"][i] = res
+        # Residual at the returned U: per element, and per node (mean of the
+        # adjacent measured elements).
+        erms = sol.get("elem_rms")
+        if erms is not None:
+            residual_elem[i] = erms
+            acc = np.zeros(n_nodes)
+            cnt = np.zeros(n_nodes)
+            for e in range(n_elem):
+                if np.isfinite(erms[e]):
+                    acc[mesh.connectivity[e]] += erms[e]
+                    cnt[mesh.connectivity[e]] += 1
+            with np.errstate(invalid="ignore", divide="ignore"):
+                fields["residual"][i] = np.where(cnt > 0, acc / cnt, np.nan)
+        res = sol.get("residual_final")
+        residual_final[i] = res if res is not None else np.nan
 
         if want_sigma and sol["sigma_u"] is not None:
             su = sol["sigma_u"]
             fields["sigma_Ux"][i] = su[0::2] * mm_per_px
             fields["sigma_Uy"][i] = su[1::2] * mm_per_px
 
-        valid[i] = sol["converged"]
+        converged[i] = bool(sol["converged"])
+        n_iter[i] = int(sol["n_iter"])
+        stop_reason[i] = str(sol.get("stop_reason"))
+        valid[i] = converged[i] & np.isfinite(ux_px) & np.isfinite(uy_px)
         t[i] = trigger_offset_s + (i + 0.5) * dt
 
         if progress is not None:
@@ -1177,8 +1653,11 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
             now = time.perf_counter()
             on_frame({"index": i, "n_pairs": n_pairs,
                       "n_iter": sol["n_iter"],
-                      "residual": float(res) if np.isfinite(res) else None,
+                      "residual": (float(residual_final[i])
+                                   if np.isfinite(residual_final[i]) else None),
                       "converged": bool(sol["converged"]),
+                      "stop_reason": stop_reason[i],
+                      "n_backtracks": int(sol.get("n_backtracks", 0) or 0),
                       "elapsed_s": now - t_start,
                       "frame_s": now - t_frame0})
 
@@ -1186,9 +1665,20 @@ def compute_dic_global_fields(frames: Sequence, roi: Tuple[float, float, float, 
              "Vx": "mm/s", "Vy": "mm/s", "Vmag": "mm/s",
              "Exx_dot": "1/s", "Eyy_dot": "1/s", "Exy_dot": "1/s", "Eeq_dot": "1/s",
              "residual": "-"}
+    if eulerian:
+        units["Vx_eul"] = "mm/s"
+        units["Vy_eul"] = "mm/s"
     if want_sigma:
         units["sigma_Ux"] = "mm"
         units["sigma_Uy"] = "mm"
 
     return {"x": x_mm, "y": y_mm, "t": t, "valid": valid, "grid": None,
-            "fields": fields, "units": units, "mesh": mesh}
+            "fields": fields, "units": units, "mesh": mesh,
+            "description": description,
+            "nodes_px": mesh.nodes.copy(),
+            "connectivity": mesh.connectivity.copy(),
+            "elem_size": float(params.elem_size),
+            "n_iter": n_iter, "converged": converged,
+            "stop_reason": stop_reason,
+            "residual_final": residual_final, "residual_elem": residual_elem,
+            "elem_fields": elem_fields}

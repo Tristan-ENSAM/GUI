@@ -140,8 +140,10 @@ class _DicGlobalWorker(QThread):
         res_txt = ("%.3e" % res) if res is not None else "n/a"
         self.sig_log.emit(
             "Frame %d/%d | %d iter | residual %s | %s | %.2f s/frame | ETA %s"
-            % (i, n, info["n_iter"], res_txt, conv, info["frame_s"],
-               _fmt_eta(eta)))
+            % (i, n, info["n_iter"], res_txt,
+               conv if info["converged"] else
+               "%s (%s)" % (conv, info.get("stop_reason") or "?"),
+               info["frame_s"], _fmt_eta(eta)))
         _raise_if_cancelled(self, info)
 
     def run(self):
@@ -515,6 +517,23 @@ class DICTab(QWidget):
                                    "(sigma_Ux/sigma_Uy) from Cov = 2 sigma_f^2 "
                                    "[H]^-1. Needs the image noise sigma_f from "
                                    "the Noise tab (not implemented yet).")
+        self.sp_init_search = QSpinBox(); self.sp_init_search.setRange(0, 100)
+        self.sp_init_search.setValue(0); self.sp_init_search.setSuffix(" px")
+        self.sp_init_search.setSpecialValueText("off")
+        self.sp_init_search.setToolTip(
+            "Initialise each image pair by a local ZNCC correlation at the "
+            "nodes (half search range in px). Extends the capture range "
+            "beyond the Gauss-Newton basin (about the speckle size, x2 per "
+            "pyramid level). Off = zero / previous-pair initialisation.")
+        self.lbl_init_search = QLabel("Local init:")
+        self.chk_grey = QCheckBox("Grey-level correction (gain/offset)")
+        self.chk_grey.setChecked(True)
+        self.chk_grey.setToolTip(
+            "Estimate a global brightness gain and offset over the ROI with "
+            "the displacement (native level), for illumination changes "
+            "between frames.")
+        self._global_widgets += [self.lbl_init_search, self.sp_init_search,
+                                 self.chk_grey]
         self._global_widgets += [self.lbl_elem, self.sp_elem,
                                  self.lbl_variant, self.cb_variant,
                                  self.lbl_pattern, self.cb_pattern,
@@ -554,7 +573,19 @@ class DICTab(QWidget):
         self.chk_mask.toggled.connect(self._update_engine_summary)
         self.chk_uinit.toggled.connect(self._update_engine_summary)
         self.chk_convect.toggled.connect(self._update_engine_summary)
+        self.cb_pattern.currentIndexChanged.connect(self._sync_convect_enabled)
+        self.sp_init_search.valueChanged.connect(self._update_engine_summary)
         self._set_global_visible(False)        # local by default
+
+    def _sync_convect_enabled(self, *_):
+        """Convection requires the incremental pattern (the engine refuses
+        total + convect): disable and clear it for the total pattern."""
+        if not hasattr(self, "chk_convect"):
+            return
+        incremental = bool(self.cb_pattern.currentData())
+        if not incremental:
+            self.chk_convect.setChecked(False)
+        self.chk_convect.setEnabled(incremental and not getattr(self, "_roi_locked", False))
 
     def _snap_subset_odd(self, v):
         """Keep the subset odd (the engine rejects an even side)."""
@@ -586,6 +617,8 @@ class DICTab(QWidget):
         grid.addWidget(self.lbl_pyr_sigma, 3, 2); grid.addWidget(self.sp_pyr_sigma, 3, 3)
         grid.addWidget(self.lbl_coverage, 4, 0); grid.addWidget(self.sp_coverage, 4, 1)
         grid.addWidget(self.chk_convect, 5, 0, 1, 4)
+        grid.addWidget(self.lbl_init_search, 7, 0); grid.addWidget(self.sp_init_search, 7, 1)
+        grid.addWidget(self.chk_grey, 7, 2, 1, 2)
         grid.addWidget(self.chk_uncert, 6, 0, 1, 4)
         outer.addWidget(eng)
 
@@ -626,6 +659,8 @@ class DICTab(QWidget):
                       int(self.sp_pyr_levels.value())))
             if self.chk_convect.isChecked():
                 txt += " \u00b7 convect"
+            if int(self.sp_init_search.value()) > 0:
+                txt += " \u00b7 init \u00b1%d" % int(self.sp_init_search.value())
         else:
             txt = ("Local \u00b7 subset %d \u00b7 step %d \u00b7 search %d \u00b7 "
                    "ZNCC\u2265%.2f \u00b7 %s" % (int(self.sp_subset.value()),
@@ -744,7 +779,10 @@ class DICTab(QWidget):
             mask_enabled=bool(self.chk_mask.isChecked()),
             mask_min_intensity=float(self.sld_int.value()),
             coverage_threshold=float(self.sp_coverage.value()),
-            convect=bool(self.chk_convect.isChecked()),
+            convect=bool(self.chk_convect.isChecked()
+                         and self.cb_pattern.currentData()),
+            init_search=int(self.sp_init_search.value()),
+            grey_correction=bool(self.chk_grey.isChecked()),
             tool_polygon=tool_poly)
 
     def _load_from_session(self):
@@ -1080,12 +1118,15 @@ class DICTab(QWidget):
             "cb_engine", "sp_subset", "sp_step", "sp_search", "sp_zncc",
             "cb_subpix",
             "chk_mask", "sld_int", "sp_bits",
-            "sp_elem", "cb_variant", "cb_pattern", "chk_uinit", "chk_uncert",
+            # chk_uncert stays disabled (not wired: no sigma_f source yet)
+            "sp_elem", "cb_variant", "cb_pattern", "chk_uinit",
             "sp_maxiter", "sp_tol", "sp_pyr_levels", "sp_pyr_sigma",
-            "sp_coverage", "chk_convect")]
+            "sp_coverage", "chk_convect", "sp_init_search", "chk_grey")]
         for w in widgets:
             if w is not None:
                 w.setEnabled(not lock)
+        if not lock:
+            self._sync_convect_enabled()
 
     def _on_validate(self, on):
         if on and self._roi is None:
@@ -1307,9 +1348,24 @@ class DICTab(QWidget):
         f = r["fields"]
         extra = {k: v for k, v in f.items()
                  if k not in ("Vx", "Vy", "Vmag")}
+        mesh = None
+        if "connectivity" in r:              # global Q4: measurement mesh
+            mesh = {"nodes_px": r["nodes_px"],
+                    "connectivity": r["connectivity"],
+                    "elem_size": np.asarray(r["elem_size"]),
+                    "n_iter": r["n_iter"], "converged": r["converged"],
+                    "residual_final": r["residual_final"],
+                    "residual_elem": r["residual_elem"]}
+            for k, v in r.get("elem_fields", {}).items():
+                mesh["elem_" + k] = v
+        meta = dict(self._result_meta or {})
+        if "description" in r:
+            meta["description"] = r["description"]
+            meta["stop_reason"] = list(r.get("stop_reason", []))
         p = save_dic_field(path, r["x"], r["y"], r["t"],
                            f["Vx"], f["Vy"], f["Vmag"], r["valid"],
-                           meta=self._result_meta, extra=extra, units=r["units"])
+                           meta=meta, extra=extra, units=r["units"],
+                           mesh=mesh)
         self.session.dic_field_path = str(p)
         return p
 
@@ -1324,7 +1380,12 @@ class DICTab(QWidget):
             QMessageBox.warning(self, "Import", "Could not load:\n%s" % e)
             return
         skip = {"x", "y", "t", "valid", "meta"}
-        comps = {k: d[k] for k in d if k not in skip}
+        n_t = np.asarray(d["t"]).size
+        n_p = np.asarray(d["x"]).size
+        # viewer components: (n_frames, n_points) fields only (the global
+        # engine also stores its mesh and per-element arrays as mesh_*)
+        comps = {k: d[k] for k in d if k not in skip
+                 and np.ndim(d[k]) == 2 and np.shape(d[k]) == (n_t, n_p)}
         units = d.get("meta", {}).get("units", {})
         self.viewer.set_field(d["x"], d["y"], d["t"], comps,
                               valid=d.get("valid"), units=units)
