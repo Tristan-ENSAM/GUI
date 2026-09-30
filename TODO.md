@@ -88,8 +88,8 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
       proportionnel au pas ; T_max/PEEQ_max limités aux éléments extraits).
     - Warm-up réglable (fraction de l'historique d'effort ignorée),
       enregistré dans `config.json`.
-    - Generate refuse un pas qui sort de [Min, Max] (points réellement
-      évalués selon le schéma).
+    - Generate avertit (sans bloquer) si un pas sort de [Min, Max]
+      (points réellement évalués selon le schéma).
     - Le plan est abandonné dès qu'on modifie ce dont il dépend (tableau,
       QoI, champs, méthode/schéma/N/niveaux, valeur modèle d'un paramètre
       varié) ; champs ROI figés à la génération.

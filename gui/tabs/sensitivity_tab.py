@@ -786,6 +786,7 @@ class SensitivityTab(QWidget):
 
     def _on_generate(self):
         method = self._method()
+        outside = []
         try:
             qois = self._selected_qoi_specs()
             field_vars = self._selected_field_vars()
@@ -817,12 +818,8 @@ class SensitivityTab(QWidget):
                 if not selected:
                     self._warn("Tick at least one parameter to vary.")
                     return
+                # Not blocking: the plan is built, the status line warns.
                 outside = self._outside_trust_region(selected)
-                if outside:
-                    self._warn("Ref ± Delta leaves the [Min, Max] trust "
-                               "region for: %s. Reduce Delta or widen "
-                               "Min/Max." % ", ".join(outside))
-                    return
                 plan = jac.build_plan(selected, scheme=self._scheme(),
                                       temp_unit=self._temp_unit(),
                                       unit_system=self._table_units)
@@ -855,6 +852,11 @@ class SensitivityTab(QWidget):
                 "(%s). Ready for the run step." % (
                     self._scheme(), plan.k, plan.n_runs, len(qoi_names),
                     ", ".join(qoi_names) if qoi_names else "—"))
+            if outside:
+                self.status.setStyleSheet("color: #b45309;")
+                self.status.setText(
+                    self.status.text() + "  Warning: Ref ± Delta leaves the "
+                    "[Min, Max] trust region for %s." % ", ".join(outside))
         self._show_preview(plan)
         self.btn_run.setEnabled(True)
         self.tabs_out.setCurrentWidget(self.preview)

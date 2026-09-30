@@ -181,7 +181,7 @@ def test_cutting_speed_follows_velocity_unit():
 # ---------------------------------------------------------------------------
 # Tab: trust region, plan invalidation, warm-up, estimate
 # ---------------------------------------------------------------------------
-def test_generate_refuses_step_outside_trust_region(qapp):
+def test_generate_warns_when_step_leaves_trust_region(qapp):
     from PySide6.QtCore import Qt
     from gui.tabs.sensitivity_tab import SensitivityTab
     tab = SensitivityTab(ModelConfig())
@@ -191,11 +191,14 @@ def test_generate_refuses_step_outside_trust_region(qapp):
     ref = tab._cell_float(r, 2)
     tab.table.item(r, 5).setText(repr(2.0 * (hi - ref)))  # Ref+Delta > Max
     tab._on_generate()
-    assert tab.plan is None and "trust region" in tab.status.text()
+    # Not blocking: the plan exists, the status line warns.
+    assert tab.plan is not None and tab.btn_run.isEnabled()
+    assert "trust region" in tab.status.text()
+    assert S_A.label in tab.status.text()
     tab.cb_scheme.setCurrentText("backward")      # only Ref - Delta used
     tab.table.item(r, 3).setText(repr(ref - 3.0 * (hi - ref)))
     tab._on_generate()
-    assert tab.plan is not None
+    assert tab.plan is not None and "trust region" not in tab.status.text()
 
 
 @pytest.mark.parametrize("edit", ["qoi", "field", "scheme", "table"])
