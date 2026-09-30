@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QCheckBox, QPlainTextEdit, QAbstractItemView, QSplitter, QComboBox,
-    QProgressBar, QTabWidget, QFileDialog, QSlider,
+    QProgressBar, QTabWidget, QFileDialog, QSlider, QDoubleSpinBox,
 )
 from PySide6.QtCore import QThread, QTimer
 
@@ -76,6 +76,7 @@ class SensitivityTab(QWidget):
         self.plan = None                 # last generated JacobianPlan
         self.plan_kind = "jacobian"
         self.selected_qois = []          # list[QoISpec]
+        self.plan_field_vars = []        # ROI fields chosen with the plan
         self._thread = None              # QThread for the run worker
         self._worker = None              # SensitivityRunWorker
         self._last_result = None         # rc.RunResult
@@ -89,7 +90,8 @@ class SensitivityTab(QWidget):
         self._per_frame_sec = None       # measured wall-clock between two frames
         self._cur_frame = None           # (current, total) for the running run
         self._run_t0 = {}                # run index -> monotonic start
-        self._run_durations = []         # measured durations of finished runs
+        self._run_durations = []         # durations of SUCCESSFUL finished runs
+        self._n_finished = 0             # finished runs, successful or not
         self._running_index = None       # index of the run in progress
         self._run_workdir = None         # workdir of the active run batch
         self._run_total = 0
@@ -97,6 +99,7 @@ class SensitivityTab(QWidget):
         self._row_spec = {}              # table row -> ParamSpec
         self._table_units = None         # UnitSystem the table is shown in
         self._run_field_vars = None      # ROI fields of the active/last run
+        self._run_plan = None            # plan of the active/last run
         self._map_mesh = None            # (nodes_xy, face_idx) of the maps
         self._map_extra = {}             # centroids / frame times for export
         self._maps_thread = None         # background map export
@@ -149,6 +152,7 @@ class SensitivityTab(QWidget):
         self.cb_method.addItems(["Jacobian (finite differences)",
                                  "Morris (global screening)"])
         self.cb_method.currentIndexChanged.connect(self._on_method_changed)
+        self.cb_method.currentIndexChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.cb_method)
         method_row.addSpacing(16)
 
@@ -158,6 +162,7 @@ class SensitivityTab(QWidget):
         self.cb_scheme = QComboBox()
         self.cb_scheme.addItems(["central", "forward", "backward"])
         self.cb_scheme.currentIndexChanged.connect(self._update_cost)
+        self.cb_scheme.currentIndexChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.cb_scheme)
 
         # Morris-only controls
@@ -170,6 +175,7 @@ class SensitivityTab(QWidget):
             "Number of Morris trajectories. Total runs = N × (k+1) for k\n"
             "parameters. 10–20 is typical for screening.")
         self.spin_traj.valueChanged.connect(self._update_cost)
+        self.spin_traj.valueChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.spin_traj)
         self.lbl_levels = QLabel("Grid levels:")
         method_row.addWidget(self.lbl_levels)
@@ -177,6 +183,7 @@ class SensitivityTab(QWidget):
         self.spin_levels.setRange(2, 20)
         self.spin_levels.setValue(4)
         self.spin_levels.setToolTip("Morris grid levels p (4 is the common default).")
+        self.spin_levels.valueChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.spin_levels)
 
         self.lbl_hint = QLabel("step = Delta per parameter")
@@ -193,18 +200,35 @@ class SensitivityTab(QWidget):
             cb = QCheckBox("%s  [%s]" % (q.label, q.unit))
             cb.setChecked(q.id in _DEFAULT_QOIS)
             self._qoi_checks[q.id] = cb
+            cb.toggled.connect(self._mark_plan_stale)
             qg.addWidget(cb, i // 2, i % 2)
+        wrow = QHBoxLayout()
+        wrow.addWidget(QLabel("Warm-up (force history):"))
+        self.spin_warmup = QDoubleSpinBox()
+        self.spin_warmup.setRange(0.0, 0.9)
+        self.spin_warmup.setSingleStep(0.05)
+        self.spin_warmup.setDecimals(2)
+        self.spin_warmup.setValue(0.0)
+        self.spin_warmup.setToolTip(
+            "Fraction of the RF1/RF2 history ignored at the start (tool\n"
+            "entering the material) before the force QoI are computed\n"
+            "(mean AND max). 0 = use the whole signal. Field QoI (T_max,\n"
+            "PEEQ_max) are not affected. Applied when the run is analysed.")
+        wrow.addWidget(self.spin_warmup)
+        wrow.addStretch(1)
+        qg.addLayout(wrow, (len(qoi_mod.REGISTRY) + 1) // 2, 0, 1, 2)
         bl.addWidget(qoi_box)
 
         # Field QoI: screen how much each parameter moves whole Eulerian
         # fields in the ROI (SSD vs the base run). Jacobian only.
-        field_box = QGroupBox("Field QoI in the ROI (SSD vs base run)")
+        field_box = QGroupBox("Field QoI in the ROI (SSD, same FD scheme)")
         fg = QHBoxLayout(field_box)
         self._field_checks = {}
         for var, label in (("EVF", "EVF (chip)"), ("V", "V (flow)"),
                            ("TEMP", "TEMP")):
             cb = QCheckBox(label)
             self._field_checks[var] = cb
+            cb.toggled.connect(self._mark_plan_stale)
             fg.addWidget(cb)
         fg.addStretch(1)
         bl.addWidget(field_box)
@@ -272,8 +296,26 @@ class SensitivityTab(QWidget):
         crow.addWidget(QLabel("QoI:"))
         self.cb_chart_qoi = QComboBox()
         self.cb_chart_qoi.currentIndexChanged.connect(self._draw_chart)
-        crow.addWidget(self.cb_chart_qoi); crow.addStretch(1)
+        crow.addWidget(self.cb_chart_qoi)
+        self.lbl_chart_rank = QLabel("Rank by:")
+        crow.addWidget(self.lbl_chart_rank)
+        self.cb_chart_rank = QComboBox()
+        self.cb_chart_rank.addItem("Sensitivity (as set per row)",
+                                   "sensitivity")
+        self.cb_chart_rank.addItem("Elasticity (dimensionless)", "elasticity")
+        self.cb_chart_rank.setToolTip(
+            "Sensitivity: dQ/dx in QoI unit per parameter unit, or the "
+            "elasticity where Norm is ticked.\nElasticity: (dQ/Q)/(dx/x), "
+            "comparable across parameters of different units (temperatures "
+            "in kelvin).")
+        self.cb_chart_rank.currentIndexChanged.connect(self._draw_chart)
+        crow.addWidget(self.cb_chart_rank)
+        crow.addStretch(1)
         cv.addLayout(crow)
+        self.lbl_chart_note = QLabel("")
+        self.lbl_chart_note.setWordWrap(True)
+        self.lbl_chart_note.setStyleSheet("color: #b45309;")
+        cv.addWidget(self.lbl_chart_note)
         self._fig = Figure(figsize=(5, 3))
         self._canvas = FigureCanvas(self._fig)
         cv.addWidget(self._canvas, 1)
@@ -295,8 +337,7 @@ class SensitivityTab(QWidget):
         self.chk_map_signed = QCheckBox("Signed")
         self.chk_map_signed.setChecked(True)
         self.chk_map_signed.setToolTip(
-            "Signed: central difference (F+ - F-)/(2\u03b4) per element, shows "
-            "direction (diverging colour). Off: magnitude |dF/d\u03b8| (sequential).")
+            self._signed_tooltip("central"))
         mrow.addWidget(self.chk_map_signed)
         self.chk_map_aggregate = QCheckBox("Aggregate over time")
         self.chk_map_aggregate.setToolTip(
@@ -431,6 +472,8 @@ class SensitivityTab(QWidget):
 
     def _on_item_changed(self, item):
         col = item.column()
+        if col in (0, 3, 4, 5, 6, 7):      # anything the plan is built from
+            self._mark_plan_stale()
         if col == 0:                       # "vary" checkbox toggled
             self._update_cost()
             return
@@ -506,6 +549,9 @@ class SensitivityTab(QWidget):
         Called by MainWindow when Sensitivity becomes the visible page
         (showEvent is unreliable for a doubly-nested tab page)."""
         self._resync_reference_values()   # mirror the current Numerical Model
+        if self._plan_base_changed():
+            self._mark_plan_stale(reason="a varied parameter's model value "
+                                  "changed")
         self._update_cost()          # refresh CPU mirror + cost estimate
 
     def _resync_reference_values(self):
@@ -589,6 +635,34 @@ class SensitivityTab(QWidget):
         plan_units = getattr(self.plan, "unit_system", None)
         return (plan_units is not None
                 and plan_units != pr.current_system(self._temp_unit()))
+
+    def _mark_plan_stale(self, *_, reason="the settings changed"):
+        """Discard the generated plan when anything it was built from is
+        edited (table, QoI, fields, method settings, model values): running
+        it would silently use the old selection. Never during a run."""
+        if self.plan is None or self._thread is not None:
+            return
+        self.plan = None
+        self.btn_run.setEnabled(False)
+        self.preview.clear()
+        self._warn("Plan discarded because %s since it was generated: "
+                   "generate it again." % reason)
+
+    def _plan_base_changed(self) -> bool:
+        """True if a varied parameter's model value (the Jacobian base point)
+        is no longer the one the plan was generated from."""
+        plan = self.plan
+        if plan is None or self.plan_kind != "jacobian":
+            return False
+        for spec, x0 in zip(plan.specs, plan.base):
+            try:
+                now = pr.get_display(self.cfg, spec, plan.temp_unit,
+                                     system=plan.unit_system)
+            except Exception:
+                return True
+            if abs(now - x0) > 1e-9 * max(1.0, abs(x0)):
+                return True
+        return False
 
     def _invalidate_plan_if_units_changed(self):
         # Never while a campaign runs: the worker and the maps still use it.
@@ -681,6 +755,28 @@ class SensitivityTab(QWidget):
             selected.append((spec, x0, delta, norm))
         return selected
 
+    def _outside_trust_region(self, selected):
+        """Labels of the parameters whose FD points leave [Min, Max]. Only
+        the points the scheme evaluates count (forward: Ref+Delta,
+        backward: Ref-Delta, central: both)."""
+        scheme = self._scheme()
+        rows = {spec.path: r for r, spec in self._selected_rows()}
+        bad = []
+        for spec, x0, d, _norm in selected:
+            r = rows.get(spec.path)
+            lo, hi = self._cell_float(r, 3), self._cell_float(r, 4)
+            if lo is None or hi is None:
+                continue
+            pts = []
+            if scheme in ("forward", "central"):
+                pts.append(x0 + d)
+            if scheme in ("backward", "central"):
+                pts.append(x0 - d)
+            tol = 1e-9 * max(1.0, abs(lo), abs(hi))
+            if any(p < lo - tol or p > hi + tol for p in pts):
+                bad.append(spec.label)
+        return bad
+
     def _selected_qoi_specs(self):
         return [q for q in qoi_mod.REGISTRY
                 if self._qoi_checks[q.id].isChecked()]
@@ -721,6 +817,12 @@ class SensitivityTab(QWidget):
                 if not selected:
                     self._warn("Tick at least one parameter to vary.")
                     return
+                outside = self._outside_trust_region(selected)
+                if outside:
+                    self._warn("Ref ± Delta leaves the [Min, Max] trust "
+                               "region for: %s. Reduce Delta or widen "
+                               "Min/Max." % ", ".join(outside))
+                    return
                 plan = jac.build_plan(selected, scheme=self._scheme(),
                                       temp_unit=self._temp_unit(),
                                       unit_system=self._table_units)
@@ -738,6 +840,7 @@ class SensitivityTab(QWidget):
         self.plan = plan
         self.plan_kind = method
         self.selected_qois = qois
+        self.plan_field_vars = list(field_vars)
         qoi_names = [q.id for q in qois] + ["%s[field]" % v for v in field_vars]
         self.status.setStyleSheet("color: #15803d;")
         if method == "morris":
@@ -814,8 +917,7 @@ class SensitivityTab(QWidget):
             _pname = None
         # Morris ignores the ROI fields (Jacobian-only construction): do not
         # record or pass them, so config.json says what was really run.
-        field_vars = (self._selected_field_vars()
-                      if self.plan_kind == "jacobian" else [])
+        field_vars = list(getattr(self, "plan_field_vars", []))
         cpus = self._current_cpus()
         _study_cfg = self._plan_record(field_vars, cpus)
         try:
@@ -828,6 +930,7 @@ class SensitivityTab(QWidget):
         self._run_total = self.plan.n_runs
         self._run_t0 = {}
         self._run_durations = []
+        self._n_finished = 0
         self._running_index = None
         self._per_run_sec = None
         self._per_frame_sec = None
@@ -840,6 +943,7 @@ class SensitivityTab(QWidget):
         self._sta_timer.start()
 
         self._run_field_vars = list(field_vars)
+        self._run_plan = self.plan
         # The worker gets its own copy of the model: it expands the plan in
         # its thread, while the user may keep editing the live cfg here.
         self._worker = SensitivityRunWorker(
@@ -847,6 +951,7 @@ class SensitivityTab(QWidget):
             copy.deepcopy(self.cfg),
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
             workdir=str(wd), cpus=cpus,
+            warmup_frac=float(self.spin_warmup.value()),
             job_prefix="sensitivity", field_vars=field_vars)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -883,6 +988,7 @@ class SensitivityTab(QWidget):
                "qois": [q.id for q in self.selected_qois],
                "field_vars": list(field_vars),
                "cpus": int(cpus),
+               "warmup_frac": float(self.spin_warmup.value()),
                "temp_unit": tu,
                "unit_system": (system.to_dict()
                                if hasattr(system, "to_dict") else None),
@@ -908,7 +1014,8 @@ class SensitivityTab(QWidget):
         if self._worker is not None:
             self._worker.cancel()
             self.status.setStyleSheet("color: #b45309;")
-            self.status.setText("Cancelling after the current run…")
+            self.status.setText("Cancelling: stopping the current Abaqus "
+                                "job, no further run will start…")
             self.btn_cancel.setEnabled(False)
 
     def _on_run_done(self, index, ok):
@@ -926,10 +1033,15 @@ class SensitivityTab(QWidget):
         import time
         now = time.monotonic()
         self._run_total = total
-        # The run that was in progress just finished -> record its duration.
+        # The run that was in progress just finished -> count it, and keep
+        # its duration for the estimate only if it succeeded: a run that dies
+        # at start-up would drag the per-run time down. (runDone, which fills
+        # _failed_live, is emitted before this progress call.)
         if self._running_index is not None and self._running_index in self._run_t0:
+            self._n_finished += 1
             dur = now - self._run_t0[self._running_index]
-            if dur > 0:
+            failed = self._running_index in getattr(self, "_failed_live", [])
+            if dur > 0 and not failed:
                 self._run_durations.append(dur)
                 self._per_run_sec = sum(self._run_durations) / len(self._run_durations)
         # Next run (if any) starts now.
@@ -943,9 +1055,9 @@ class SensitivityTab(QWidget):
         # Smooth bar on a 0..1000 scale (sub-run progress added by _poll_sta).
         self.progress.setRange(0, 1000)
         if total > 0:
-            self.progress.setValue(int(round(len(self._run_durations)
+            self.progress.setValue(int(round(self._n_finished
                                               / total * 1000)))
-        self._update_estimate(len(self._run_durations), total)
+        self._update_estimate(self._n_finished, total)
 
     def _poll_sta(self):
         """Real-time progress of the running run from its .sta file.
@@ -989,7 +1101,7 @@ class SensitivityTab(QWidget):
         if self._run_durations:
             self._per_run_sec = sum(self._run_durations) / len(self._run_durations)
         # Smooth overall progress: finished runs + fraction of the current one.
-        n_done = len(self._run_durations)
+        n_done = self._n_finished
         if self._run_total > 0:
             overall = (n_done + cur_frac) / self._run_total
             self.progress.setRange(0, 1000)
@@ -999,7 +1111,7 @@ class SensitivityTab(QWidget):
     def _update_estimate(self, done, total):
         import time
         elapsed = time.monotonic() - getattr(self, "_run_clock0", time.monotonic())
-        n_done = len(self._run_durations)
+        n_done = self._n_finished
         cur = min(n_done + (1 if self._running_index is not None else 0), total)
         msg = "Run %d/%d" % (cur, total)
         if self._cur_frame is not None and self._running_index is not None:
@@ -1116,7 +1228,7 @@ class SensitivityTab(QWidget):
                       if self._run_field_vars is not None
                       else self._selected_field_vars())
         bundles = getattr(result, "bundles", None)
-        plan = getattr(self, "plan", None)
+        plan = self._run_plan or self.plan    # tests set .plan directly
         if (result.plan_kind != "jacobian" or not field_vars
                 or not bundles or plan is None):
             self._clear_map()
@@ -1170,12 +1282,23 @@ class SensitivityTab(QWidget):
         self.sld_map_frame.setValue(max(0, self._map_n_frames - 1))
         self.sld_map_frame.blockSignals(False)
         self._set_map_controls_enabled(True)
+        self.chk_map_signed.setToolTip(self._signed_tooltip(
+            getattr(plan, "scheme", "central")))
         self.lbl_map_hint.setText(
             "%d parameter(s) \u00d7 %d field(s), %d frame(s). "
-            "Signed = central difference; magnitude = |dF/d\u03b8|."
+            "Signed = %s difference; magnitude = |dF/d\u03b8|."
             % (len(self._map_param_paths), len(self._map_field_vars),
-               self._map_n_frames))
+               self._map_n_frames, getattr(plan, "scheme", "central")))
         self._refresh_map()
+
+    @staticmethod
+    def _signed_tooltip(scheme) -> str:
+        formula = {"central": "(F+ - F-)/(2\u03b4)",
+                   "forward": "(F+ - F0)/\u03b4",
+                   "backward": "(F0 - F-)/\u03b4"}.get(scheme, "dF/d\u03b8")
+        return ("Signed: %s difference %s per element, shows direction "
+                "(diverging colour). Off: magnitude |dF/d\u03b8| "
+                "(sequential)." % (scheme, formula))
 
     def _set_map_mesh(self, bundle, inst):
         """Push the base-run mesh into fv_map. Mirrors ResultsTab: angle-order
@@ -1266,7 +1389,7 @@ class SensitivityTab(QWidget):
         """Snapshot everything the export needs, on the GUI thread, and
         return a no-argument callable that writes the files (safe to run in
         another thread: it only touches these arrays and the disk)."""
-        plan = self.plan
+        plan = self._run_plan or self.plan
         nodes_xy, face_idx = self._map_mesh
         param_info = {}
         for p in self._map_param_paths:
@@ -1293,7 +1416,8 @@ class SensitivityTab(QWidget):
         of the study folder. Runs in a background thread so rendering a few
         dozen images does not freeze the window; `wait=True` (tests) runs it
         inline. The outcome reaches the status line via _mapsExported."""
-        if not self._field_maps or self._map_mesh is None or self.plan is None:
+        if (not self._field_maps or self._map_mesh is None
+                or (self._run_plan or self.plan) is None):
             return
         try:
             job = self._map_export_job(out_dir)
@@ -1439,10 +1563,17 @@ class SensitivityTab(QWidget):
             self._canvas.draw_idle()
             return
         qid = self.cb_chart_qoi.currentText() or result.qoi_ids[0]
-        if result.plan_kind == "jacobian":
-            rows = rc.jacobian_ranking(result, qid)        # [(path, sens)]
+        jacobian = result.plan_kind == "jacobian"
+        self.lbl_chart_rank.setVisible(jacobian)
+        self.cb_chart_rank.setVisible(jacobian)
+        self.lbl_chart_note.setText("")
+        if jacobian:
+            key = self.cb_chart_rank.currentData() or "sensitivity"
+            rows = rc.jacobian_ranking(result, qid, key=key)
             vals = [abs(s) for _, s in rows]
-            xlabel = "|sensitivity|"
+            xlabel = "|%s|" % key
+            if key == "sensitivity":
+                self.lbl_chart_note.setText(self._raw_ranking_note(result, qid))
         else:
             rows = [(p, ms) for p, ms, _ in rc.morris_ranking(result, qid)]
             vals = [ms for _, ms in rows]
@@ -1457,6 +1588,31 @@ class SensitivityTab(QWidget):
         ax.set_xlabel("%s — %s" % (xlabel, qid), fontsize=9)
         self._fig.tight_layout()
         self._canvas.draw_idle()
+
+    def _raw_ranking_note(self, result, qid) -> str:
+        """Warning shown above a raw-sensitivity ranking whose bars are not
+        comparable: parameters in different units, or a mix of raw and
+        normalised rows. Empty when the ranking is homogeneous."""
+        a = result.analyses.get(qid, {})
+        rows = {p: d for p, d in a.items()
+                if isinstance(d, dict) and "sensitivity" in d}
+        if len(rows) < 2:
+            return ""
+        norm = {bool(d.get("normalized")) for d in rows.values()}
+        if len(norm) > 1:
+            return ("Mixed ranking: some rows are elasticities (Norm ticked), "
+                    "others raw derivatives. Rank by elasticity to compare "
+                    "them.")
+        plan = self._run_plan or self.plan
+        if norm == {True} or plan is None:
+            return ""
+        unit_of = {s.path: self._plan_unit(plan, s)
+                   for s in getattr(plan, "specs", [])}
+        if len({unit_of.get(p, "?") for p in rows}) > 1:
+            return ("Parameters have different units: this raw ranking "
+                    "depends on the units chosen. Rank by elasticity to "
+                    "compare them.")
+        return ""
 
     @staticmethod
     def _result_cell(plan_kind, analysis, path):

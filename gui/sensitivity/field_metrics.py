@@ -65,7 +65,12 @@ def field_rel_change_pct(base_field, pert_field) -> float:
     same finite mask is applied to numerator and denominator (only paired,
     finite entries count). Returns NaN if the base field has no finite
     energy on the ROI. Note the count cancels in the ratio, so this equals
-    the relative L2 norm ||pert-base|| / ||base||."""
+    the relative L2 norm ||pert-base|| / ||base||.
+
+    It is NOT normalised by the parameter step: it is the change produced by
+    the perturbation actually applied, and grows with it (to first order,
+    twice the step gives twice the percentage). Divide by the relative step
+    for a step-independent figure (see field elasticity in runner_core)."""
     a, b = _align(pert_field, base_field)   # a = pert, b = base
     d = (a - b).ravel()
     bb = b.ravel()
@@ -165,3 +170,17 @@ def elementwise_signed_sensitivity(base_field, plus_field, minus_field,
 
     a, b = _align(a, b)
     return (a - b) / denom
+
+
+def field_rel_change_pct_central(base_field, plus_field, minus_field) -> float:
+    """Central-difference counterpart of field_rel_change_pct: the relative
+    field change for ONE step, estimated from the +step and -step runs,
+
+        dF% = 100 * RMS((plus - minus) / 2) / RMS(base)
+
+    with the same finite masking. All three fields are cut to their common
+    leading block (robust to a run with fewer frames)."""
+    p, m = _align(plus_field, minus_field)
+    b, p = _align(base_field, p)
+    b, m = _align(b, m)
+    return field_rel_change_pct(b, b + 0.5 * (p - m))

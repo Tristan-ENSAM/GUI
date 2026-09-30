@@ -75,6 +75,30 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
     (moyenne signée, RMS), plus `mesh.npz` (nœuds, faces, centroïdes, temps
     des frames) et `maps_index.csv` (index texte). Lecture :
     `np.load(fichier)`, sans `allow_pickle`.
+  - **Suite de l'audit Sensitivity (2026-09-30)** — tests dans
+    `tests/test_sensitivity_followups.py` :
+    - Élasticité toujours calculée (clé `elasticity`, colonne CSV) ; pour
+      les températures (paramètre ou QoI en °C), le rapport utilise la
+      température absolue en K. Graphique : choix « Rank by » sensibilité /
+      élasticité, avertissement si le classement brut mélange des unités ou
+      des lignes normalisées et brutes.
+    - Field SSD : le schéma centré utilise les runs +δ et −δ (plus le seul
+      +δ) ; run manquant → NaN. Nouvelle élasticité de champ
+      (Δ% / pas relatif, sans dimension). Docstrings corrigées (`rel_pct`
+      proportionnel au pas ; T_max/PEEQ_max limités aux éléments extraits).
+    - Warm-up réglable (fraction de l'historique d'effort ignorée),
+      enregistré dans `config.json`.
+    - Generate refuse un pas qui sort de [Min, Max] (points réellement
+      évalués selon le schéma).
+    - Le plan est abandonné dès qu'on modifie ce dont il dépend (tableau,
+      QoI, champs, méthode/schéma/N/niveaux, valeur modèle d'un paramètre
+      varié) ; champs ROI figés à la génération.
+    - Estimation du temps : les runs en échec ne comptent plus dans la
+      durée par run. Textes corrigés (Cancel, infobulle « Signed » selon le
+      schéma).
+    - Sortie du lanceur Abaqus lue en continu (thread) : plus de risque de
+      blocage sur un tuyau plein.
+    - Export CSV des résultats Morris (μ*, σ, μ, IC, trajectoires).
 - **Ajouts UI (session courante)** :
   - Onglet Sensitivity : la colonne **Ref** est resynchronisée avec le
     Numerical Model courant. `showEvent` n'étant pas fiable pour une page
@@ -112,10 +136,9 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
     facteurs historiques. Enregistré dans le profil (`cfg.units`, round-trip
     JSON, fallback hérité depuis `ui.temp_unit`). Réglage via Preferences →
     « Unit system… » (remplace le toggle °C/K). Branché dans Materials, BCs
-    (vitesse + température) et la colonne Ref de Sensitivity. **Limite
-    connue** : le paramètre *vitesse* de l'onglet Sensitivity reste en
-    m/min (spec non-matériau à facteur figé) ; les paramètres matériaux
-    suivent le système.
+    (vitesse + température) et la colonne Ref de Sensitivity. La vitesse de
+    coupe de l'onglet Sensitivity suit aussi le système (`unit_kind`,
+    corrigé le 2026-09-30 ; c'était une limite connue).
   - Onglet Job : bouton **« Write .inp only »** — construit le modèle et
     écrit le deck `.inp` dans le workdir sans lancer le solveur
     (`run_simul.py` : flag `RUN_CFG["write_inp_only"]` →

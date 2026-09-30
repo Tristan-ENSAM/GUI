@@ -29,6 +29,7 @@ import numpy as np
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import field_metrics as fm
+from gui.core import units
 from gui.core.logging_util import log_swallowed
 
 
@@ -64,17 +65,39 @@ def eulerian_instance(bundle):
 def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
                             instance=None):
     """Per-parameter field sensitivity for a Jacobian plan, using the kept
-    bundles. For each field var, J_i = field_metric(F(x0+delta_i), F(x0))
-    over the ROI (always >= 0 — a magnitude of how much the field moves).
-    Returns {var: {param_path: {"sensitivity": J, "rel_pct": dV%}}}. The
-    base run (run_kind 'base', index 0) is the reference. `rel_pct` is the
-    relative field change in percent, weighted (averaged) over nodes and
-    frames, independent of the field metric / of delta."""
+    bundles, over the ROI. Follows the plan's FD scheme:
+
+      forward / backward : J_i = metric(F(x0 ± delta_i), F(x0)) per delta
+      central            : J_i = metric(F(x0+delta_i), F(x0-delta_i)) per
+                           2*delta_i  (both perturbed runs; the base run is
+                           not involved)
+
+    J is always >= 0 (a magnitude of how much the field moves); with 'ssd'
+    it is divided by the step squared, so its value depends on the
+    parameter's unit. Returns
+        {var: {param_path: {"sensitivity": J, "rel_pct": dF%,
+                            "elasticity": e}}}
+    rel_pct  : relative field change for one step, in percent, weighted over
+               nodes and frames (central: from (F+ - F-)/2). Independent of
+               the metric, but proportional to the step size.
+    elasticity: rel_pct / (100 |delta| / |x0|) — relative field change per
+               relative parameter change, dimensionless and step-independent
+               to first order (x0 in kelvin for temperatures). A magnitude.
+    A run the scheme needs that is missing gives NaN (no silent fallback to
+    another scheme), as for the scalar QoI."""
     if not bundles or bundles[0] is None:
         return {}
     ref = bundles[0]
     inst = instance or eulerian_instance(ref)
+    scheme = getattr(plan, "scheme", "central")
+    nan = float("nan")
     out = {}
+
+    def _field(idx, var):
+        if idx is None or idx >= len(bundles) or bundles[idx] is None:
+            return None
+        return bundles[idx].field(inst, var)
+
     for var in field_vars:
         try:
             base_field = ref.field(inst, var)
@@ -84,27 +107,36 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
             continue
         per_param = {}
         for i, spec in enumerate(plan.specs):
-            idx = plan.idx_plus.get(i)
-            if idx is None:
-                idx = plan.idx_minus.get(i)
-            b = bundles[idx] if (idx is not None and idx < len(bundles)) else None
-            if b is None:
-                per_param[spec.path] = {"sensitivity": float("nan"),
-                                        "rel_pct": float("nan")}
-                continue
+            d = plan.deltas[i]
+            val = rel = nan
             try:
-                pert_field = b.field(inst, var)
-                val = fm.jacobian_field_sensitivity(
-                    base_field, pert_field,
-                    delta=plan.deltas[i], metric=metric)
-                rel = fm.field_rel_change_pct(base_field, pert_field)
+                if scheme == "central":
+                    fp = _field(plan.idx_plus.get(i), var)
+                    fmn = _field(plan.idx_minus.get(i), var)
+                    if fp is not None and fmn is not None:
+                        val = fm.jacobian_field_sensitivity(
+                            fmn, fp, delta=2.0 * d, metric=metric)
+                        rel = fm.field_rel_change_pct_central(
+                            base_field, fp, fmn)
+                else:
+                    idx = (plan.idx_plus.get(i) if scheme == "forward"
+                           else plan.idx_minus.get(i))
+                    pert = _field(idx, var)
+                    if pert is not None:
+                        val = fm.jacobian_field_sensitivity(
+                            base_field, pert, delta=d, metric=metric)
+                        rel = fm.field_rel_change_pct(base_field, pert)
             except Exception:
                 log_swallowed("field sensitivity for %s @ %s"
                               % (var, spec.path), level=logging.DEBUG)
-                val = float("nan")
-                rel = float("nan")
+                val = rel = nan
+            x0 = abs(jac.abs_base(plan, i)) if hasattr(plan, "base") else 0.0
+            step_pct = 100.0 * abs(d) / x0 if x0 else nan
+            elast = rel / step_pct if (step_pct and np.isfinite(step_pct)) \
+                else nan
             per_param[spec.path] = {"sensitivity": float(val),
-                                    "rel_pct": float(rel)}
+                                    "rel_pct": float(rel),
+                                    "elasticity": float(elast)}
         out[var] = per_param
     return out
 
@@ -266,7 +298,9 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
         y = Y[:, j]
         try:
             if plan_kind == "jacobian":
-                analyses[qid] = jac.analyze(plan, y)
+                analyses[qid] = jac.analyze(plan, y,
+                                            q_offset=_qoi_kelvin_offset(
+                                                qoi_specs[j]))
             else:
                 # Only complete trajectories are analysed: a failed or
                 # never-run row spoils its trajectory (see analyze_complete).
@@ -309,12 +343,19 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                      n_attempted=n_attempted, cancelled=cancelled)
 
 
-def jacobian_ranking(result: RunResult, qoi_id: str):
-    """Return [(param_path, sensitivity), ...] sorted by |sensitivity|
-    descending, for a Jacobian result and one QoI."""
+def _qoi_kelvin_offset(spec) -> float:
+    """273.15 for a QoI stored in °C (its elasticity must use kelvin)."""
+    return units.KELVIN_OFFSET if getattr(spec, "unit", "") == "°C" else 0.0
+
+
+def jacobian_ranking(result: RunResult, qoi_id: str, key: str = "sensitivity"):
+    """Return [(param_path, value), ...] sorted by |value| descending, for a
+    Jacobian result and one QoI. `key` picks the quantity: "sensitivity"
+    (as configured per row) or "elasticity" (dimensionless); parameters
+    without that key are left out."""
     a = result.analyses.get(qoi_id, {})
-    rows = [(p, d["sensitivity"]) for p, d in a.items()
-            if isinstance(d, dict) and "sensitivity" in d]
+    rows = [(p, d[key]) for p, d in a.items()
+            if isinstance(d, dict) and key in d]
     rows.sort(key=lambda t: (np.isnan(t[1]), -abs(t[1])))
     return rows
 

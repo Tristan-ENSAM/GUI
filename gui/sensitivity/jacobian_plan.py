@@ -23,7 +23,16 @@ Normalisation (per parameter, optional)
 If `normalize` is set, the reported sensitivity is the dimensionless
 elasticity  S_i = (dQ/dx_i) · (x_i0 / Q0)  — the relative change in the
 QoI per relative change in the parameter. Otherwise the raw derivative
-(QoI-unit per displayed parameter-unit) is reported.
+(QoI-unit per displayed parameter-unit) is reported. The elasticity is
+always computed as well (key "elasticity"), so parameters of different
+units can be compared whatever the per-row choice.
+
+A ratio x/x0 is only meaningful on a scale whose zero is physical. For
+temperatures (°C is not such a scale) the elasticity therefore uses the
+ABSOLUTE temperature in kelvin: x0 for a temperature parameter, and Q0 for
+a temperature QoI (the caller passes `q_offset` = 273.15 for a QoI stored
+in °C). The raw derivative is unaffected (a difference is the same in °C
+and K).
 
 All bounds/steps are in DISPLAYED engineering units; profiles convert to
 stored units via param_registry.apply_display.
@@ -34,6 +43,7 @@ import copy
 from dataclasses import dataclass
 import numpy as np
 
+from gui.core import units
 from gui.sensitivity import param_registry as pr
 
 SCHEMES = ("forward", "backward", "central")
@@ -136,14 +146,28 @@ def profile_table(plan: JacobianPlan):
     return rows
 
 
-def analyze(plan: JacobianPlan, Y):
+def abs_base(plan: JacobianPlan, i: int) -> float:
+    """Base value of parameter i on a ratio scale: the displayed value,
+    except for temperatures, returned in kelvin (see module docstring)."""
+    spec = plan.specs[i]
+    x0 = float(plan.base[i])
+    if spec.is_temp:
+        stored_c = spec.to_stored(x0, plan.temp_unit,
+                                  system=plan.unit_system)
+        return float(stored_c) + units.KELVIN_OFFSET
+    return x0
+
+
+def analyze(plan: JacobianPlan, Y, q_offset: float = 0.0):
     """Compute the local sensitivity per parameter for one QoI vector Y
-    (length == n_runs). Returns a dict:
-        {param_path: {"sensitivity": s, "dQdx": raw, "normalized": bool,
-                      "x0": x0, "Q0": Q0}}.
+    (length == n_runs). `q_offset` is added to Q0 for the elasticity only
+    (273.15 for a QoI stored in °C, so the ratio uses kelvin). Returns:
+        {param_path: {"sensitivity": s, "dQdx": raw, "elasticity": e,
+                      "normalized": bool, "x0": x0, "Q0": Q0}}.
     NaN-safe: a missing run yields NaN sensitivity for that parameter."""
     Y = np.asarray(Y, dtype=float)
     Q0 = Y[0]
+    Q0_abs = Q0 + float(q_offset)
     out = {}
     for i, spec in enumerate(plan.specs):
         d = plan.deltas[i]
@@ -154,11 +178,11 @@ def analyze(plan: JacobianPlan, Y):
         else:  # central
             dQdx = (Y[plan.idx_plus[i]] - Y[plan.idx_minus[i]]) / (2.0 * d)
         x0 = plan.base[i]
-        if plan.normalize[i]:
-            sens = dQdx * (x0 / Q0) if Q0 not in (0.0,) else float("nan")
-        else:
-            sens = dQdx
+        elast = (dQdx * (abs_base(plan, i) / Q0_abs)
+                 if Q0_abs != 0.0 else float("nan"))
+        sens = elast if plan.normalize[i] else dQdx
         out[spec.path] = {"sensitivity": float(sens), "dQdx": float(dQdx),
+                          "elasticity": float(elast),
                           "normalized": plan.normalize[i],
                           "x0": float(x0), "Q0": float(Q0)}
     return out

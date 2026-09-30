@@ -12,8 +12,8 @@ The four QoI requested for the cutting model
 --------------------------------------------
   - Fx_max   : peak cutting-force magnitude   = max |RF1_RP|       [N]
   - Fx_mean  : mean cutting-force magnitude    = mean |RF1_RP|      [N]
-  - T_max    : peak temperature anywhere/anytime in the instance    [°C]
-  - PEEQ_max : peak equivalent plastic strain anywhere/anytime       [—]
+  - T_max    : peak temperature anywhere/anytime in the extracted elements [°C]
+  - PEEQ_max : peak equivalent plastic strain anywhere/anytime (extracted)  [—]
 
 A bonus `Fy_max` (= max |RF2_RP|) is included because it is free.
 
@@ -29,7 +29,10 @@ Conventions / assumptions (validate these)
   - Force unit is N (the model's t-mm-s-MPa-°C system, see gui.core.units).
   - T_max and PEEQ_max are taken over the WHOLE field array
     (n_frames × n_elements) of the chosen instance — i.e. the hottest
-    element at the hottest frame, and likewise for PEEQ.
+    element at the hottest frame, and likewise for PEEQ. The bundle only
+    holds the elements kept at extraction (ROI filtering, see
+    gui/results/FORMAT.md), so for a ROI-filtered instance this is the
+    maximum INSIDE THE ROI, not over the whole part.
   - `warmup_frac` lets the mean ignore an initial fraction of the signal
     (the tool entering the material). Default 0.0 → use everything.
 
