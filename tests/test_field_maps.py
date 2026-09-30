@@ -161,9 +161,11 @@ class TestSensitivityMapsUI:
         from gui.core.model_config import ModelConfig
         bundles, plan, order = self._bundles_and_plan(tmp_path)
         tab = SensitivityTab(ModelConfig())
+        # Tick the field first: editing the selection after a plan exists
+        # discards that plan (it would no longer match).
+        tab._field_checks["EVF"].setChecked(True)
         tab.plan = plan
         tab.plan_kind = "jacobian"
-        tab._field_checks["EVF"].setChecked(True)
         res = rc.RunResult(plan_kind="jacobian", qoi_ids=[],
                            param_paths=list(plan.param_paths),
                            Y=np.zeros((plan.n_runs, 0)), analyses={},

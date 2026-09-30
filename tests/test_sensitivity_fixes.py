@@ -293,7 +293,7 @@ def _square_mesh():
     return nodes, faces
 
 
-def test_write_maps_tables_and_images(tmp_path):
+def test_write_maps_arrays_and_images(tmp_path):
     nodes, faces = _square_mesh()
     S = np.array([[1.0, -2.0], [3.0, np.nan]])        # (2 frames, 2 elem)
     files = mx.write_maps(
@@ -302,20 +302,25 @@ def test_write_maps_tables_and_images(tmp_path):
         scheme="central", deltas={S_A.path: 10.0})
     names = {p.name for p in files}
     stem = "map_TEMP_p01_euler_material.A"
-    assert {stem + ".csv", stem + "_mean.png", stem + "_rms.png",
-            "maps_index.csv", "frame_times.csv", "mesh_nodes.csv",
-            "mesh_elements.csv"} <= names
-    with open(tmp_path / (stem + ".csv"), encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) == 2
-    assert float(rows[0]["time_mean"]) == pytest.approx(2.0)
-    assert float(rows[0]["time_rms"]) == pytest.approx(np.sqrt(5.0))
-    assert float(rows[1]["time_mean"]) == pytest.approx(-2.0)   # NaN ignored
-    assert rows[1]["frame_001"] == "nan"
-    assert float(rows[0]["x_c_mm"]) == pytest.approx(0.5)
+    assert {stem + ".npz", stem + "_mean.png", stem + "_rms.png",
+            "maps_index.csv", "mesh.npz"} <= names
+    assert not any(n.endswith(".csv") and n != "maps_index.csv"
+                   for n in names)
+    with np.load(tmp_path / (stem + ".npz")) as z:    # no allow_pickle
+        assert np.array_equal(z["S"], S, equal_nan=True)
+        assert z["time_mean"][0] == pytest.approx(2.0)
+        assert z["time_rms"][0] == pytest.approx(np.sqrt(5.0))
+        assert z["time_mean"][1] == pytest.approx(-2.0)   # NaN ignored
+        assert str(z["map_unit"]) == "°C / MPa"
+        assert str(z["parameter"]) == S_A.path and float(z["delta"]) == 10.0
+    with np.load(tmp_path / "mesh.npz") as z:
+        assert z["faces"].shape == (2, 4)
+        assert z["centroids_xy"][0] == pytest.approx([0.5, 0.5])
+        assert z["frame_times"][1] == pytest.approx(1e-3)
     with open(tmp_path / "maps_index.csv", encoding="utf-8-sig") as f:
         idx = list(csv.DictReader(f))
     assert idx[0]["map_unit"] == "°C / MPa" and idx[0]["delta"] == "10.0"
+    assert idx[0]["data"] == stem + ".npz"
     assert (tmp_path / (stem + "_mean.png")).stat().st_size > 0
 
 
@@ -359,12 +364,13 @@ def test_tab_writes_maps_into_study_subfolder(qapp, tmp_path):
     out = tmp_path / "study" / mx.MAPS_SUBDIR
     tab._export_field_maps(out, wait=True)
     stem = "map_EVF_p01_interaction.friction_coeff"
-    for name in (stem + ".csv", stem + "_mean.png", stem + "_rms.png",
-                 "maps_index.csv", "frame_times.csv"):
+    for name in (stem + ".npz", stem + "_mean.png", stem + "_rms.png",
+                 "maps_index.csv", "mesh.npz"):
         assert (out / name).is_file(), name
-    with open(out / (stem + ".csv"), encoding="utf-8-sig") as f:
-        header = next(csv.reader(f))
-    assert header[-1] == "frame_002"                  # 3 frames
+    with np.load(out / (stem + ".npz")) as z:
+        assert z["S"].shape[0] == 3                   # 3 frames
+    with np.load(out / "mesh.npz") as z:
+        assert z["frame_times"].shape == (3,)
     assert "Maps written to" in tab.status.text()
     for b in bundles:
         b.close()

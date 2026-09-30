@@ -36,7 +36,8 @@ the single source of truth used by the Materials tab. Non-material
 parameters (geometry, kinematics, mesh) are hand-authored below; most are
 identity conversions (the cfg already stores them in the unit the user
 reads, e.g. mm, deg), with two documented exceptions:
-  - cutting speed       : stored mm/s, displayed m/min (units.SPEED_MMIN_TO_MMS)
+  - cutting speed       : stored mm/s, displayed in the unit system's
+                          velocity unit (m/min by default, unit_kind)
   - ambient temperature : stored °C, displayed °C or K (cfg.ui.temp_unit)
 
 The registry does NOT decide bounds — the UI (Lot 2b) lets the user enter
@@ -120,6 +121,9 @@ class ParamSpec:
     mat_key: str = ""             # material key -> convert via the ACTIVE
                                   # unit system (units.*), not the static
                                   # factor, so it follows Settings.
+    unit_kind: str = ""           # non-material quantity kind of the unit
+                                  # system (e.g. "velocity_named"): converts
+                                  # and labels through it like mat_key.
     # Default ± half-range used to pre-fill the UI min/max, expressed on the
     # DISPLAYED value. If the displayed default is ~0 (e.g. rake_angle=0),
     # `abs_range` is used as an absolute half-width instead of `rel_range`.
@@ -137,6 +141,8 @@ class ParamSpec:
             return system.from_internal("temperature", stored)
         if self.mat_key:
             return system.from_internal(_us.field_kind(self.mat_key), stored)
+        if self.unit_kind:
+            return system.from_internal(self.unit_kind, stored)
         return stored / self.factor if self.factor else stored
 
     def to_stored(self, displayed: float, temp_unit: str = "C",
@@ -146,6 +152,9 @@ class ParamSpec:
             return system.to_internal("temperature", displayed)
         if self.mat_key:
             val = system.to_internal(_us.field_kind(self.mat_key), displayed)
+            return int(round(val)) if self.dtype == "int" else val
+        if self.unit_kind:
+            val = system.to_internal(self.unit_kind, displayed)
             return int(round(val)) if self.dtype == "int" else val
         val = displayed * self.factor
         return int(round(val)) if self.dtype == "int" else val
@@ -159,6 +168,8 @@ class ParamSpec:
             return system.unit_label(_us.field_kind(self.mat_key))
         if self.is_temp:
             return system.unit_label("temperature")
+        if self.unit_kind:
+            return system.unit_label(self.unit_kind)
         return self.display_unit
 
 
@@ -226,7 +237,6 @@ def _material_specs() -> list[ParamSpec]:
 # Non-material specs — hand-authored. Conversions are identity unless noted.
 # ---------------------------------------------------------------------------
 def _non_material_specs() -> list[ParamSpec]:
-    SPEED = units.SPEED_MMIN_TO_MMS   # m/min * SPEED = mm/s
     return [
         # --- Tool geometry (stored in mm / deg, displayed as-is) ---
         ParamSpec("tool_geometry.rake_angle",  "Angle de coupe (rake)",  "Géométrie outil", "deg", rel_range=0.0, abs_range=10.0),
@@ -240,8 +250,8 @@ def _non_material_specs() -> list[ParamSpec]:
         ParamSpec("euler_geometry.l_wp",       "Longueur pièce l_wp",    "Géométrie pièce", "mm",  rel_range=0.20),
 
         # --- Process / boundary conditions ---
-        # cutting_speed: stored mm/s, displayed m/min.
-        ParamSpec("bcs.cutting_speed",         "Vitesse de coupe",       "Procédé / CL", "m/min", factor=SPEED, rel_range=0.30),
+        # cutting_speed: stored mm/s, displayed in the system's velocity unit.
+        ParamSpec("bcs.cutting_speed",         "Vitesse de coupe",       "Procédé / CL", "m/min", unit_kind="velocity_named", rel_range=0.30),
         # ambient_temperature: stored °C, displayed per temp_unit.
         ParamSpec("bcs.ambient_temperature",   "Température ambiante",   "Procédé / CL", "°C", is_temp=True, rel_range=0.0, abs_range=50.0),
 

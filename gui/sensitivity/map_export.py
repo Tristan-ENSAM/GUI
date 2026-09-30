@@ -8,14 +8,23 @@ the runs, in a sub-folder of the study directory, so a campaign can be
 reviewed without the GUI:
 
   sensitivity_maps/
-    maps_index.csv                 one row per (field, parameter) map
-    frame_times.csv                frame index -> simulation time [s]
-    mesh_nodes.csv                 node index, x, y           (ROI mesh)
-    mesh_elements.csv              element index, node indices of its face
-    map_<FIELD>_p<NN>_<path>.csv   element, x_c, y_c, time_mean, time_rms,
-                                   then one signed column per frame
+    maps_index.csv                 one row per (field, parameter) map (text)
+    mesh.npz                       nodes_xy (n_nodes, 2) [mm],
+                                   faces (n_elem, n_loc) node indices,
+                                   centroids_xy (n_elem, 2) [mm],
+                                   frame_times (n_frames,) [s] if known
+    map_<FIELD>_p<NN>_<path>.npz   S (n_frames, n_elem) signed dF/dparam,
+                                   time_mean (n_elem,), time_rms (n_elem,),
+                                   + metadata strings (field, parameter,
+                                   label, map_unit, scheme, delta_unit) and
+                                   delta (0-d float)
     map_<FIELD>_p<NN>_<path>_mean.png   time-mean, signed (diverging)
     map_<FIELD>_p<NN>_<path>_rms.png    time-RMS, magnitude (sequential)
+
+The .npz files hold plain numeric / unicode arrays (no pickled objects):
+``np.load(path)`` reads them without ``allow_pickle``. Values are float64,
+NaN where an element has no data (e.g. an empty Eulerian cell). They are
+written compressed (np.savez_compressed): the NaN-heavy maps shrink a lot.
 
 The aggregates are the ones the Maps tab uses: time-mean keeps the sign,
 time-RMS is a magnitude. Pure functions (matplotlib Agg, no Qt, no pyplot)
@@ -135,7 +144,10 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
     centroids_xy: (n_elem, 2) element centroids; default = face vertex mean
     frame_times : (n_frames,) simulation times, optional
     deltas      : {param_path: FD step}, recorded in the index
-    images      : False to skip the PNGs (tables only)
+    scheme      : FD scheme, one string for all maps or
+                  {field_var: {param_path: scheme actually used}} (a central
+                  map can fall back to forward/backward when a run failed)
+    images      : False to skip the PNGs (arrays only)
 
     Returns the list of written file Paths. A map whose size does not match
     the mesh is skipped (logged), never written half-way.
@@ -153,31 +165,16 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
     centroids_xy = np.asarray(centroids_xy, dtype=float)[:, :2]
     written = []
 
-    # --- shared tables: mesh + frame times ---------------------------------
-    p = out / "mesh_nodes.csv"
-    with open(p, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["node", "x_mm", "y_mm"])
-        for i, (x, y) in enumerate(nodes_xy):
-            w.writerow([i, repr(float(x)), repr(float(y))])
-    written.append(p)
-    p = out / "mesh_elements.csv"
-    with open(p, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["element"] + ["n%d" % j for j in range(face_idx.shape[1])])
-        for i, row in enumerate(face_idx):
-            w.writerow([i] + [int(v) for v in row])
-    written.append(p)
+    # --- shared arrays: mesh + frame times -------------------------------
+    p = out / "mesh.npz"
+    mesh = {"nodes_xy": nodes_xy, "faces": face_idx,
+            "centroids_xy": centroids_xy}
     if frame_times is not None:
-        p = out / "frame_times.csv"
-        with open(p, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            w.writerow(["frame", "time_s"])
-            for i, t in enumerate(np.asarray(frame_times, dtype=float)):
-                w.writerow([i, repr(float(t))])
-        written.append(p)
+        mesh["frame_times"] = np.asarray(frame_times, dtype=float)
+    np.savez_compressed(p, **mesh)
+    written.append(p)
 
-    # --- one table (+ images) per map ---------------------------------------
+    # --- one array file (+ images) per map ---------------------------------
     index_rows = []
     paths_order = list(param_info)
     for var, per in maps.items():
@@ -193,20 +190,18 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
             label, punit = param_info.get(path, (path, "—"))
             unit = map_unit(field_units.get(var, ""), punit)
             mean, rms = time_aggregates(S)
+            delta = float(deltas.get(path, float("nan")))
+            used = (scheme.get(var, {}).get(path, "")
+                    if isinstance(scheme, dict) else scheme)
 
-            p_csv = out / (stem + ".csv")
-            header = ",".join(["element", "x_c_mm", "y_c_mm", "time_mean",
-                               "time_rms"]
-                              + ["frame_%03d" % k for k in range(S.shape[0])])
-            table = np.column_stack([np.arange(n_elem), centroids_xy[:, :2],
-                                     mean, rms, S.T])
-            # NaN (element without data, e.g. empty Eulerian cell) is written
-            # as the literal "nan".
-            with open(p_csv, "w", newline="", encoding="utf-8-sig") as f:
-                np.savetxt(f, table, delimiter=",", header=header,
-                           comments="",
-                           fmt=["%d"] + ["%.9g"] * (table.shape[1] - 1))
-            written.append(p_csv)
+            p_npz = out / (stem + ".npz")
+            np.savez_compressed(
+                p_npz, S=S, time_mean=mean, time_rms=rms,
+                field=np.str_(var), parameter=np.str_(path),
+                label=np.str_(label), map_unit=np.str_(unit),
+                scheme=np.str_(used), delta=np.float64(delta),
+                delta_unit=np.str_(punit))
+            written.append(p_npz)
 
             pngs = []
             if images:
@@ -227,15 +222,15 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
                                       level=logging.WARNING)
             index_rows.append({
                 "field": var, "parameter": path, "label": label,
-                "map_unit": unit, "scheme": scheme,
-                "delta": _num(deltas.get(path, float("nan"))),
+                "map_unit": unit, "scheme": used,
+                "delta": _num(delta),
                 "delta_unit": punit,
                 "n_frames": S.shape[0], "n_elements": n_elem,
-                "table": p_csv.name, "images": ";".join(pngs)})
+                "data": p_npz.name, "images": ";".join(pngs)})
 
     p = out / "maps_index.csv"
     cols = ["field", "parameter", "label", "map_unit", "scheme", "delta",
-            "delta_unit", "n_frames", "n_elements", "table", "images"]
+            "delta_unit", "n_frames", "n_elements", "data", "images"]
     with open(p, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()

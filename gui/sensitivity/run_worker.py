@@ -211,6 +211,18 @@ def _terminate_process_tree(proc: "subprocess.Popen", grace: float = 2.0) -> Non
                           level=logging.DEBUG)
 
 
+def _drain_pipe(pipe, chunks: list) -> None:
+    """Read `pipe` until EOF into `chunks` (list of bytes). Runs in its own
+    thread so the child never blocks on a full pipe."""
+    try:
+        for chunk in iter(lambda: pipe.read1(65536)
+                          if hasattr(pipe, "read1") else pipe.read(65536),
+                          b""):
+            chunks.append(chunk)
+    except Exception:
+        log_swallowed("draining Abaqus launcher output", level=logging.DEBUG)
+
+
 class SensitivityRunWorker(QObject):
     progress = Signal(int, int)     # (done, total)
     log = Signal(str)               # live output chunk
@@ -375,6 +387,15 @@ class SensitivityRunWorker(QObject):
         # <job>.gui.log; the Job tab tails the same file.
         log_path = script_log_path(self._workdir, job_name)
         offset = 0
+        # Drain the launcher's stdout while it runs. It is read only once the
+        # process has exited (it is mostly the licence banner), but an unread
+        # pipe that fills up (a few KB on Windows) blocks the child on its
+        # next write -- the run would hang until cancelled.
+        out_chunks = []
+        reader = threading.Thread(target=_drain_pipe,
+                                  args=(self._proc.stdout, out_chunks),
+                                  daemon=True)
+        reader.start()
         while self._proc.poll() is None:
             if self._cancel:
                 break
@@ -383,16 +404,13 @@ class SensitivityRunWorker(QObject):
         # Final drain: the lines written since the last tick are the ones that
         # explain how the run ended.
         self._emit_log_tail(log_path, offset)
-        # Whatever the launcher itself put on stdout (licence banner, a fatal
-        # error before the script starts). Read once, after exit.
-        try:
-            rest = self._proc.stdout.read()
-            if rest:
-                self.log.emit(rest.decode("cp1252", errors="replace"))
-        except Exception:
-            log_swallowed("reading Abaqus launcher output for run %d" % (i + 1),
-                          level=logging.DEBUG)
         self._proc.wait()
+        # Whatever the launcher itself put on stdout (licence banner, a fatal
+        # error before the script starts), shown once the run has ended.
+        reader.join(timeout=5.0)
+        rest = b"".join(out_chunks)
+        if rest:
+            self.log.emit(rest.decode("cp1252", errors="replace"))
         rc_code = self._proc.returncode
         self._proc = None
         self._current_job = None
