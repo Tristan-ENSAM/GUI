@@ -279,10 +279,14 @@ def test_calibration_visible_tab(qapp, monkeypatch):
 def test_alignment_pixel_to_model_and_angles():
     from gui.core.alignment import (pixel_to_model, line_tilt_from_vertical_deg,
                                     line_tilt_from_horizontal_deg)
-    # origin at centre, x right, y up
-    assert pixel_to_model(100, 50, 200, 100, 0.05) == pytest.approx((0.0, 0.0))
-    assert pixel_to_model(120, 50, 200, 100, 0.05) == pytest.approx((1.0, 0.0))
-    assert pixel_to_model(100, 30, 200, 100, 0.05) == pytest.approx((0.0, 1.0))
+    # origin at the geometric centre, x right, y up. Pixel coordinates are
+    # pixel centres, so a 200x100 image has its centre at (99.5, 49.5).
+    assert pixel_to_model(99.5, 49.5, 200, 100, 0.05) == pytest.approx((0.0, 0.0))
+    assert pixel_to_model(119.5, 49.5, 200, 100, 0.05) == pytest.approx((1.0, 0.0))
+    assert pixel_to_model(99.5, 29.5, 200, 100, 0.05) == pytest.approx((0.0, 1.0))
+    # image edges (pixel 0 left edge at -0.5, last pixel right edge at W-0.5)
+    assert pixel_to_model(-0.5, -0.5, 200, 100, 0.05) == pytest.approx((-5.0, 2.5))
+    assert pixel_to_model(199.5, 99.5, 200, 100, 0.05) == pytest.approx((5.0, -2.5))
     # vertical line -> 0 deg from vertical; horizontal -> 90 deg from vertical
     assert line_tilt_from_vertical_deg((10, 10), (10, 80)) == pytest.approx(0.0)
     assert abs(line_tilt_from_vertical_deg((0, 50), (50, 50))) == pytest.approx(90.0)
@@ -305,24 +309,25 @@ def test_alignment_tab_compute_and_write(qapp):
     tab.spin_scale.setValue(0.05)
     # Tool reference is a 4-pt polygon now. Build a quad whose rake edge is the
     # vertical segment at x=100 and whose flank edge is the horizontal segment
-    # at y=10; their shared corner (the tip) is (100, 10) -> model (0, 2) mm.
+    # at y=10; their shared corner (the tip) is (100, 10) -> model
+    # ((100-99.5)*0.05, (49.5-10)*0.05) = (0.025, 1.975) mm.
     # rake edge = e0 (v0->v1), flank edge = e3 (v3->v0), shared vertex v0.
     tab._poly_verts = [(100, 10), (100, 90), (180, 90), (180, 10)]
     tab._poly_rake = 0
     tab._poly_flank = 3
-    tab.set_wp_point(100, 70)                    # (50-70)*0.05 = -1 mm
+    tab.set_wp_point(100, 70)                    # (49.5-70)*0.05 = -1.025 mm
     tab._recompute()
     v = tab.values()
     assert v["rake_angle"] == pytest.approx(0.0, abs=1e-6)   # vertical rake
     assert v["clear_angle"] == pytest.approx(0.0, abs=1e-6)  # horizontal flank
-    assert v["tool_x0"] == pytest.approx(0.0)
-    assert v["tool_y0"] == pytest.approx(2.0)
-    assert v["wp_y0"] == pytest.approx(-1.0)
+    assert v["tool_x0"] == pytest.approx(0.025)
+    assert v["tool_y0"] == pytest.approx(1.975)
+    assert v["wp_y0"] == pytest.approx(-1.025)
     assert "tool_polygon_px" in v                # polygon exported for the mask
     mod.QMessageBox.information = staticmethod(lambda *a, **k: None)
     tab._write()
     assert "tool_x0" in captured
-    assert s.reference_geometry["wp_y0"] == pytest.approx(-1.0)
+    assert s.reference_geometry["wp_y0"] == pytest.approx(-1.025)
 
 
 def test_tool_snap_line_to_edge():

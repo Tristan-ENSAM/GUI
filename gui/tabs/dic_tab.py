@@ -86,10 +86,13 @@ class _DicWorker(QThread):
         eta = info["elapsed_s"] / done_frac - info["elapsed_s"] if done_frac else 0.0
         z = info["mean_zncc"]
         z_txt = ("%.3f" % z) if z is not None else "n/a"
+        edge = int(info.get("n_edge", 0))
+        edge_txt = (" | %d peak(s) on search border: increase Search" % edge
+                    if edge else "")
         self.sig_log.emit(
-            "Frame %d/%d | %d/%d valid | mean ZNCC %s | %.2f s/frame | ETA %s"
+            "Frame %d/%d | %d/%d valid | mean ZNCC %s | %.2f s/frame | ETA %s%s"
             % (i, n, info["n_valid"], info["n_total"], z_txt,
-               info["frame_s"], _fmt_eta(eta)))
+               info["frame_s"], _fmt_eta(eta), edge_txt))
         _raise_if_cancelled(self, info)
 
     def run(self):
@@ -416,18 +419,39 @@ class DICTab(QWidget):
         self.sp_subset = QSpinBox(); self.sp_subset.setRange(5, 301)
         self.sp_subset.setSingleStep(2); self.sp_subset.setValue(31)
         self.sp_subset.setSuffix(" px")
+        self.sp_subset.setToolTip("Subset side (odd): an even value is moved "
+                                  "to the next odd one, so the value shown is "
+                                  "the one used and recorded.")
+        # The engine rejects an even subset: snap typed values to odd.
+        self.sp_subset.valueChanged.connect(self._snap_subset_odd)
         self.sp_step = QSpinBox(); self.sp_step.setRange(1, 200)
         self.sp_step.setValue(16); self.sp_step.setSuffix(" px")
         self.lbl_subset = QLabel("Subset:"); self.lbl_step = QLabel("Step:")
         self.sp_search = QSpinBox(); self.sp_search.setRange(1, 200)
         self.sp_search.setValue(16); self.sp_search.setSuffix(" px")
+        self.sp_search.setToolTip("Half search range: displacements in "
+                                  "[-search, +search] px per image pair. A "
+                                  "peak on the border of that range is "
+                                  "invalid: use search >= max displacement "
+                                  "per pair + 2 px.")
+        self.cb_subpix = QComboBox()
+        self.cb_subpix.addItem("Iterative (Gauss-Newton)", "icgn")
+        self.cb_subpix.addItem("Gaussian 3-point", "gauss")
+        self.cb_subpix.addItem("Parabola 3-point (legacy)", "parabola")
+        self.cb_subpix.setToolTip(
+            "Sub-pixel estimator. Iterative: refinement on the images "
+            "(translation, cubic-spline interpolation), least biased. "
+            "Gaussian: fit of the correlation peak. Parabola: legacy, biased "
+            "towards integer displacements (peak locking).")
+        self.lbl_subpix = QLabel("Sub-pixel:")
         self.sp_zncc = DecimalSpinBox(); self.sp_zncc.setRange(0.0, 1.0)
         self.sp_zncc.setSingleStep(0.05); self.sp_zncc.setValue(0.5)
         self.lbl_search = QLabel("Search:"); self.lbl_zncc = QLabel("ZNCC min:")
         self._local_widgets += [self.lbl_subset, self.sp_subset,
                                 self.lbl_step, self.sp_step,
                                 self.lbl_search, self.sp_search,
-                                self.lbl_zncc, self.sp_zncc]
+                                self.lbl_zncc, self.sp_zncc,
+                                self.lbl_subpix, self.cb_subpix]
         for sp in (self.sp_subset, self.sp_step, self.sp_search):
             sp.valueChanged.connect(self._preview_points)
 
@@ -525,12 +549,17 @@ class DICTab(QWidget):
                     self.sp_elem, self.sp_maxiter, self.sp_tol,
                     self.sp_pyr_levels, self.sp_pyr_sigma, self.sp_coverage):
             wdg.valueChanged.connect(self._update_engine_summary)
-        for cb in (self.cb_variant, self.cb_pattern):
+        for cb in (self.cb_variant, self.cb_pattern, self.cb_subpix):
             cb.currentIndexChanged.connect(self._update_engine_summary)
         self.chk_mask.toggled.connect(self._update_engine_summary)
         self.chk_uinit.toggled.connect(self._update_engine_summary)
         self.chk_convect.toggled.connect(self._update_engine_summary)
         self._set_global_visible(False)        # local by default
+
+    def _snap_subset_odd(self, v):
+        """Keep the subset odd (the engine rejects an even side)."""
+        if int(v) % 2 == 0:
+            self.sp_subset.setValue(min(int(v) + 1, self.sp_subset.maximum()))
 
     def _build_params_dialog(self):
         """Build (once) the modeless dialog holding all parameter widgets."""
@@ -546,6 +575,7 @@ class DICTab(QWidget):
         grid.addWidget(self.lbl_step, 0, 2); grid.addWidget(self.sp_step, 0, 3)
         grid.addWidget(self.lbl_search, 1, 0); grid.addWidget(self.sp_search, 1, 1)
         grid.addWidget(self.lbl_zncc, 1, 2); grid.addWidget(self.sp_zncc, 1, 3)
+        grid.addWidget(self.lbl_subpix, 2, 0); grid.addWidget(self.cb_subpix, 2, 1, 1, 3)
         grid.addWidget(self.lbl_elem, 0, 0); grid.addWidget(self.sp_elem, 0, 1)
         grid.addWidget(self.lbl_variant, 0, 2); grid.addWidget(self.cb_variant, 0, 3)
         grid.addWidget(self.lbl_pattern, 1, 0); grid.addWidget(self.cb_pattern, 1, 1)
@@ -598,10 +628,11 @@ class DICTab(QWidget):
                 txt += " \u00b7 convect"
         else:
             txt = ("Local \u00b7 subset %d \u00b7 step %d \u00b7 search %d \u00b7 "
-                   "ZNCC\u2265%.2f" % (int(self.sp_subset.value()),
+                   "ZNCC\u2265%.2f \u00b7 %s" % (int(self.sp_subset.value()),
                                        int(self.sp_step.value()),
                                        int(self.sp_search.value()),
-                                       float(self.sp_zncc.value())))
+                                       float(self.sp_zncc.value()),
+                                       self.cb_subpix.currentData()))
         if self.chk_mask.isChecked():
             txt += " \u00b7 mask on"
             if self._is_global():
@@ -644,7 +675,7 @@ class DICTab(QWidget):
             return np.ones(len(pts) if pts is not None else 0, bool)
         if image is None:
             image = self._seq.frame(0)
-        win = max(5, int(self.sp_subset.value()) // 2)
+        win = int(self.sp_subset.value())      # the subset's own pixels
         return dic_engine.point_mask(
             image, pts, win=win,
             min_intensity=float(self.sld_int.value()))
@@ -687,7 +718,7 @@ class DICTab(QWidget):
             engine=self.cb_engine.currentData(),
             subset=int(self.sp_subset.value()), step=int(self.sp_step.value()),
             search=int(self.sp_search.value()), zncc_min=float(self.sp_zncc.value()),
-            subpixel=True)
+            subpixel=True, subpixel_method=str(self.cb_subpix.currentData()))
 
     def _tool_polygon(self):
         """Tool polygon (pixel vertices) drawn in the Alignment tab, or None.
@@ -1047,6 +1078,7 @@ class DICTab(QWidget):
         """Freeze engine + mask parameters (they define the frozen grid/mask)."""
         widgets = [getattr(self, n, None) for n in (
             "cb_engine", "sp_subset", "sp_step", "sp_search", "sp_zncc",
+            "cb_subpix",
             "chk_mask", "sld_int", "sp_bits",
             "sp_elem", "cb_variant", "cb_pattern", "chk_uinit", "chk_uncert",
             "sp_maxiter", "sp_tol", "sp_pyr_levels", "sp_pyr_sigma",
@@ -1167,7 +1199,7 @@ class DICTab(QWidget):
         if not self.chk_mask.isChecked():
             return None
         return {"min_intensity": float(self.sld_int.value()),
-                "win": max(5, int(self.sp_subset.value()) // 2)}
+                "win": int(self.sp_subset.value())}
 
     def _set_busy(self, busy):
         self.b_run.setEnabled(not busy and self._roi_locked)

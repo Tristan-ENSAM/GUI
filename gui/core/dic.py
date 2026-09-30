@@ -5,8 +5,10 @@ Digital Image Correlation — velocity fields from a visible image sequence.
 This module holds the *engines* (pure, no Qt). The first engine is a **local
 subset** DIC: a fixed grid of points is defined in the reference frame, and
 for each consecutive image pair the local displacement of each subset is found
-by normalised cross-correlation (ZNCC, via cv2.matchTemplate) with parabolic
-sub-pixel peak refinement. A global Q4 (q4dic) engine is planned separately.
+by normalised cross-correlation (ZNCC, via cv2.matchTemplate) at the integer
+level, then refined to sub-pixel (by default an iterative Gauss-Newton on the
+images; see ``DicParams.subpixel_method``). The global Q4 engine lives in
+``gui.core.dic_global``.
 
 Design choices (see the DIC tab / FORMAT.md):
   - **Eulerian, fixed grid**: the same grid of points is used for every pair,
@@ -35,17 +37,34 @@ import numpy as np
 from gui.core.alignment import pixel_to_model
 
 
+SUBPIXEL_METHODS = ("icgn", "gauss", "parabola")
+
+
 @dataclass
 class DicParams:
-    """Local-DIC settings. `subset` and `search` are half-irrelevant names on
-    purpose: `subset` is the FULL square subset side (px, made odd), `search`
-    is the half-width (px) of the search window added around the subset."""
+    """Local-DIC settings. `subset` is the FULL square subset side (px, odd,
+    >= 5; an even value is rejected, not silently changed); `search` is the
+    HALF-width (px) of the search range: displacements are searched in
+    [-search, +search] and a correlation peak on the border of that range is
+    reported invalid (the true displacement may lie beyond it).
+
+    `subpixel_method` (see ``correlate_local``):
+      - "icgn"     : iterative Gauss-Newton refinement on the images
+                     (translation, ZNSSD, cubic-spline interpolation);
+      - "gauss"    : 3-point Gaussian fit of the correlation peak;
+      - "parabola" : 3-point parabolic fit (legacy; biased towards integer
+                     displacements, see the DIC audit).
+    `min_std_rel`: a subset (or its match) whose grey-level std is below
+    ``min_std_rel * ptp(reference frame)`` is rejected (textureless or
+    saturated: ZNCC is undefined there)."""
     engine: str = "local"        # "local" (here) | "global" (q4dic, later)
-    subset: int = 31             # subset side in px (forced odd, >=5)
+    subset: int = 31             # subset side in px (odd, >=5)
     step: int = 16               # grid spacing in px
-    search: int = 16             # half search window in px
-    zncc_min: float = 0.5        # validity threshold on the ZNCC peak
+    search: int = 16             # half search range in px
+    zncc_min: float = 0.5        # validity threshold on the ZNCC score
     subpixel: bool = True
+    subpixel_method: str = "icgn"
+    min_std_rel: float = 1e-3
 
     def to_json_dict(self) -> dict:
         return asdict(self)
@@ -62,10 +81,14 @@ def make_grid(roi: Tuple[float, float, float, float], step: int,
               margin: int = 0) -> np.ndarray:
     """Regular grid of point centres (px) inside `roi`=(x,y,w,h). `margin`
     insets the grid from the ROI border (use subset//2 + search to keep
-    subsets fully inside the image). Returns (n_points, 2) float array."""
+    subsets fully inside the image). Returns (n_points, 2) float array.
+
+    The centres are INTEGER pixel indices (pixel centres): a fractional ROI
+    (drawn with the mouse) is snapped inwards, so the subset actually
+    correlated and the exported coordinate are the same point."""
     x, y, w, h = roi
-    x0 = x + margin; x1 = x + w - margin
-    y0 = y + margin; y1 = y + h - margin
+    x0 = np.ceil(x + margin - 1e-9); x1 = np.floor(x + w - margin + 1e-9)
+    y0 = np.ceil(y + margin - 1e-9); y1 = np.floor(y + h - margin + 1e-9)
     if x1 <= x0 or y1 <= y0:
         return np.empty((0, 2), float)
     xs = np.arange(x0, x1 + 1e-9, step, dtype=float)
@@ -74,9 +97,18 @@ def make_grid(roi: Tuple[float, float, float, float], step: int,
     return np.column_stack([gx.ravel(), gy.ravel()])
 
 
+def pixel_centres(points: np.ndarray) -> np.ndarray:
+    """Integer pixel centres used as subset centres (round half up, the same
+    rule for every point, unlike Python's round-half-to-even)."""
+    return np.floor(np.asarray(points, float).reshape(-1, 2) + 0.5)
+
+
 def _subpixel_parabola(c: np.ndarray, iy: int, ix: int) -> Tuple[float, float]:
     """Parabolic sub-pixel refinement of a correlation peak at integer (iy,ix)
-    within the 2D map `c`. Returns (sy, sx) sub-pixel offsets in (-1, 1)."""
+    within the 2D map `c`. Returns (sy, sx) sub-pixel offsets in [-0.5, 0.5]
+    for a genuine maximum. Legacy estimator: for a Gaussian-like peak of std
+    s it returns k(s)*u for a small offset u, k = q / (2 s^2 (1 - q)),
+    q = exp(-1/(2 s^2)) < 1 (k = 0.88 for s = 1.4 px): peak locking."""
     sy = sx = 0.0
     if 0 < iy < c.shape[0] - 1:
         a, b, d = c[iy - 1, ix], c[iy, ix], c[iy + 1, ix]
@@ -91,35 +123,138 @@ def _subpixel_parabola(c: np.ndarray, iy: int, ix: int) -> Tuple[float, float]:
     return float(np.clip(sy, -1, 1)), float(np.clip(sx, -1, 1))
 
 
+def _subpixel_gauss(c: np.ndarray, iy: int, ix: int) -> Tuple[float, float]:
+    """3-point Gaussian fit (vertex of the parabola through the LOG of the
+    correlation values): exact for a Gaussian peak. Falls back to the
+    parabola along an axis where a value is <= 0 (log undefined)."""
+    def one(a, b, d):
+        if min(a, b, d) > 0:
+            a, b, d = np.log(a), np.log(b), np.log(d)
+        den = a - 2 * b + d
+        return 0.5 * (a - d) / den if abs(den) > 1e-12 else 0.0
+    sy = sx = 0.0
+    if 0 < iy < c.shape[0] - 1:
+        sy = one(c[iy - 1, ix], c[iy, ix], c[iy + 1, ix])
+    if 0 < ix < c.shape[1] - 1:
+        sx = one(c[iy, ix - 1], c[iy, ix], c[iy, ix + 1])
+    return float(np.clip(sy, -1, 1)), float(np.clip(sx, -1, 1))
+
+
+def _icgn_translation(tmpl: np.ndarray, coeffs: np.ndarray, cx: float,
+                      cy: float, u0: Tuple[float, float], max_iter: int = 20,
+                      tol: float = 1e-4):
+    """Sub-pixel translation by Gauss-Newton on the ZNSSD criterion, with the
+    gradient of the reference subset kept fixed (inverse-compositional
+    Hessian, additive translation update). The deformed image is sampled by
+    cubic B-spline interpolation (``coeffs`` = ``spline_filter(cur, 3)``).
+
+    ``(cx, cy)`` is the subset centre (integer px) in the reference, ``u0``
+    the integer-peak displacement. Returns (u, zncc, ok): u = (dx, dy) px,
+    zncc the ZNCC at the solution, ok False when the iteration fails
+    (singular Hessian, divergence beyond 1 px from u0, no convergence)."""
+    from scipy.ndimage import map_coordinates
+    half = tmpl.shape[0] // 2
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(float)
+    f = tmpl.astype(float)
+    fm = f - f.mean()
+    fn = float(np.sqrt((fm ** 2).sum()))
+    gy, gx = np.gradient(f)
+    J = np.column_stack([gx.ravel(), gy.ravel()])
+    Hs = J.T @ J
+    if fn <= 0 or abs(np.linalg.det(Hs)) < 1e-12:
+        return np.array(u0, float), float("nan"), False
+    Hinv = np.linalg.inv(Hs)
+    u = np.array(u0, float)
+    zn = float("nan")
+    for _ in range(max_iter):
+        g = map_coordinates(coeffs, [cy + yy + u[1], cx + xx + u[0]],
+                            order=3, mode="mirror", prefilter=False)
+        gm = g - g.mean()
+        gn = float(np.sqrt((gm ** 2).sum()))
+        if gn <= 0:
+            return u, float("nan"), False
+        zn = float((fm * gm).sum() / (fn * gn))
+        du = Hinv @ (J.T @ ((fm / fn - gm / gn).ravel() * fn))
+        u = u + du
+        if not np.all(np.isfinite(u)) or np.max(np.abs(u - np.asarray(u0))) > 1.0:
+            return u, zn, False
+        if float(np.hypot(*du)) < tol:
+            g = map_coordinates(coeffs, [cy + yy + u[1], cx + xx + u[0]],
+                                order=3, mode="mirror", prefilter=False)
+            gm = g - g.mean()
+            gn = float(np.sqrt((gm ** 2).sum()))
+            zn = float((fm * gm).sum() / (fn * gn)) if gn > 0 else float("nan")
+            return u, zn, True
+    return u, zn, False
+
+
 def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
                     subset: int = 31, search: int = 16, zncc_min: float = 0.5,
-                    subpixel: bool = True):
+                    subpixel: bool = True, subpixel_method: str = "icgn",
+                    min_std_rel: float = 1e-3, return_info: bool = False):
     """Local subset ZNCC displacement of each point from `ref` to `cur`.
 
+    Conventions: image axes (x = column, y = row, y downward); a point is a
+    pixel centre, rounded half up (``pixel_centres``); ``disp`` is the motion
+    of the material from `ref` to `cur` (content moving right -> dx > 0).
+
+    Integer search: ``cv2.matchTemplate(cur_window, ref_subset,
+    TM_CCOEFF_NORMED)`` (= ZNCC) over displacements in [-search, +search].
+    Sub-pixel: see ``DicParams.subpixel_method``. A point is INVALID when
+      - its subset (or the search window) is not fully inside the image,
+      - the subset or its match is textureless (std < min_std_rel * ptp(ref);
+        ZNCC is undefined there and OpenCV returns 1 for two flat patches),
+      - the integer peak lies on the border of the search range (the true
+        displacement may be beyond ``search``; no sub-pixel is possible),
+      - the ICGN refinement fails (``subpixel_method='icgn'``),
+      - the ZNCC score is below ``zncc_min``.
+
     Returns (disp, valid, score):
-      disp  : (n_points, 2) displacement (dx, dy) in pixels (image axes)
-      valid : (n_points,) bool, ZNCC peak >= zncc_min and subset in-bounds
-      score : (n_points,) ZNCC peak value
+      disp  : (n_points, 2) displacement (dx, dy) in pixels (image axes);
+              NaN where the correlation could not be computed
+      valid : (n_points,) bool
+      score : (n_points,) ZNCC (at the refined position for 'icgn', else the
+              integer peak)
+    With ``return_info=True`` a 4th item is returned: a dict of (n_points,)
+    bool arrays 'edge' (peak on the search border), 'flat' (textureless) and
+    'icgn_failed'.
     """
     import cv2
+    s = int(subset)
+    if s < 5 or s % 2 == 0:
+        raise ValueError("subset must be an odd integer >= 5 (got %r)" % subset)
+    if subpixel_method not in SUBPIXEL_METHODS:
+        raise ValueError("subpixel_method must be one of %s" % (SUBPIXEL_METHODS,))
     R = _to_gray_f32(ref)
     C = _to_gray_f32(cur)
     H, W = R.shape
-    s = int(subset) | 1            # force odd
     half = s // 2
     sr = int(search)
-    pts = np.asarray(points, float).reshape(-1, 2)
-    n = len(pts)
+    if sr < 1:
+        raise ValueError("search must be >= 1 px")
+    min_std = float(min_std_rel) * float(np.ptp(R))
+    use_icgn = subpixel and subpixel_method == "icgn"
+    coeffs = None
+    if use_icgn:
+        from scipy.ndimage import spline_filter
+        coeffs = spline_filter(C.astype(np.float64), order=3, mode="mirror")
+    centres = pixel_centres(points)
+    n = len(centres)
     disp = np.full((n, 2), np.nan)
     valid = np.zeros(n, bool)
     score = np.full(n, np.nan)
+    edge = np.zeros(n, bool)
+    flat = np.zeros(n, bool)
+    failed = np.zeros(n, bool)
     for k in range(n):
-        px, py = pts[k]
-        ix, iy = int(round(px)), int(round(py))
+        ix, iy = int(centres[k, 0]), int(centres[k, 1])
         # reference subset (template) fully inside ref
         if ix - half < 0 or iy - half < 0 or ix + half >= W or iy + half >= H:
             continue
         tmpl = R[iy - half:iy + half + 1, ix - half:ix + half + 1]
+        if float(tmpl.std()) <= min_std:
+            flat[k] = True
+            continue
         # search window in cur, clamped to image
         x0 = max(0, ix - half - sr); x1 = min(W, ix + half + 1 + sr)
         y0 = max(0, iy - half - sr); y1 = min(H, iy + half + 1 + sr)
@@ -129,17 +264,35 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         corr = cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED)
         _, peak, _, maxloc = cv2.minMaxLoc(corr)
         cx, cy = maxloc            # top-left of best match within `corr`
-        sy = sx = 0.0
-        if subpixel:
-            sy, sx = _subpixel_parabola(corr, cy, cx)
-        # displacement = (matched top-left in cur) - (template top-left in ref)
-        match_x = x0 + cx + sx
-        match_y = y0 + cy + sy
-        ref_x = ix - half
-        ref_y = iy - half
-        disp[k] = (match_x - ref_x, match_y - ref_y)
-        score[k] = peak
-        valid[k] = peak >= zncc_min
+        if float(win[cy:cy + s, cx:cx + s].std()) <= min_std:
+            flat[k] = True
+            continue
+        # integer displacement = matched top-left in cur - template top-left
+        dx0 = x0 + cx - (ix - half)
+        dy0 = y0 + cy - (iy - half)
+        edge[k] = (cx == 0 or cy == 0 or cx == corr.shape[1] - 1
+                   or cy == corr.shape[0] - 1)
+        zn = float(peak)
+        if edge[k] or not subpixel:
+            dx, dy = float(dx0), float(dy0)
+        elif use_icgn:
+            u, zi, ok = _icgn_translation(tmpl, coeffs, ix, iy, (dx0, dy0))
+            if ok:
+                dx, dy = float(u[0]), float(u[1])
+                zn = zi
+            else:
+                failed[k] = True
+                dx, dy = float(dx0), float(dy0)
+        else:
+            fn_ = _subpixel_gauss if subpixel_method == "gauss" else _subpixel_parabola
+            sy, sx = fn_(corr, cy, cx)
+            dx, dy = dx0 + sx, dy0 + sy
+        disp[k] = (dx, dy)
+        score[k] = zn
+        valid[k] = (zn >= zncc_min) and not edge[k] and not failed[k]
+    if return_info:
+        return disp, valid, score, {"edge": edge, "flat": flat,
+                                    "icgn_failed": failed}
     return disp, valid, score
 
 
@@ -194,7 +347,12 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     is an optional detailed callback invoked once per pair with a dict::
 
         {'index': i, 'n_pairs': N, 'n_valid': k, 'n_total': m,
-         'mean_zncc': float | None, 'elapsed_s': float, 'frame_s': float}
+         'mean_zncc': float | None, 'n_edge': e, 'n_flat': f,
+         'elapsed_s': float, 'frame_s': float}
+
+    where ``n_edge`` counts the (unmasked) points whose correlation peak hit
+    the border of the search range (displacement possibly >= ``search``:
+    increase it) and ``n_flat`` the textureless ones.
 
     meant to drive a status log and an ETA in the UI; it does not affect the
     computation.
@@ -217,7 +375,8 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     output cumulated ``Exx``/``Eyy``/``Exy``/``Eeq`` fields.
     """
     n_img = len(frames)
-    pts = np.asarray(points, float).reshape(-1, 2)
+    # Export the centres actually correlated (integer pixel centres).
+    pts = pixel_centres(points)
     n_pts = len(pts)
     n_pairs = max(0, n_img - 1)
     dt = 1.0 / fps if fps else 1.0
@@ -227,6 +386,10 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     x_mm = xy[:, 0] if n_pts else np.empty(0)
     y_mm = xy[:, 1] if n_pts else np.empty(0)
     grid = grid_from_points(x_mm, y_mm)
+    # Finite-difference strain rates need >= 2 points along both axes (a
+    # one-row/one-column grid made np.gradient raise); otherwise they stay NaN.
+    strain_grid = (grid is not None and grid[0].size >= 2
+                   and grid[1].size >= 2)
 
     names = ["Ux", "Uy", "Umag", "Vx", "Vy", "Vmag",
              "Exx_dot", "Eyy_dot", "Exy_dot", "Eeq_dot", "ZNCC"]
@@ -237,7 +400,8 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     keep_static = (np.ones(n_pts, bool) if point_keep is None
                    else np.asarray(point_keep, bool))
     mp = mask_params or {}
-    mask_win = int(mp.get("win", max(5, int(params.subset) // 2)))
+    # The mask window is the subset itself (the pixels the correlation uses).
+    mask_win = int(mp.get("win", int(params.subset)))
     mask_min_int = float(mp.get("min_intensity", 0.0))
 
     if grid is not None:
@@ -255,10 +419,13 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
                               min_intensity=mask_min_int)
         else:
             keep = keep_static
-        disp, ok, score = correlate_local(
+        disp, ok, score, cinfo = correlate_local(
             frames[i], frames[i + 1], pts,
             subset=params.subset, search=params.search,
-            zncc_min=params.zncc_min, subpixel=params.subpixel)
+            zncc_min=params.zncc_min, subpixel=params.subpixel,
+            subpixel_method=getattr(params, "subpixel_method", "icgn"),
+            min_std_rel=getattr(params, "min_std_rel", 1e-3),
+            return_info=True)
         ok = ok & keep                          # masked-out points are invalid
         # ZNCC peak as the per-point DIC quality/score (kept even where the
         # correlation is below threshold, so low-quality zones are visible);
@@ -277,7 +444,7 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
         valid[i] = ok
         t[i] = trigger_offset_s + (i + 0.5) * dt
 
-        if grid is not None:
+        if strain_grid:
             ux_g = np.full((uy.size, ux.size), np.nan)
             uy_g = np.full((uy.size, ux.size), np.nan)
             ux_g[iy, ix] = ux_mm
@@ -304,6 +471,8 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
             on_frame({"index": i, "n_pairs": n_pairs,
                       "n_valid": n_valid, "n_total": n_total,
                       "mean_zncc": mean_zncc,
+                      "n_edge": int((cinfo["edge"] & keep).sum()),
+                      "n_flat": int((cinfo["flat"] & keep).sum()),
                       "elapsed_s": now - t_start,
                       "frame_s": now - t_frame0})
 
@@ -320,8 +489,9 @@ def point_mask(image: np.ndarray, points: np.ndarray, win: int = 15,
                min_intensity: float = 0.0):
     """Keep-mask for measurement points based on the reference frame: a point
     is kept if its local window has mean intensity >= `min_intensity` (drops
-    the dark scene background / out-of-material regions). Returns a
-    (n_points,) bool array.
+    the dark scene background / out-of-material regions). ``win`` is the FULL
+    window side (pass the subset size so the test covers the pixels that the
+    correlation uses). Returns a (n_points,) bool array.
 
     The texture (local std) criterion was removed: masking is intensity-only,
     consistent across the local and global engines.
@@ -329,10 +499,10 @@ def point_mask(image: np.ndarray, points: np.ndarray, win: int = 15,
     g = _to_gray_f32(image)
     H, W = g.shape
     half = max(1, int(win) // 2)
-    pts = np.asarray(points, float).reshape(-1, 2)
+    pts = pixel_centres(points)
     keep = np.ones(len(pts), bool)
     for k in range(len(pts)):
-        ix, iy = int(round(pts[k, 0])), int(round(pts[k, 1]))
+        ix, iy = int(pts[k, 0]), int(pts[k, 1])
         x0, x1 = max(0, ix - half), min(W, ix + half + 1)
         y0, y1 = max(0, iy - half), min(H, iy + half + 1)
         patch = g[y0:y1, x0:x1]
@@ -351,7 +521,7 @@ def velocity_fields(frames, points: np.ndarray, params: DicParams,
     Returns dict with x, y, t, V1, V2, Vmag, valid.
     """
     n_img = len(frames)
-    pts = np.asarray(points, float).reshape(-1, 2)
+    pts = pixel_centres(points)
     n_pts = len(pts)
     n_pairs = max(0, n_img - 1)
 
@@ -372,7 +542,9 @@ def velocity_fields(frames, points: np.ndarray, params: DicParams,
         disp, ok, _ = correlate_local(
             frames[i], frames[i + 1], pts,
             subset=params.subset, search=params.search,
-            zncc_min=params.zncc_min, subpixel=params.subpixel)
+            zncc_min=params.zncc_min, subpixel=params.subpixel,
+            subpixel_method=getattr(params, "subpixel_method", "icgn"),
+            min_std_rel=getattr(params, "min_std_rel", 1e-3))
         vx = disp[:, 0] * mm_per_px / dt            # +x is +x in both frames
         vy = -disp[:, 1] * mm_per_px / dt           # image y down -> model y up
         V1[i] = vx
