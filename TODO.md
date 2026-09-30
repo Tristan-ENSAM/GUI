@@ -69,11 +69,12 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
       unités, graine Morris, valeurs de chaque run liées au nom du job).
   - **Cartes de sensibilité écrites automatiquement** à la fin d'un run
     jacobien avec champs ROI, dans `<dossier d'étude>/sensitivity_maps/`
-    (`gui/sensitivity/map_export.py`, thread d'arrière-plan) : un CSV par
-    (champ, paramètre) — élément, centroïde, moyenne temporelle signée,
-    RMS temporel, une colonne signée par frame — deux PNG (moyenne signée,
-    RMS), plus `maps_index.csv`, `frame_times.csv`, `mesh_nodes.csv`,
-    `mesh_elements.csv`.
+    (`gui/sensitivity/map_export.py`, thread d'arrière-plan) : un `.npz`
+    compressé par (champ, paramètre) — `S` (frames × éléments, signé),
+    `time_mean`, `time_rms` + métadonnées (unité, pas, schéma) — deux PNG
+    (moyenne signée, RMS), plus `mesh.npz` (nœuds, faces, centroïdes, temps
+    des frames) et `maps_index.csv` (index texte). Lecture :
+    `np.load(fichier)`, sans `allow_pickle`.
 - **Ajouts UI (session courante)** :
   - Onglet Sensitivity : la colonne **Ref** est resynchronisée avec le
     Numerical Model courant. `showEvent` n'étant pas fiable pour une page

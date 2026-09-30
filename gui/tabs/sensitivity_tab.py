@@ -10,7 +10,8 @@ Lets the user:
     read the results table, the ranking chart and the per-element maps.
 
 Each campaign gets its own study folder (config.json records the full plan);
-the per-element maps are written to its `sensitivity_maps/` sub-folder.
+the per-element maps (.npz arrays + PNG images) are written to its
+`sensitivity_maps/` sub-folder.
 """
 from __future__ import annotations
 
@@ -1288,7 +1289,7 @@ class SensitivityTab(QWidget):
         return job
 
     def _export_field_maps(self, out_dir, wait=False):
-        """Write the maps (CSV tables + PNG images) to `out_dir`, a sub-folder
+        """Write the maps (.npz arrays + PNG images) to `out_dir`, a sub-folder
         of the study folder. Runs in a background thread so rendering a few
         dozen images does not freeze the window; `wait=True` (tests) runs it
         inline. The outcome reaches the status line via _mapsExported."""
