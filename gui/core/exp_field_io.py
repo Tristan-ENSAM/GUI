@@ -27,11 +27,17 @@ def _json_path(npz_path) -> Path:
 
 def save_dic_field(npz_path, x, y, t, V1, V2, Vmag, valid,
                    meta: Optional[dict] = None, extra: Optional[dict] = None,
-                   units: Optional[dict] = None) -> Path:
+                   units: Optional[dict] = None,
+                   mesh: Optional[dict] = None) -> Path:
     """Write a DIC velocity field as <stem>.npz + <stem>.json. `extra` holds
     additional (n_frames, n_points) arrays (e.g. strain / strain-rate fields)
     saved alongside V1/V2/Vmag; `units` maps array names to units (stored in
-    the json). Returns the .npz path."""
+    the json). `mesh` (global Q4 engine) holds arrays saved with their own
+    dtype and shape under the key prefix ``mesh_`` -- nodes_px (n_nodes, 2),
+    connectivity (n_elem, 4), per-pair n_iter / converged / residual_final,
+    residual_elem and element strain rates (n_pairs, n_elem) -- so the whole
+    sequence and its measurement mesh live in one npz. Returns the .npz
+    path."""
     p = Path(npz_path)
     if p.suffix.lower() != ".npz":
         p = p.with_suffix(".npz")
@@ -43,13 +49,22 @@ def save_dic_field(npz_path, x, y, t, V1, V2, Vmag, valid,
     if extra:
         for k, v in extra.items():
             arrays[k] = np.asarray(v, np.float32)
+    mesh_keys = []
+    if mesh:
+        for k, v in mesh.items():
+            key = "mesh_" + k
+            arrays[key] = np.asarray(v)
+            mesh_keys.append(key)
     np.savez_compressed(p, **arrays)
 
     info = {
         "format_version": FORMAT_VERSION,
         "modality": "dic",
         "units": units or {"x": "mm", "y": "mm", "t": "s", "V": "mm/s"},
-        "fields": sorted(k for k in arrays if k not in ("x", "y", "t", "valid")),
+        "fields": sorted(k for k in arrays
+                         if k not in ("x", "y", "t", "valid")
+                         and k not in mesh_keys),
+        "mesh_arrays": sorted(mesh_keys),
         "n_points": int(x.size),
         "n_frames": int(t.size),
     }
