@@ -1,22 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Sensitivity tab — Morris screening (Lot 2b, UI).
+Sensitivity tab — local Jacobian (finite differences) or Morris screening.
 
 Lets the user:
-  * tick which model parameters to vary and edit their min/max
-    (pre-filled from the current model value, in displayed units),
-  * choose which QoI to screen,
-  * set N (trajectories) and the Morris grid levels,
-  * generate the sampling plan (cost = N*(k+1) runs) and preview it.
+  * tick which model parameters to vary (Ref = current model value, in
+    displayed units), set the FD step (Jacobian) or Min/Max (Morris),
+  * choose the scalar QoI and, for the Jacobian, the ROI fields,
+  * generate the plan, run it through Abaqus in a background thread, then
+    read the results table, the ranking chart and the per-element maps.
 
-Running the plan and plotting mu*/sigma come next (Lots 2c / 2d). The
-generated plan is kept on the tab (`self.plan`) for the runner to pick up.
+Each campaign gets its own study folder (config.json records the full plan);
+the per-element maps are written to its `sensitivity_maps/` sub-folder.
 """
 from __future__ import annotations
 
+import copy
+import threading
+import warnings
+from pathlib import Path
+
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QTextCursor
 
 from matplotlib.figure import Figure
@@ -34,6 +39,7 @@ from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
+from gui.sensitivity import map_export as mx
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.widgets.field_viewer import FieldViewer
 from gui.core.sta_parser import parse_sta
@@ -55,6 +61,10 @@ _EXCLUDED_PATHS = {"elem_size"}
 
 
 class SensitivityTab(QWidget):
+    # Emitted from the map-export thread: (output folder, files written,
+    # error message or "").
+    _mapsExported = Signal(str, int, str)
+
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
                  profile_name_getter=None):
         super().__init__()
@@ -84,6 +94,12 @@ class SensitivityTab(QWidget):
         self._run_total = 0
         self._sta_timer = None           # live .sta poller during a run
         self._row_spec = {}              # table row -> ParamSpec
+        self._table_units = None         # UnitSystem the table is shown in
+        self._run_field_vars = None      # ROI fields of the active/last run
+        self._map_mesh = None            # (nodes_xy, face_idx) of the maps
+        self._map_extra = {}             # centroids / frame times for export
+        self._maps_thread = None         # background map export
+        self._mapsExported.connect(self._on_maps_exported)
 
         root = QVBoxLayout(self)
 
@@ -340,6 +356,7 @@ class SensitivityTab(QWidget):
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         tu = self._temp_unit()
+        self._table_units = pr.current_system(tu)
         for category, specs in pr.registry_by_category().items():
             if category in _EXCLUDED_CATEGORIES:
                 continue
@@ -495,8 +512,17 @@ class SensitivityTab(QWidget):
         edits made in the Numerical Model tabs are reflected here. For rows
         the user is actively configuring (Vary ticked), Min/Max and Delta%
         are preserved and only the absolute Delta is recomputed from the new
-        Ref; untouched rows get their default trust region recomputed."""
+        Ref; untouched rows get their default trust region recomputed.
+
+        If the display unit system changed (Settings, or the °C/K switch),
+        the ticked rows' Min/Max/Delta are CONVERTED to the new units (same
+        physical values) and Delta% is recomputed from them, instead of being
+        kept as numbers that now mean something else. A plan generated under
+        the old units is invalidated."""
         tu = self._temp_unit()
+        new_units = pr.current_system(tu)
+        old_units = self._table_units
+        units_changed = old_units is not None and old_units != new_units
         self.table.blockSignals(True)
         try:
             for r, spec in self._row_spec.items():
@@ -512,7 +538,11 @@ class SensitivityTab(QWidget):
                 chk = self.table.item(r, 0)
                 is_checked = (chk is not None
                               and chk.checkState() == Qt.Checked)
-                if is_checked:
+                if is_checked and units_changed:
+                    self._convert_row_units(r, spec, old_units, new_units,
+                                            new_ref)
+                    self._flag_trust_region(r, new_ref)
+                elif is_checked:
                     # preserve the user's trust region + relative step;
                     # rescale only the absolute Delta to the new Ref.
                     pct = self._cell_float(r, 6)
@@ -530,6 +560,44 @@ class SensitivityTab(QWidget):
                     self._flag_trust_region(r, new_ref)
         finally:
             self.table.blockSignals(False)
+        self._table_units = new_units
+        self._invalidate_plan_if_units_changed()
+
+    def _convert_row_units(self, row, spec, old_units, new_units, new_ref):
+        """Re-express a ticked row's Min, Max and Delta in `new_units`.
+        Min/Max are absolute values (a temperature gets the °C/K offset);
+        Delta is a difference, so it takes the scale but not the offset
+        (conversions are affine: conv(d) - conv(0))."""
+        def conv(v):
+            return spec.to_display(spec.to_stored(v, system=old_units),
+                                   system=new_units)
+        for col in (3, 4):
+            v = self._cell_float(row, col)
+            if v is not None:
+                self._set_cell(row, col, _fmt(conv(v)))
+        d = self._cell_float(row, 5)
+        if d is not None:
+            d_new = conv(d) - conv(0.0)
+            self._set_cell(row, 5, _fmt(d_new))
+            self._set_cell(row, 6, _fmt(100.0 * d_new / abs(new_ref))
+                           if new_ref else _fmt(0.0))
+
+    def _plan_units_stale(self) -> bool:
+        """True if the current plan was generated under other display units
+        than the ones the table now shows."""
+        plan_units = getattr(self.plan, "unit_system", None)
+        return (plan_units is not None
+                and plan_units != pr.current_system(self._temp_unit()))
+
+    def _invalidate_plan_if_units_changed(self):
+        # Never while a campaign runs: the worker and the maps still use it.
+        if self._thread is not None or not self._plan_units_stale():
+            return
+        self.plan = None
+        self.btn_run.setEnabled(False)
+        self.preview.clear()
+        self._warn("The unit system changed since the plan was generated: "
+                   "the plan was discarded, generate it again.")
 
     def _current_cpus(self) -> int:
         if self._cpus_getter:
@@ -608,7 +676,7 @@ class SensitivityTab(QWidget):
             except (ValueError, AttributeError):
                 raise ValueError("%s: delta must be a number." % spec.label)
             norm = self.table.item(r, 7).checkState() == Qt.Checked
-            x0 = pr.get_display(self.cfg, spec, tu)
+            x0 = pr.get_display(self.cfg, spec, tu, system=self._table_units)
             selected.append((spec, x0, delta, norm))
         return selected
 
@@ -641,7 +709,8 @@ class SensitivityTab(QWidget):
                     return
                 plan = mp.build_plan(selected, N=self.spin_traj.value(),
                                      num_levels=self.spin_levels.value(),
-                                     temp_unit=self._temp_unit())
+                                     temp_unit=self._temp_unit(),
+                                     unit_system=self._table_units)
             else:
                 if not qois and not field_vars:
                     self._warn("Tick at least one QoI (a scalar QoI, or a ROI "
@@ -652,7 +721,8 @@ class SensitivityTab(QWidget):
                     self._warn("Tick at least one parameter to vary.")
                     return
                 plan = jac.build_plan(selected, scheme=self._scheme(),
-                                      temp_unit=self._temp_unit())
+                                      temp_unit=self._temp_unit(),
+                                      unit_system=self._table_units)
         except ValueError as e:
             self._warn(str(e))
             return
@@ -672,9 +742,9 @@ class SensitivityTab(QWidget):
         if method == "morris":
             self.status.setText(
                 "Morris plan ready: %d parameters, N=%d trajectories, "
-                "%d runs, %d QoI (%s). Ready for the run step." % (
+                "%d runs, %d QoI (%s), seed %d. Ready for the run step." % (
                     plan.k, plan.N, plan.n_runs, len(qoi_names),
-                    ", ".join(qoi_names) if qoi_names else "—"))
+                    ", ".join(qoi_names) if qoi_names else "—", plan.seed))
         else:
             self.status.setText(
                 "Jacobian (%s FD) plan ready: %d parameters, %d runs, %d QoI "
@@ -694,6 +764,9 @@ class SensitivityTab(QWidget):
             return
         if self._thread is not None:
             self._warn("A run is already in progress.")
+            return
+        if self._plan_units_stale():
+            self._invalidate_plan_if_units_changed()
             return
         prefs = self._prefs_getter() if self._prefs_getter else None
         if prefs is None:
@@ -738,11 +811,12 @@ class SensitivityTab(QWidget):
                       if self._profile_name_getter else None)
         except Exception:
             _pname = None
-        _study_cfg = {"plan_kind": self.plan_kind,
-                      "n_runs": int(self.plan.n_runs),
-                      "qois": [getattr(q, "name", str(q))
-                               for q in self.selected_qois],
-                      "field_vars": list(self._selected_field_vars())}
+        # Morris ignores the ROI fields (Jacobian-only construction): do not
+        # record or pass them, so config.json says what was really run.
+        field_vars = (self._selected_field_vars()
+                      if self.plan_kind == "jacobian" else [])
+        cpus = self._current_cpus()
+        _study_cfg = self._plan_record(field_vars, cpus)
         try:
             wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg)
         except OSError:
@@ -764,11 +838,14 @@ class SensitivityTab(QWidget):
         self._sta_timer.timeout.connect(self._poll_sta)
         self._sta_timer.start()
 
-        field_vars = self._selected_field_vars()
+        self._run_field_vars = list(field_vars)
+        # The worker gets its own copy of the model: it expands the plan in
+        # its thread, while the user may keep editing the live cfg here.
         self._worker = SensitivityRunWorker(
-            self.plan, self.plan_kind, self.selected_qois, self.cfg,
+            self.plan, self.plan_kind, self.selected_qois,
+            copy.deepcopy(self.cfg),
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
-            workdir=str(wd), cpus=self._current_cpus(),
+            workdir=str(wd), cpus=cpus,
             job_prefix="sensitivity", field_vars=field_vars)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -779,6 +856,52 @@ class SensitivityTab(QWidget):
         self._worker.finished.connect(self._on_run_finished)
         self._worker.failed.connect(self._on_run_failed)
         self._thread.start()
+
+    def _plan_record(self, field_vars, cpus) -> dict:
+        """Everything needed to understand -- and regenerate -- this campaign,
+        for the study folder's config.json: the varied parameters with their
+        base/step or bounds (in the plan's units, which are recorded), the
+        method settings (Morris seed included) and the value of every
+        parameter in every run, keyed to the job name on disk."""
+        plan = self.plan
+        tu = getattr(plan, "temp_unit", "C")
+        system = getattr(plan, "unit_system", None)
+        params = []
+        for i, spec in enumerate(plan.specs):
+            d = {"path": spec.path, "label": spec.label,
+                 "unit": self._plan_unit(plan, spec)}
+            if self.plan_kind == "jacobian":
+                d.update(base=float(plan.base[i]), delta=float(plan.deltas[i]),
+                         normalize=bool(plan.normalize[i]))
+            else:
+                lo, hi = plan.bounds[i]
+                d.update(min=float(lo), max=float(hi))
+            params.append(d)
+        rec = {"plan_kind": self.plan_kind,
+               "n_runs": int(plan.n_runs),
+               "qois": [q.id for q in self.selected_qois],
+               "field_vars": list(field_vars),
+               "cpus": int(cpus),
+               "temp_unit": tu,
+               "unit_system": (system.to_dict()
+                               if hasattr(system, "to_dict") else None),
+               "varied_parameters": params}
+        if self.plan_kind == "jacobian":
+            rec["scheme"] = plan.scheme
+            rows = jac.profile_table(plan)
+        else:
+            rec.update(N=int(plan.N), num_levels=int(plan.num_levels),
+                       seed=plan.seed)
+            rows = mp.profile_table(plan)
+        runs = []
+        for d in rows:
+            run = {"run": d["run"], "job": "sensitivity_run%03d" % (d["run"] - 1)}
+            if "kind" in d:
+                run["kind"] = d["kind"]
+            run["values"] = {p: float(d[p]) for p in plan.param_paths}
+            runs.append(run)
+        rec["runs"] = runs
+        return rec
 
     def _on_cancel(self):
         if self._worker is not None:
@@ -909,21 +1032,62 @@ class SensitivityTab(QWidget):
     def _on_run_finished(self, result):
         self._last_result = result
         self._teardown_thread()
-        n_ok = result.Y.shape[0] - len(result.failures)
-        self.status.setStyleSheet("color: #15803d;")
-        self.status.setText(
-            "Run finished: %d/%d successful, %d failed. See Results."
-            % (n_ok, result.Y.shape[0], len(result.failures)))
+        msg, warn = self._run_summary(result)
+        self.status.setStyleSheet("color: #b45309;" if warn
+                                  else "color: #15803d;")
+        self.status.setText(msg)
         self._show_results(result)
         self._build_field_maps(result)
         self.btn_export.setEnabled(result.Y.shape[0] > 0)
         self.tabs_out.setCurrentWidget(self.results_table)
+        if self._field_maps and self._run_workdir is not None:
+            self._export_field_maps(Path(self._run_workdir) / mx.MAPS_SUBDIR)
+
+    @staticmethod
+    def _run_summary(result):
+        """Status line for a finished (or cancelled) campaign, and whether it
+        deserves a warning colour. Runs never launched after a Cancel are
+        reported as such, not counted as successes."""
+        total = int(result.Y.shape[0])
+        n_att = getattr(result, "n_attempted", total)
+        n_fail = len(result.failures)
+        n_ok = n_att - n_fail
+        if getattr(result, "cancelled", False):
+            msg = ("Run cancelled: %d/%d runs launched — %d successful, "
+                   "%d failed or interrupted, %d not run."
+                   % (n_att, total, n_ok, n_fail, total - n_att))
+        else:
+            msg = "Run finished: %d/%d successful, %d failed." % (
+                n_ok, total, n_fail)
+        warn = bool(n_fail) or n_att < total
+        if result.plan_kind == "morris":
+            notes = []
+            for qid in result.qoi_ids:
+                a = result.analyses.get(qid, {})
+                n_tr = a.get("n_trajectories")
+                if n_tr is None:
+                    continue
+                if "error" in a:
+                    notes.append("%s: not analysed (%d/%d complete "
+                                 "trajectories, 2 needed)"
+                                 % (qid, a.get("n_used", 0), n_tr))
+                elif a.get("n_dropped"):
+                    notes.append("%s: %d/%d trajectories" % (
+                        qid, a["n_used"], n_tr))
+            if notes:
+                warn = True
+                msg += (" Morris uses only complete trajectories (a failed "
+                        "or missing run drops its trajectory) — "
+                        + "; ".join(notes) + ".")
+        return msg + " See Results.", warn
 
     # =====================================================================
     # Per-element sensitivity maps
     # =====================================================================
     def _clear_map(self):
         self._map_mesh_set = False
+        self._map_mesh = None
+        self._map_extra = {}
         try:
             self.fv_map.clear()
         except Exception:
@@ -945,7 +1109,11 @@ class SensitivityTab(QWidget):
         self._map_param_paths = []
         self._map_field_vars = []
         self._map_n_frames = 0
-        field_vars = self._selected_field_vars()
+        # The fields of THIS run (captured at launch), not the checkboxes as
+        # they may have been edited since; tests without a launch fall back.
+        field_vars = (list(self._run_field_vars)
+                      if self._run_field_vars is not None
+                      else self._selected_field_vars())
         bundles = getattr(result, "bundles", None)
         plan = getattr(self, "plan", None)
         if (result.plan_kind != "jacobian" or not field_vars
@@ -1015,17 +1183,24 @@ class SensitivityTab(QWidget):
             return False
         try:
             info = bundle.instance(inst)
-            nodes = bundle.nodes_init(info.name)        # (n_nodes, 3)
-            elems = bundle.elements(info.name)           # (n_elem, 8)
-            nodes_xy = np.asarray(nodes)[:, :2]
-            conn = np.asarray(elems)
-            P = nodes_xy[conn]                           # (n_elem, n_loc, 2)
-            c = P.mean(axis=1, keepdims=True)
-            ang = np.arctan2(P[:, :, 1] - c[:, :, 1], P[:, :, 0] - c[:, :, 0])
-            order = np.argsort(ang, axis=1)
-            face_idx = np.take_along_axis(conn, order, axis=1)
+            nodes_xy, face_idx = mx.element_faces(
+                bundle.nodes_init(info.name), bundle.elements(info.name))
             self.fv_map.set_mesh(nodes_xy, face_idx)
             self._map_mesh_set = True
+            self._map_mesh = (nodes_xy, face_idx)
+            # Extras for the on-disk export; optional, never fatal here.
+            self._map_extra = {}
+            try:
+                self._map_extra["centroids_xy"] = np.asarray(
+                    bundle.element_centroids_init(info.name))[:, :2]
+            except Exception:
+                log_swallowed("reading element centroids for the map export",
+                              level=logging.DEBUG)
+            try:
+                self._map_extra["frame_times"] = np.asarray(bundle.times)
+            except Exception:
+                log_swallowed("reading frame times for the map export",
+                              level=logging.DEBUG)
             return True
         except Exception:
             log_swallowed("building the sensitivity-map mesh",
@@ -1084,6 +1259,115 @@ class SensitivityTab(QWidget):
             plabel, var, "signed" if signed else "|.|", frame_txt)
         self.fv_map.set_values(values, vmin=vmin, vmax=vmax, cmap=cmap,
                                title=title)
+
+    # ---- on-disk export of the maps (study folder) -----------------------
+    def _map_export_job(self, out_dir):
+        """Snapshot everything the export needs, on the GUI thread, and
+        return a no-argument callable that writes the files (safe to run in
+        another thread: it only touches these arrays and the disk)."""
+        plan = self.plan
+        nodes_xy, face_idx = self._map_mesh
+        param_info = {}
+        for p in self._map_param_paths:
+            try:
+                spec = pr.spec_for(p)
+                param_info[p] = (spec.label, self._plan_unit(plan, spec))
+            except Exception:
+                param_info[p] = (p, "—")
+        deltas = {s.path: float(d) for s, d in zip(plan.specs, plan.deltas)}
+        maps = {v: dict(per) for v, per in self._field_maps.items()}
+        extra = dict(self._map_extra)
+
+        def job():
+            return mx.write_maps(out_dir, maps, nodes_xy, face_idx,
+                                 param_info=param_info,
+                                 centroids_xy=extra.get("centroids_xy"),
+                                 frame_times=extra.get("frame_times"),
+                                 scheme=getattr(plan, "scheme", ""),
+                                 deltas=deltas)
+        return job
+
+    def _export_field_maps(self, out_dir, wait=False):
+        """Write the maps (CSV tables + PNG images) to `out_dir`, a sub-folder
+        of the study folder. Runs in a background thread so rendering a few
+        dozen images does not freeze the window; `wait=True` (tests) runs it
+        inline. The outcome reaches the status line via _mapsExported."""
+        if not self._field_maps or self._map_mesh is None or self.plan is None:
+            return
+        try:
+            job = self._map_export_job(out_dir)
+        except Exception as e:
+            log_swallowed("preparing the map export", level=logging.WARNING)
+            self._on_maps_exported(str(out_dir), 0, str(e))
+            return
+
+        def run():
+            try:
+                files = job()
+                self._mapsExported.emit(str(out_dir), len(files), "")
+            except Exception as e:
+                log_swallowed("writing the sensitivity maps",
+                              level=logging.WARNING)
+                self._mapsExported.emit(str(out_dir), 0, str(e) or repr(e))
+
+        self.log.appendPlainText("[maps] writing to %s …" % out_dir)
+        if wait:
+            run()
+            return
+        # Not a daemon: a window closed mid-export still finishes the files.
+        self._maps_thread = threading.Thread(target=run, name="map-export")
+        self._maps_thread.start()
+
+    def _on_maps_exported(self, out_dir, n_files, error):
+        if error:
+            self.log.appendPlainText("[maps] export FAILED: %s" % error)
+            self.status.setStyleSheet("color: #b45309;")
+            self.status.setText(self.status.text()
+                                + "  Maps export failed: %s" % error)
+            return
+        self.log.appendPlainText("[maps] %d files written to %s"
+                                 % (n_files, out_dir))
+        self.status.setText(self.status.text()
+                            + "  Maps written to %s." % out_dir)
+
+    # ---- window closing ---------------------------------------------------
+    def is_running(self) -> bool:
+        """True while a campaign is in progress."""
+        return self._thread is not None
+
+    def shutdown(self, timeout_ms: int = 60000) -> bool:
+        """Stop a running campaign synchronously -- the window is closing.
+
+        Terminates the Abaqus job in flight (``abaqus terminate``, then the
+        process tree), stops the campaign loop and waits for the worker
+        thread. The worker's result is dropped: its signals are disconnected
+        first so nothing lands on a closing window. Returns True if the
+        thread ended within `timeout_ms`."""
+        worker, thread = self._worker, self._thread
+        if worker is None or thread is None:
+            return True
+        with warnings.catch_warnings():
+            # PySide warns (instead of raising) on a signal with no slot.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for sig in (worker.progress, worker.log, worker.runDone,
+                        worker.finished, worker.failed):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass          # nothing connected
+        if self._sta_timer is not None:
+            self._sta_timer.stop()
+            self._sta_timer = None
+        worker.stop_blocking()
+        thread.quit()
+        ended = bool(thread.wait(int(timeout_ms)))
+        if not ended:
+            logging.getLogger(__name__).warning(
+                "sensitivity worker thread still running after %d ms",
+                timeout_ms)
+        self._thread = None
+        self._worker = None
+        return ended
 
     def _on_export(self):
         if self._last_result is None:
@@ -1199,7 +1483,7 @@ class SensitivityTab(QWidget):
         head_cells = ["run"]
         if has_kind:
             head_cells.append("kind")
-        head_cells += ["%s [%s]" % (s.label, s.unit_str(self._temp_unit()))
+        head_cells += ["%s [%s]" % (s.label, self._plan_unit(plan, s))
                        for s in plan.specs]
         header = " | ".join(head_cells)
         lines = [header, "-" * len(header)]
@@ -1210,6 +1494,12 @@ class SensitivityTab(QWidget):
             cells += [_fmt(d[p]) for p in paths]
             lines.append(" | ".join(cells))
         self.preview.setPlainText("\n".join(lines))
+
+    @staticmethod
+    def _plan_unit(plan, spec) -> str:
+        """Unit of the plan's values for `spec` (the plan's own snapshot)."""
+        return spec.unit_str(getattr(plan, "temp_unit", "C"),
+                             system=getattr(plan, "unit_system", None))
 
     def _warn(self, msg):
         self.status.setStyleSheet("color: #b91c1c;")

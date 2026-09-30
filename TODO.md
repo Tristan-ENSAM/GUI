@@ -46,6 +46,34 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
   - **Export CSV** (`gui/sensitivity/export_results.py` + bouton « Save
     results… ») : une ligne par (QoI, paramètre), triée par
     |sensibilité| décroissante (= tableau + classement field-SSD).
+  - **Correctifs de l'audit Sensitivity (2026-09-30)** — tests dans
+    `tests/test_sensitivity_fixes.py` :
+    - Morris : analyse sur les **trajectoires complètes seulement**
+      (`morris_plan.analyze_complete`) ; l'ancienne imputation par la
+      moyenne (`analyze_safe`, conservée mais plus utilisée par le runner)
+      fabriquait des effets élémentaires, p. ex. μ* ≠ 0 pour un paramètre
+      sans effet après un Cancel. < 2 trajectoires complètes → pas
+      d'analyse. Le nombre de trajectoires utilisées est affiché. La
+      graine est tirée si absente et enregistrée sur le plan.
+    - Cancel : `RunResult.n_attempted` / `cancelled` ; les runs jamais
+      lancés ne sont plus comptés comme réussis.
+    - Unités : le plan garde le `UnitSystem` de sa génération
+      (conversion figée) ; les lignes cochées sont **converties** quand
+      le système d'unités change ; un plan généré sous d'autres unités
+      est invalidé ; la colonne Unit de la température ambiante suit
+      °C/K.
+    - Fermeture de la fenêtre pendant une campagne : confirmation, puis
+      arrêt synchrone du job Abaqus et du thread (`SensitivityTab.shutdown`,
+      `SensitivityRunWorker.stop_blocking`).
+    - `config.json` de l'étude : plan complet (paramètres, pas ou bornes,
+      unités, graine Morris, valeurs de chaque run liées au nom du job).
+  - **Cartes de sensibilité écrites automatiquement** à la fin d'un run
+    jacobien avec champs ROI, dans `<dossier d'étude>/sensitivity_maps/`
+    (`gui/sensitivity/map_export.py`, thread d'arrière-plan) : un CSV par
+    (champ, paramètre) — élément, centroïde, moyenne temporelle signée,
+    RMS temporel, une colonne signée par frame — deux PNG (moyenne signée,
+    RMS), plus `maps_index.csv`, `frame_times.csv`, `mesh_nodes.csv`,
+    `mesh_elements.csv`.
 - **Ajouts UI (session courante)** :
   - Onglet Sensitivity : la colonne **Ref** est resynchronisée avec le
     Numerical Model courant. `showEvent` n'étant pas fiable pour une page

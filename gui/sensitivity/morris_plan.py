@@ -55,6 +55,9 @@ class MorrisPlan:
     X: np.ndarray                    # (n_runs, k) sample, displayed units
     temp_unit: str = "C"
     seed: Optional[int] = None
+    # UnitSystem the displayed values are expressed in (snapshot taken at
+    # generation). None = the active system at conversion time (legacy).
+    unit_system: object = None
 
     @property
     def param_paths(self) -> list:
@@ -77,7 +80,8 @@ def n_runs(k: int, N: int) -> int:
 # ---------------------------------------------------------------------------
 # Build the plan
 # ---------------------------------------------------------------------------
-def build_plan(selected, N, num_levels=4, seed=None, temp_unit="C"):
+def build_plan(selected, N, num_levels=4, seed=None, temp_unit="C",
+               unit_system=None):
     """Build a Morris plan.
 
     Parameters
@@ -89,7 +93,11 @@ def build_plan(selected, N, num_levels=4, seed=None, temp_unit="C"):
     num_levels : int
         Number of grid levels (Morris ``p``); 4 is the common default.
     seed : int | None
-        RNG seed for reproducibility.
+        RNG seed for reproducibility. When None a seed is drawn here and
+        stored on the plan, so every plan can be regenerated exactly.
+    unit_system : UnitSystem | None
+        The system the displayed bounds are expressed in (default: a
+        snapshot of the active one).
 
     Returns a MorrisPlan. Raises ValueError on an empty/invalid selection.
     """
@@ -113,11 +121,15 @@ def build_plan(selected, N, num_levels=4, seed=None, temp_unit="C"):
     # Imported lazily so the rest of the GUI works even if SALib isn't
     # installed yet (the Sensitivity tab surfaces a clear message instead).
     from SALib.sample.morris import sample as morris_sample
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy % (2 ** 31 - 1))
+    if unit_system is None:
+        unit_system = pr.current_system(temp_unit)
     X = morris_sample(problem, N=int(N), num_levels=int(num_levels), seed=seed)
     return MorrisPlan(specs=specs, bounds=bounds, N=int(N),
                       num_levels=int(num_levels), problem=problem,
                       X=np.asarray(X, dtype=float), temp_unit=temp_unit,
-                      seed=seed)
+                      seed=int(seed), unit_system=unit_system)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +143,8 @@ def plan_to_configs(base_cfg, plan: MorrisPlan):
     for row in plan.X:
         cfg = copy.deepcopy(base_cfg)
         for spec, value in zip(plan.specs, row):
-            pr.apply_display(cfg, spec, float(value), plan.temp_unit)
+            pr.apply_display(cfg, spec, float(value), plan.temp_unit,
+                             system=plan.unit_system)
         configs.append(cfg)
     return configs
 
@@ -180,3 +193,36 @@ def analyze_safe(plan: MorrisPlan, Y):
     if n_bad:
         Y[bad] = float(np.mean(finite))
     return analyze(plan, Y), n_bad
+
+
+def analyze_complete(plan: MorrisPlan, Y):
+    """Morris indices from the COMPLETE trajectories only.
+
+    A trajectory is k+1 consecutive runs; each elementary effect is the
+    difference between two neighbouring runs of one trajectory. A failed
+    (or cancelled, never-run) run therefore spoils its whole trajectory.
+    Unlike analyze_safe, which fills missing runs with the mean of the others
+    and so fabricates elementary effects, this drops every trajectory that
+    holds a non-finite QoI value and analyses the remaining ones.
+
+    Returns (result_dict | None, info) with
+        info = {"n_trajectories", "n_used", "n_dropped", "n_bad_runs"}.
+    result_dict is None when fewer than 2 complete trajectories remain:
+    SALib's sigma is a sample standard deviation (ddof=1) and needs 2.
+    """
+    Y = np.asarray(Y, dtype=float)
+    size = plan.k + 1
+    n_traj = Y.size // size
+    finite = np.isfinite(Y[:n_traj * size]).reshape(n_traj, size)
+    keep = finite.all(axis=1)
+    info = {"n_trajectories": int(n_traj), "n_used": int(keep.sum()),
+            "n_dropped": int(n_traj - keep.sum()),
+            "n_bad_runs": int((~np.isfinite(Y)).sum())}
+    if keep.sum() < 2:
+        return None, info
+    rows = np.repeat(keep, size)
+    from SALib.analyze.morris import analyze as morris_analyze
+    res = morris_analyze(plan.problem, plan.X[:n_traj * size][rows],
+                         Y[:n_traj * size][rows],
+                         num_levels=plan.num_levels, seed=plan.seed)
+    return res, info

@@ -51,6 +51,9 @@ class JacobianPlan:
     idx_plus: dict         # spec index -> row with +delta
     idx_minus: dict        # spec index -> row with -delta
     temp_unit: str = "C"
+    # UnitSystem the displayed values are expressed in (snapshot taken at
+    # generation). None = the active system at conversion time (legacy).
+    unit_system: object = None
 
     @property
     def param_paths(self):
@@ -69,9 +72,11 @@ def n_runs(k: int, scheme: str) -> int:
     return int(2 * k + 1) if scheme == "central" else int(k + 1)
 
 
-def build_plan(selected, scheme="central", temp_unit="C"):
+def build_plan(selected, scheme="central", temp_unit="C", unit_system=None):
     """selected: list of (ParamSpec, base_value, delta, normalize_bool),
-    all in DISPLAYED units. Returns a JacobianPlan."""
+    all in DISPLAYED units. Returns a JacobianPlan. `unit_system` is the
+    UnitSystem those displayed values are expressed in (default: a snapshot
+    of the active one)."""
     if scheme not in SCHEMES:
         raise ValueError("scheme must be one of %s" % (SCHEMES,))
     if not selected:
@@ -100,10 +105,12 @@ def build_plan(selected, scheme="central", temp_unit="C"):
             idx_minus[i] = len(rows); rows.append(r); run_kind.append("-%d" % i)
 
     X = np.vstack(rows)
+    if unit_system is None:
+        unit_system = pr.current_system(temp_unit)
     return JacobianPlan(specs=specs, base=base, deltas=deltas, normalize=norm,
                         scheme=scheme, X=X, run_kind=run_kind,
                         idx_plus=idx_plus, idx_minus=idx_minus,
-                        temp_unit=temp_unit)
+                        temp_unit=temp_unit, unit_system=unit_system)
 
 
 def plan_to_configs(base_cfg, plan: JacobianPlan):
@@ -113,7 +120,8 @@ def plan_to_configs(base_cfg, plan: JacobianPlan):
     for row in plan.X:
         cfg = copy.deepcopy(base_cfg)
         for spec, value in zip(plan.specs, row):
-            pr.apply_display(cfg, spec, float(value), plan.temp_unit)
+            pr.apply_display(cfg, spec, float(value), plan.temp_unit,
+                             system=plan.unit_system)
         configs.append(cfg)
     return configs
 

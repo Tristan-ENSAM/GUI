@@ -516,6 +516,27 @@ class MainWindow(QMainWindow):
                     return
                 proc.kill()
                 proc.waitForFinished(2000)
+        # A sensitivity campaign runs its Abaqus jobs from a worker thread in
+        # their own process session: closing without stopping it leaves the
+        # solver running (licence tokens held) and destroys a live QThread.
+        if self.sensitivity_tab.is_running():
+            from PySide6.QtWidgets import QMessageBox, QApplication
+            reply = QMessageBox.question(
+                self, "Sensitivity campaign running",
+                "A sensitivity campaign is still running. Quitting now will\n"
+                "terminate the current Abaqus job and discard the campaign\n"
+                "results (runs already finished stay on disk).\n\n"
+                "Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.sensitivity_tab.shutdown()
+            finally:
+                QApplication.restoreOverrideCursor()
         event.accept()
 
 
