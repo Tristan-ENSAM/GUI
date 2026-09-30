@@ -28,9 +28,14 @@ Point = Tuple[float, float]
 def pixel_to_model(px: float, py: float, width: int, height: int,
                    mm_per_px: float) -> Point:
     """Convert an image pixel (px, py) to model millimetres, origin at the
-    image centre, x right, y up."""
-    x = (px - width / 2.0) * mm_per_px
-    y = (height / 2.0 - py) * mm_per_px
+    image centre, x right, y up.
+
+    Pixel coordinates are pixel CENTRES (pixel i spans [i - 0.5, i + 0.5],
+    as in matplotlib's imshow and the DIC subsets), so the geometric image
+    centre is ((width - 1) / 2, (height - 1) / 2) and the image edges map to
+    +-width/2 and +-height/2 pixels (the extent used by the viewers)."""
+    x = (px - (width - 1) / 2.0) * mm_per_px
+    y = ((height - 1) / 2.0 - py) * mm_per_px
     return (x, y)
 
 
