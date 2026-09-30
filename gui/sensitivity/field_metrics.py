@@ -69,8 +69,8 @@ def field_rel_change_pct(base_field, pert_field) -> float:
 
     It is NOT normalised by the parameter step: it is the change produced by
     the perturbation actually applied, and grows with it (to first order,
-    twice the step gives twice the percentage). Divide by the relative step
-    for a step-independent figure (see field elasticity in runner_core)."""
+    twice the step gives twice the percentage). To compare parameters with
+    it, use the same relative step (Delta%) for all of them."""
     a, b = _align(pert_field, base_field)   # a = pert, b = base
     d = (a - b).ravel()
     bb = b.ravel()

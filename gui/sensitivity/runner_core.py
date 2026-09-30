@@ -29,7 +29,6 @@ import numpy as np
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import field_metrics as fm
-from gui.core import units
 from gui.core.logging_util import log_swallowed
 
 
@@ -69,35 +68,25 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
 
       forward / backward : J_i = metric(F(x0 ± delta_i), F(x0)) per delta
       central            : J_i = metric(F(x0+delta_i), F(x0-delta_i)) per
-                           2*delta_i  (both perturbed runs; the base run is
-                           not involved)
+                           2*delta_i  (both perturbed runs)
 
-    J is always >= 0 (a magnitude of how much the field moves); with 'ssd'
-    it is divided by the step squared, so its value depends on the
-    parameter's unit. Returns
+    If a central run is missing, it falls back to the one-sided difference
+    with the base run and says so in "scheme_used" (see
+    jacobian_plan.central_fallback). J is always >= 0 (a magnitude of how
+    much the field moves); with 'ssd' it is divided by the step squared, so
+    its value depends on the parameter's unit. Returns
         {var: {param_path: {"sensitivity": J, "rel_pct": dF%,
-                            "elasticity": e}}}
-    rel_pct  : relative field change for one step, in percent, weighted over
-               nodes and frames (central: from (F+ - F-)/2). Independent of
-               the metric, but proportional to the step size.
-    elasticity: rel_pct / (100 |delta| / |x0|) — relative field change per
-               relative parameter change, dimensionless and step-independent
-               to first order (x0 in kelvin for temperatures). A magnitude.
-    A run the scheme needs that is missing gives NaN (no silent fallback to
-    another scheme), as for the scalar QoI."""
+                            "scheme_used": str}}}
+    rel_pct: relative field change for one step, in percent, weighted over
+    nodes and frames (central: from (F+ - F-)/2). Independent of the metric
+    but proportional to the step: compare parameters with the same Delta%
+    on every row."""
     if not bundles or bundles[0] is None:
         return {}
     ref = bundles[0]
     inst = instance or eulerian_instance(ref)
-    scheme = getattr(plan, "scheme", "central")
     nan = float("nan")
     out = {}
-
-    def _field(idx, var):
-        if idx is None or idx >= len(bundles) or bundles[idx] is None:
-            return None
-        return bundles[idx].field(inst, var)
-
     for var in field_vars:
         try:
             base_field = ref.field(inst, var)
@@ -105,43 +94,61 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
             log_swallowed("reading base field %r for field sensitivity" % var,
                           level=logging.DEBUG)
             continue
+        fields = _FieldCache(bundles, inst, var)
         per_param = {}
         for i, spec in enumerate(plan.specs):
             d = plan.deltas[i]
+            used = jac.central_fallback(plan, i, fields.ok)
             val = rel = nan
             try:
-                if scheme == "central":
-                    fp = _field(plan.idx_plus.get(i), var)
-                    fmn = _field(plan.idx_minus.get(i), var)
-                    if fp is not None and fmn is not None:
-                        val = fm.jacobian_field_sensitivity(
-                            fmn, fp, delta=2.0 * d, metric=metric)
-                        rel = fm.field_rel_change_pct_central(
-                            base_field, fp, fmn)
-                else:
-                    idx = (plan.idx_plus.get(i) if scheme == "forward"
-                           else plan.idx_minus.get(i))
-                    pert = _field(idx, var)
-                    if pert is not None:
-                        val = fm.jacobian_field_sensitivity(
-                            base_field, pert, delta=d, metric=metric)
-                        rel = fm.field_rel_change_pct(base_field, pert)
+                if used == "central":
+                    fp = fields.get(plan.idx_plus[i])
+                    fmn = fields.get(plan.idx_minus[i])
+                    val = fm.jacobian_field_sensitivity(
+                        fmn, fp, delta=2.0 * d, metric=metric)
+                    rel = fm.field_rel_change_pct_central(base_field, fp, fmn)
+                elif used in ("forward", "backward"):
+                    idx = (plan.idx_plus[i] if used == "forward"
+                           else plan.idx_minus[i])
+                    pert = fields.get(idx)
+                    val = fm.jacobian_field_sensitivity(
+                        base_field, pert, delta=d, metric=metric)
+                    rel = fm.field_rel_change_pct(base_field, pert)
             except Exception:
                 log_swallowed("field sensitivity for %s @ %s"
                               % (var, spec.path), level=logging.DEBUG)
                 val = rel = nan
-            x0 = abs(jac.abs_base(plan, i)) if hasattr(plan, "base") else 0.0
-            step_pct = 100.0 * abs(d) / x0 if x0 else nan
-            elast = rel / step_pct if (step_pct and np.isfinite(step_pct)) \
-                else nan
             per_param[spec.path] = {"sensitivity": float(val),
                                     "rel_pct": float(rel),
-                                    "elasticity": float(elast)}
+                                    "scheme_used": used or plan.scheme}
         out[var] = per_param
     return out
 
 
-def jacobian_field_maps(plan, bundles, field_vars, instance=None):
+class _FieldCache:
+    """Read each run's field once; `ok(idx)` tells whether it is usable."""
+    def __init__(self, bundles, inst, var):
+        self._b, self._inst, self._var = bundles, inst, var
+        self._cache = {}
+
+    def get(self, idx):
+        if idx not in self._cache:
+            arr = None
+            if idx is not None and idx < len(self._b) and self._b[idx] is not None:
+                try:
+                    arr = self._b[idx].field(self._inst, self._var)
+                except Exception:
+                    log_swallowed("reading field %r of run %s"
+                                  % (self._var, idx), level=logging.DEBUG)
+            self._cache[idx] = arr
+        return self._cache[idx]
+
+    def ok(self, idx) -> bool:
+        return self.get(idx) is not None
+
+
+def jacobian_field_maps(plan, bundles, field_vars, instance=None,
+                        schemes_out=None):
     """Per-element, per-frame SIGNED sensitivity MAPS for a Jacobian plan.
 
     The map counterpart of jacobian_field_analysis: instead of reducing each
@@ -151,14 +158,15 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None):
     vs magnitude.
 
     Returns {var: {param_path: S}} where S is a (n_frames, n_elements) array
-    (np.ndarray), or NaN-filled where a run is missing. Uses the plan's FD
-    scheme (central uses the +delta and -delta runs, forward/backward use the
-    base run). `bundles` are the kept run bundles (bundles[0] = base run)."""
+    (np.ndarray), NaN-filled when nothing is computable. Uses the plan's FD
+    scheme; a central map whose +delta or -delta run is missing falls back
+    to the one-sided difference with the base run. If `schemes_out` (a dict)
+    is given it is filled with {var: {param_path: scheme actually used}}.
+    `bundles` are the kept run bundles (bundles[0] = base run)."""
     if not bundles or bundles[0] is None:
         return {}
     ref = bundles[0]
     inst = instance or eulerian_instance(ref)
-    scheme = getattr(plan, "scheme", "central")
     out = {}
     for var in field_vars:
         try:
@@ -167,33 +175,27 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None):
             log_swallowed("reading base field %r for field maps" % var,
                           level=logging.DEBUG)
             continue
+        fields = _FieldCache(bundles, inst, var)
         per_param = {}
+        used_per = {}
         for i, spec in enumerate(plan.specs):
-            ip = plan.idx_plus.get(i)
-            im = plan.idx_minus.get(i)
-
-            def _field(idx):
-                if idx is None or idx >= len(bundles) or bundles[idx] is None:
-                    return None
-                try:
-                    return bundles[idx].field(inst, var)
-                except Exception:
-                    log_swallowed("reading field %r for map @ %s"
-                                  % (var, spec.path), level=logging.DEBUG)
-                    return None
-
-            plus_field = _field(ip)
-            minus_field = _field(im)
+            used = jac.central_fallback(plan, i, fields.ok)
             try:
+                if used is None:
+                    raise ValueError("no usable run")
                 S = fm.elementwise_signed_sensitivity(
-                    base_field, plus_field, minus_field,
-                    delta=plan.deltas[i], scheme=scheme)
+                    base_field, fields.get(plan.idx_plus.get(i)),
+                    fields.get(plan.idx_minus.get(i)),
+                    delta=plan.deltas[i], scheme=used)
             except Exception:
                 log_swallowed("field map for %s @ %s" % (var, spec.path),
                               level=logging.DEBUG)
                 S = np.full(np.asarray(base_field, float).shape, np.nan)
             per_param[spec.path] = S
+            used_per[spec.path] = used or plan.scheme
         out[var] = per_param
+        if schemes_out is not None:
+            schemes_out[var] = used_per
     return out
 
 
@@ -299,7 +301,7 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
         try:
             if plan_kind == "jacobian":
                 analyses[qid] = jac.analyze(plan, y,
-                                            q_offset=_qoi_kelvin_offset(
+                                            q_is_temp=_qoi_is_temperature(
                                                 qoi_specs[j]))
             else:
                 # Only complete trajectories are analysed: a failed or
@@ -331,7 +333,8 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                 # "sensitivity" so the table/CSV render it like any column.
                 rel_key = "%s \u0394%% (rel)" % var      # e.g. "V Δ% (rel)"
                 analyses[rel_key] = {
-                    p: {"sensitivity": d.get("rel_pct", float("nan"))}
+                    p: {"sensitivity": d.get("rel_pct", float("nan")),
+                        "scheme_used": d.get("scheme_used", "")}
                     for p, d in per.items()}
                 qoi_ids_all.append(rel_key)
         except Exception as e:                          # pragma: no cover
@@ -343,9 +346,9 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                      n_attempted=n_attempted, cancelled=cancelled)
 
 
-def _qoi_kelvin_offset(spec) -> float:
-    """273.15 for a QoI stored in °C (its elasticity must use kelvin)."""
-    return units.KELVIN_OFFSET if getattr(spec, "unit", "") == "°C" else 0.0
+def _qoi_is_temperature(spec) -> bool:
+    """A QoI in °C has no elasticity (see jacobian_plan)."""
+    return getattr(spec, "unit", "") in ("°C", "K")
 
 
 def jacobian_ranking(result: RunResult, qoi_id: str, key: str = "sensitivity"):
@@ -356,6 +359,9 @@ def jacobian_ranking(result: RunResult, qoi_id: str, key: str = "sensitivity"):
     a = result.analyses.get(qoi_id, {})
     rows = [(p, d[key]) for p, d in a.items()
             if isinstance(d, dict) and key in d]
+    if key == "elasticity":
+        # Undefined elasticities (temperatures) are left out, not ranked last.
+        rows = [(p, v) for p, v in rows if np.isfinite(v)]
     rows.sort(key=lambda t: (np.isnan(t[1]), -abs(t[1])))
     return rows
 

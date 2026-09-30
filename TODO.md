@@ -77,15 +77,23 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
     `np.load(fichier)`, sans `allow_pickle`.
   - **Suite de l'audit Sensitivity (2026-09-30)** — tests dans
     `tests/test_sensitivity_followups.py` :
-    - Élasticité toujours calculée (clé `elasticity`, colonne CSV) ; pour
-      les températures (paramètre ou QoI en °C), le rapport utilise la
-      température absolue en K. Graphique : choix « Rank by » sensibilité /
-      élasticité, avertissement si le classement brut mélange des unités ou
-      des lignes normalisées et brutes.
+    - Élasticité toujours calculée (clé `elasticity`, colonne CSV), SAUF
+      pour les températures (paramètre, ou QoI en °C) : °C n'a pas de zéro
+      physique, le rapport dx/x dépendrait de l'unité. Case Norm désactivée
+      sur les lignes température ; QoI température avec Norm → dQ/dx brut,
+      marqué « (raw) ». Graphique : choix « Rank by » sensibilité /
+      élasticité, avertissements (unités mélangées, lignes absentes du
+      classement par élasticité).
+    - Schéma centré avec un run perturbé en échec : repli sur la différence
+      avant/arrière avec le run de base (moins précis), marqué « (fwd) » /
+      « (bwd) » dans le tableau, compté au statut, colonne `scheme_used` du
+      CSV ; idem pour le Field SSD et les cartes (titre + `scheme` du .npz).
     - Field SSD : le schéma centré utilise les runs +δ et −δ (plus le seul
-      +δ) ; run manquant → NaN. Nouvelle élasticité de champ
-      (Δ% / pas relatif, sans dimension). Docstrings corrigées (`rel_pct`
-      proportionnel au pas ; T_max/PEEQ_max limités aux éléments extraits).
+      +δ). Pas d'élasticité de champ (décision : comparer les colonnes
+      Δ% (rel) avec le même Delta% sur toutes les lignes ; une note le
+      rappelle à la génération si les Delta% diffèrent). Docstrings
+      corrigées (`rel_pct` proportionnel au pas ; T_max/PEEQ_max limités
+      aux éléments extraits).
     - Warm-up réglable (fraction de l'historique d'effort ignorée),
       enregistré dans `config.json`.
     - Generate avertit (sans bloquer) si un pas sort de [Min, Max]

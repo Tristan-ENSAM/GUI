@@ -26,7 +26,8 @@ import math
 from typing import Callable, Optional
 
 _COLUMNS = ["qoi", "parameter", "label", "sensitivity",
-            "abs_sensitivity", "dQdx", "elasticity", "normalized", "x0", "Q0"]
+            "abs_sensitivity", "dQdx", "elasticity", "normalized",
+            "raw_fallback", "scheme_used", "x0", "Q0"]
 _MORRIS_COLUMNS = ["qoi", "parameter", "label", "mu_star", "sigma", "mu",
                    "mu_star_conf", "trajectories_used", "trajectories_total",
                    "note"]
@@ -95,6 +96,8 @@ def result_rows(result, label_for: Optional[Callable[[str], str]] = None):
                 "abs_sensitivity": abs(sens),
                 "dQdx": d.get("dQdx", ""),
                 "elasticity": d.get("elasticity", ""),
+                "raw_fallback": d.get("raw_fallback", ""),
+                "scheme_used": d.get("scheme_used", ""),
                 "normalized": d.get("normalized", ""),
                 "x0": d.get("x0", ""),
                 "Q0": d.get("Q0", ""),

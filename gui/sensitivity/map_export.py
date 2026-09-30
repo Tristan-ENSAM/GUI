@@ -144,6 +144,9 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
     centroids_xy: (n_elem, 2) element centroids; default = face vertex mean
     frame_times : (n_frames,) simulation times, optional
     deltas      : {param_path: FD step}, recorded in the index
+    scheme      : FD scheme, one string for all maps or
+                  {field_var: {param_path: scheme actually used}} (a central
+                  map can fall back to forward/backward when a run failed)
     images      : False to skip the PNGs (arrays only)
 
     Returns the list of written file Paths. A map whose size does not match
@@ -188,13 +191,15 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
             unit = map_unit(field_units.get(var, ""), punit)
             mean, rms = time_aggregates(S)
             delta = float(deltas.get(path, float("nan")))
+            used = (scheme.get(var, {}).get(path, "")
+                    if isinstance(scheme, dict) else scheme)
 
             p_npz = out / (stem + ".npz")
             np.savez_compressed(
                 p_npz, S=S, time_mean=mean, time_rms=rms,
                 field=np.str_(var), parameter=np.str_(path),
                 label=np.str_(label), map_unit=np.str_(unit),
-                scheme=np.str_(scheme), delta=np.float64(delta),
+                scheme=np.str_(used), delta=np.float64(delta),
                 delta_unit=np.str_(punit))
             written.append(p_npz)
 
@@ -217,7 +222,7 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
                                       level=logging.WARNING)
             index_rows.append({
                 "field": var, "parameter": path, "label": label,
-                "map_unit": unit, "scheme": scheme,
+                "map_unit": unit, "scheme": used,
                 "delta": _num(delta),
                 "delta_unit": punit,
                 "n_frames": S.shape[0], "n_elements": n_elem,

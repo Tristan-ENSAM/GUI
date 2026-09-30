@@ -27,12 +27,20 @@ QoI per relative change in the parameter. Otherwise the raw derivative
 always computed as well (key "elasticity"), so parameters of different
 units can be compared whatever the per-row choice.
 
-A ratio x/x0 is only meaningful on a scale whose zero is physical. For
-temperatures (°C is not such a scale) the elasticity therefore uses the
-ABSOLUTE temperature in kelvin: x0 for a temperature parameter, and Q0 for
-a temperature QoI (the caller passes `q_offset` = 273.15 for a QoI stored
-in °C). The raw derivative is unaffected (a difference is the same in °C
-and K).
+A ratio x/x0 is only meaningful on a scale whose zero is physical, which
+°C is not (the same state is 20 °C or 293.15 K, and the ratio would depend
+on the displayed unit). Temperatures therefore get NO elasticity: for a
+temperature parameter, and for every parameter when the QoI itself is a
+temperature (the caller passes `q_is_temp`), "elasticity" is NaN and a
+row with Norm ticked reports the raw dQ/dx instead, flagged with
+"raw_fallback" = True.
+
+Central scheme with a failed run
+--------------------------------
+If one of the two perturbed runs is missing, the derivative falls back to
+the one-sided difference with the base run (forward if +delta survived,
+backward if -delta did); "scheme_used" records which one was applied, so
+the display can flag it. Less accurate (O(delta) instead of O(delta^2)).
 
 All bounds/steps are in DISPLAYED engineering units; profiles convert to
 stored units via param_registry.apply_display.
@@ -43,7 +51,6 @@ import copy
 from dataclasses import dataclass
 import numpy as np
 
-from gui.core import units
 from gui.sensitivity import param_registry as pr
 
 SCHEMES = ("forward", "backward", "central")
@@ -146,43 +153,64 @@ def profile_table(plan: JacobianPlan):
     return rows
 
 
-def abs_base(plan: JacobianPlan, i: int) -> float:
-    """Base value of parameter i on a ratio scale: the displayed value,
-    except for temperatures, returned in kelvin (see module docstring)."""
-    spec = plan.specs[i]
-    x0 = float(plan.base[i])
-    if spec.is_temp:
-        stored_c = spec.to_stored(x0, plan.temp_unit,
-                                  system=plan.unit_system)
-        return float(stored_c) + units.KELVIN_OFFSET
-    return x0
+def central_fallback(plan: JacobianPlan, i: int, ok):
+    """Which difference to apply for parameter i given which runs are usable
+    (`ok(row_index) -> bool`): the plan's own scheme when possible, else --
+    central only -- the one-sided difference with the surviving perturbed
+    run. Returns "central" | "forward" | "backward" | None (nothing
+    computable)."""
+    ip, im = plan.idx_plus.get(i), plan.idx_minus.get(i)
+    have_p = ip is not None and ok(ip)
+    have_m = im is not None and ok(im)
+    have_0 = ok(0)
+    if plan.scheme == "central":
+        if have_p and have_m:
+            return "central"
+        if have_p and have_0:
+            return "forward"
+        if have_m and have_0:
+            return "backward"
+        return None
+    if plan.scheme == "forward":
+        return "forward" if (have_p and have_0) else None
+    return "backward" if (have_m and have_0) else None
 
 
-def analyze(plan: JacobianPlan, Y, q_offset: float = 0.0):
+def analyze(plan: JacobianPlan, Y, q_is_temp: bool = False):
     """Compute the local sensitivity per parameter for one QoI vector Y
-    (length == n_runs). `q_offset` is added to Q0 for the elasticity only
-    (273.15 for a QoI stored in °C, so the ratio uses kelvin). Returns:
+    (length == n_runs). `q_is_temp`: the QoI is a temperature, so no
+    elasticity (see module docstring). Returns:
         {param_path: {"sensitivity": s, "dQdx": raw, "elasticity": e,
-                      "normalized": bool, "x0": x0, "Q0": Q0}}.
-    NaN-safe: a missing run yields NaN sensitivity for that parameter."""
+                      "normalized": bool, "raw_fallback": bool,
+                      "scheme_used": str, "x0": x0, "Q0": Q0}}.
+    NaN-safe: a missing run yields NaN, unless the central scheme can fall
+    back to a one-sided difference ("scheme_used" says so)."""
     Y = np.asarray(Y, dtype=float)
     Q0 = Y[0]
-    Q0_abs = Q0 + float(q_offset)
     out = {}
+    ok = lambda r: bool(np.isfinite(Y[r]))
     for i, spec in enumerate(plan.specs):
         d = plan.deltas[i]
-        if plan.scheme == "forward":
-            dQdx = (Y[plan.idx_plus[i]] - Q0) / d
-        elif plan.scheme == "backward":
-            dQdx = (Q0 - Y[plan.idx_minus[i]]) / d
-        else:  # central
+        used = central_fallback(plan, i, ok)
+        if used == "central":
             dQdx = (Y[plan.idx_plus[i]] - Y[plan.idx_minus[i]]) / (2.0 * d)
+        elif used == "forward":
+            dQdx = (Y[plan.idx_plus[i]] - Q0) / d
+        elif used == "backward":
+            dQdx = (Q0 - Y[plan.idx_minus[i]]) / d
+        else:
+            dQdx = float("nan")
         x0 = plan.base[i]
-        elast = (dQdx * (abs_base(plan, i) / Q0_abs)
-                 if Q0_abs != 0.0 else float("nan"))
-        sens = elast if plan.normalize[i] else dQdx
+        no_elast = spec.is_temp or q_is_temp
+        elast = (dQdx * (x0 / Q0) if (not no_elast and Q0 != 0.0)
+                 else float("nan"))
+        raw_fallback = bool(plan.normalize[i] and no_elast)
+        sens = elast if (plan.normalize[i] and not no_elast) else dQdx
         out[spec.path] = {"sensitivity": float(sens), "dQdx": float(dQdx),
                           "elasticity": float(elast),
-                          "normalized": plan.normalize[i],
+                          "normalized": bool(plan.normalize[i]
+                                             and not no_elast),
+                          "raw_fallback": raw_fallback,
+                          "scheme_used": used or plan.scheme,
                           "x0": float(x0), "Q0": float(Q0)}
     return out

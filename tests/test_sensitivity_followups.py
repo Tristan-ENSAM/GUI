@@ -42,23 +42,77 @@ def _row(tab, path):
 # ---------------------------------------------------------------------------
 # Elasticity
 # ---------------------------------------------------------------------------
-def test_temperature_elasticity_uses_kelvin_whatever_the_display_unit():
+def test_temperature_parameter_has_no_elasticity():
     Y = np.array([500.0, 510.0, 490.0])
-    pc = jac.build_plan([(S_T, 20.0, 5.0, True)], scheme="central",
-                        temp_unit="C")
-    pk = jac.build_plan([(S_T, 293.15, 5.0, True)], scheme="central",
-                        temp_unit="K")
-    ec = jac.analyze(pc, Y)[S_T.path]["elasticity"]
-    ek = jac.analyze(pk, Y)[S_T.path]["elasticity"]
-    assert ec == pytest.approx(ek)
-    assert ec == pytest.approx(2.0 * 293.15 / 500.0)       # dQ/dT * T/Q
+    plan = jac.build_plan([(S_T, 20.0, 5.0, True)], scheme="central")
+    d = jac.analyze(plan, Y)[S_T.path]
+    assert np.isnan(d["elasticity"])
+    # Norm ticked anyway -> the raw dQ/dT is reported, flagged.
+    assert d["sensitivity"] == pytest.approx(2.0)
+    assert d["raw_fallback"] is True and d["normalized"] is False
 
 
-def test_temperature_qoi_elasticity_uses_kelvin():
+def test_temperature_qoi_has_no_elasticity():
     plan = jac.build_plan([(S_A, 100.0, 10.0, True)], scheme="central")
     Y = np.array([400.0, 420.0, 380.0])                    # T_max in °C
-    e = jac.analyze(plan, Y, q_offset=273.15)[S_A.path]["elasticity"]
-    assert e == pytest.approx(2.0 * 100.0 / (400.0 + 273.15))
+    d = jac.analyze(plan, Y, q_is_temp=True)[S_A.path]
+    assert np.isnan(d["elasticity"]) and d["raw_fallback"] is True
+    assert d["sensitivity"] == pytest.approx(2.0)
+    q = QoISpec("T", "T", "°C", lambda b, i, w: b)
+    res = rc.run_plan(plan, "jacobian", [q], lambda c, i: Y[i], ModelConfig())
+    assert res.analyses["T"][S_A.path]["raw_fallback"] is True
+    assert rc.jacobian_ranking(res, "T", key="elasticity") == []
+
+
+def test_norm_checkbox_disabled_for_temperature_rows(qapp):
+    from PySide6.QtCore import Qt
+    from gui.tabs.sensitivity_tab import SensitivityTab
+    tab = SensitivityTab(ModelConfig())
+    flags_t = tab.table.item(_row(tab, S_T.path), 7).flags()
+    flags_a = tab.table.item(_row(tab, S_A.path), 7).flags()
+    assert not (flags_t & Qt.ItemIsUserCheckable)
+    assert flags_a & Qt.ItemIsUserCheckable
+
+
+# ---------------------------------------------------------------------------
+# Central scheme with a failed run: one-sided fallback, flagged
+# ---------------------------------------------------------------------------
+def test_central_scalar_falls_back_when_a_run_failed():
+    plan = jac.build_plan([(S_A, 100.0, 10.0, False),
+                           (S_E, 100.0, 1.0, False)], scheme="central")
+    # rows: base, +0, -0, +1, -1 ; -0 failed, +1 and -1 both failed
+    Y = np.array([500.0, 520.0, np.nan, np.nan, np.nan])
+    a = jac.analyze(plan, Y)
+    assert a[S_A.path]["scheme_used"] == "forward"
+    assert a[S_A.path]["dQdx"] == pytest.approx(2.0)
+    assert a[S_E.path]["scheme_used"] == "central"          # nothing usable
+    assert np.isnan(a[S_E.path]["dQdx"])
+    Y2 = np.array([500.0, np.nan, 480.0, 503.0, 497.0])
+    a2 = jac.analyze(plan, Y2)
+    assert a2[S_A.path]["scheme_used"] == "backward"
+    assert a2[S_A.path]["dQdx"] == pytest.approx(2.0)
+    assert a2[S_E.path]["scheme_used"] == "central"
+
+
+def test_forward_scheme_does_not_fall_back():
+    plan = jac.build_plan([(S_A, 100.0, 10.0, False)], scheme="forward")
+    d = jac.analyze(plan, np.array([500.0, np.nan]))[S_A.path]
+    assert np.isnan(d["dQdx"]) and d["scheme_used"] == "forward"
+
+
+def test_fallback_is_marked_in_cells_and_summary(qapp):
+    from gui.tabs.sensitivity_tab import SensitivityTab, _cell_marks
+    assert _cell_marks({"scheme_used": "forward"}, "central") == " (fwd)"
+    assert _cell_marks({"scheme_used": "backward", "raw_fallback": True},
+                       "central") == " (raw, bwd)"
+    assert _cell_marks({"scheme_used": "forward"}, "forward") == ""
+    plan = jac.build_plan([(S_A, 100.0, 10.0, False)], scheme="central")
+    q = QoISpec("Q", "Q", "N", lambda b, i, w: b)
+    Y = [500.0, 520.0, None]
+    res = rc.run_plan(plan, "jacobian", [q], lambda c, i: Y[i],
+                      ModelConfig())
+    msg, warn = SensitivityTab._run_summary(res, scheme="central")
+    assert "one-sided" in msg and warn
 
 
 def test_elasticity_always_reported_and_ranking_key():
@@ -133,18 +187,34 @@ def test_field_central_uses_both_perturbed_runs():
     assert r["sensitivity"] == pytest.approx(6 * 36.0 / 400.0)
     # RMS((plus-minus)/2) / RMS(base) = 3 / 100 -> 3 %
     assert r["rel_pct"] == pytest.approx(3.0)
-    # elasticity = 3 % / (100 * 10 / 100) %
-    assert r["elasticity"] == pytest.approx(0.3)
+    assert r["scheme_used"] == "central"
+    assert "elasticity" not in r                 # no field elasticity
 
 
-def test_field_central_missing_run_gives_nan():
+def test_field_central_missing_run_falls_back():
     plan = _field_plan("central")
+    base = np.full((2, 3), 10.0)
     b = [None] * plan.n_runs
-    b[0] = _FB(np.ones((2, 3)))
-    b[plan.idx_plus[0]] = _FB(np.ones((2, 3)) * 2)
+    b[0] = _FB(base)
+    b[plan.idx_plus[0]] = _FB(base + 1.0)        # -delta run failed
     r = rc.jacobian_field_analysis(plan, b, ["TEMP"],
                                    instance="Euler")["TEMP"][S_A.path]
-    assert np.isnan(r["sensitivity"]) and np.isnan(r["rel_pct"])
+    assert r["scheme_used"] == "forward"
+    assert r["sensitivity"] == pytest.approx(6 * 1.0 / 100.0)
+    assert r["rel_pct"] == pytest.approx(10.0)
+
+
+def test_field_maps_fall_back_and_report_scheme():
+    plan = _field_plan("central")
+    base = np.full((2, 3), 10.0)
+    b = [None] * plan.n_runs
+    b[0] = _FB(base)
+    b[plan.idx_minus[0]] = _FB(base - 2.0)       # +delta run failed
+    used = {}
+    S = rc.jacobian_field_maps(plan, b, ["TEMP"], instance="Euler",
+                               schemes_out=used)["TEMP"][S_A.path]
+    assert used == {"TEMP": {S_A.path: "backward"}}
+    assert np.allclose(S, 0.2)                   # (10 - 8) / 10
 
 
 def test_field_forward_unchanged():
@@ -314,3 +384,29 @@ def test_morris_csv_export():
     res_c = rc.run_plan(plan, "morris", [q], lambda c, i: None, ModelConfig())
     text = xr.result_to_csv(res_c)
     assert "not analysed" in text
+
+
+def test_elasticity_ranking_note_names_temperatures(qapp):
+    from gui.tabs.sensitivity_tab import SensitivityTab
+    tab = SensitivityTab(ModelConfig())
+    plan = jac.build_plan([(S_A, 100.0, 10.0, False),
+                           (S_T, 20.0, 5.0, False)], scheme="forward")
+    q = QoISpec("Q", "Q", "N", lambda b, i, w: b)
+    res = rc.run_plan(plan, "jacobian", [q],
+                      lambda c, i: 500.0 + i, ModelConfig())
+    tab.plan = plan
+    tab._last_result = res
+    tab._show_results(res)
+    tab.cb_chart_rank.setCurrentIndex(1)                   # elasticity
+    assert S_T.label in tab.lbl_chart_note.text()
+
+
+def test_map_npz_records_the_scheme_used(tmp_path):
+    from gui.sensitivity import map_export as mx
+    nodes = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float)
+    faces = np.array([[0, 1, 2, 3]])
+    mx.write_maps(tmp_path, {"TEMP": {S_A.path: np.zeros((1, 1))}},
+                  nodes, faces, param_info={S_A.path: ("A", "MPa")},
+                  scheme={"TEMP": {S_A.path: "forward"}}, images=False)
+    with np.load(tmp_path / "map_TEMP_p01_euler_material.A.npz") as z:
+        assert str(z["scheme"]) == "forward"

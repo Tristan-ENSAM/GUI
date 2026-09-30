@@ -102,6 +102,7 @@ class SensitivityTab(QWidget):
         self._run_plan = None            # plan of the active/last run
         self._map_mesh = None            # (nodes_xy, face_idx) of the maps
         self._map_extra = {}             # centroids / frame times for export
+        self._map_schemes = {}           # {var: {path: FD scheme used}}
         self._maps_thread = None         # background map export
         self._mapsExported.connect(self._on_maps_exported)
 
@@ -447,11 +448,22 @@ class SensitivityTab(QWidget):
                 self.table.setItem(r, 6, QTableWidgetItem(_fmt(pct)))
                 # col 7: Normalize checkbox (report elasticity)
                 nrm = QTableWidgetItem()
-                nrm.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 nrm.setCheckState(Qt.Unchecked)
-                nrm.setToolTip("Report the dimensionless elasticity "
-                               "(dQ/Q)/(dx/x) instead of the raw dQ/dx. "
-                               "The real Min/Max/Delta below stay unchanged.")
+                if spec.is_temp:
+                    # °C has no physical zero: (dx/x) would depend on the
+                    # displayed unit. Temperatures keep the raw dQ/dT.
+                    nrm.setFlags(Qt.ItemIsEnabled)
+                    nrm.setToolTip("No elasticity for a temperature: the "
+                                   "ratio dx/x would depend on the unit "
+                                   "(°C or K). The raw dQ/dT is reported.")
+                else:
+                    nrm.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                    nrm.setToolTip("Report the dimensionless elasticity "
+                                   "(dQ/Q)/(dx/x) instead of the raw dQ/dx. "
+                                   "The real Min/Max/Delta below stay "
+                                   "unchanged. Not available when the QoI "
+                                   "is a temperature (raw value shown, "
+                                   "marked 'raw').")
                 self.table.setItem(r, 7, nrm)
                 # col 8: unit (read-only)
                 unit = QTableWidgetItem(spec.unit_str(tu))
@@ -852,6 +864,14 @@ class SensitivityTab(QWidget):
                 "(%s). Ready for the run step." % (
                     self._scheme(), plan.k, plan.n_runs, len(qoi_names),
                     ", ".join(qoi_names) if qoi_names else "—"))
+            pcts = [self._cell_float(r, 6) for r, _s in self._selected_rows()]
+            pcts = [abs(p) for p in pcts if p is not None]
+            if field_vars and len(pcts) > 1 and \
+                    max(pcts) - min(pcts) > 1e-6 * max(pcts):
+                self.status.setText(
+                    self.status.text() + "  Note: the \u0394% (rel) field "
+                    "columns are comparable between parameters only with "
+                    "the same Delta% on every row.")
             if outside:
                 self.status.setStyleSheet("color: #b45309;")
                 self.status.setText(
@@ -1147,7 +1167,7 @@ class SensitivityTab(QWidget):
     def _on_run_finished(self, result):
         self._last_result = result
         self._teardown_thread()
-        msg, warn = self._run_summary(result)
+        msg, warn = self._run_summary(result, scheme=self._result_scheme())
         self.status.setStyleSheet("color: #b45309;" if warn
                                   else "color: #15803d;")
         self.status.setText(msg)
@@ -1159,7 +1179,7 @@ class SensitivityTab(QWidget):
             self._export_field_maps(Path(self._run_workdir) / mx.MAPS_SUBDIR)
 
     @staticmethod
-    def _run_summary(result):
+    def _run_summary(result, scheme=None):
         """Status line for a finished (or cancelled) campaign, and whether it
         deserves a warning colour. Runs never launched after a Cancel are
         reported as such, not counted as successes."""
@@ -1194,6 +1214,17 @@ class SensitivityTab(QWidget):
                 msg += (" Morris uses only complete trajectories (a failed "
                         "or missing run drops its trajectory) — "
                         + "; ".join(notes) + ".")
+        if result.plan_kind == "jacobian" and scheme == "central":
+            n_fb = sum(1 for a in result.analyses.values()
+                       if isinstance(a, dict)
+                       for d in a.values()
+                       if isinstance(d, dict)
+                       and d.get("scheme_used") in ("forward", "backward"))
+            if n_fb:
+                warn = True
+                msg += (" %d value(s) fell back to a one-sided difference "
+                        "because a perturbed run failed (marked fwd/bwd, "
+                        "less accurate)." % n_fb)
         return msg + " See Results.", warn
 
     # =====================================================================
@@ -1242,8 +1273,10 @@ class SensitivityTab(QWidget):
         ref = bundles[0] if bundles else None
         inst = rc.eulerian_instance(ref) if ref is not None else None
         try:
+            self._map_schemes = {}
             maps = rc.jacobian_field_maps(plan, bundles, field_vars,
-                                          instance=inst)
+                                          instance=inst,
+                                          schemes_out=self._map_schemes)
         except Exception as e:
             log_swallowed("computing sensitivity maps", level=logging.WARNING)
             self._clear_map(); self._set_map_controls_enabled(False)
@@ -1381,8 +1414,13 @@ class SensitivityTab(QWidget):
             plabel = pr.spec_for(p).label
         except Exception:
             plabel = p
-        title = "dF/d(%s) \u00b7 %s \u2014 %s (%s)" % (
-            plabel, var, "signed" if signed else "|.|", frame_txt)
+        used = self._map_schemes.get(var, {}).get(p)
+        scheme = self._result_scheme()
+        fb = (" \u2014 %s fallback (a run failed)" % used
+              if scheme == "central" and used in ("forward", "backward")
+              else "")
+        title = "dF/d(%s) \u00b7 %s \u2014 %s (%s)%s" % (
+            plabel, var, "signed" if signed else "|.|", frame_txt, fb)
         self.fv_map.set_values(values, vmin=vmin, vmax=vmax, cmap=cmap,
                                title=title)
 
@@ -1402,6 +1440,10 @@ class SensitivityTab(QWidget):
                 param_info[p] = (p, "—")
         deltas = {s.path: float(d) for s, d in zip(plan.specs, plan.deltas)}
         maps = {v: dict(per) for v, per in self._field_maps.items()}
+        # Per-map scheme actually used (a central map may have fallen back).
+        base_scheme = getattr(plan, "scheme", "")
+        schemes = {v: {p: self._map_schemes.get(v, {}).get(p, base_scheme)
+                       for p in per} for v, per in maps.items()}
         extra = dict(self._map_extra)
 
         def job():
@@ -1409,7 +1451,7 @@ class SensitivityTab(QWidget):
                                  param_info=param_info,
                                  centroids_xy=extra.get("centroids_xy"),
                                  frame_times=extra.get("frame_times"),
-                                 scheme=getattr(plan, "scheme", ""),
+                                 scheme=schemes,
                                  deltas=deltas)
         return job
 
@@ -1548,7 +1590,8 @@ class SensitivityTab(QWidget):
             tbl.setItem(i, 0, QTableWidgetItem(labels.get(p, p)))
             for j, qid in enumerate(qoi_ids):
                 a = result.analyses.get(qid, {})
-                cell = self._result_cell(result.plan_kind, a, p)
+                cell = self._result_cell(result.plan_kind, a, p,
+                                         scheme=self._result_scheme())
                 tbl.setItem(i, j + 1, QTableWidgetItem(cell))
         tbl.resizeColumnsToContents()
         # populate the chart QoI selector and draw
@@ -1576,6 +1619,8 @@ class SensitivityTab(QWidget):
             xlabel = "|%s|" % key
             if key == "sensitivity":
                 self.lbl_chart_note.setText(self._raw_ranking_note(result, qid))
+            else:
+                self.lbl_chart_note.setText(self._elasticity_note(result, qid))
         else:
             rows = [(p, ms) for p, ms, _ in rc.morris_ranking(result, qid)]
             vals = [ms for _, ms in rows]
@@ -1590,6 +1635,33 @@ class SensitivityTab(QWidget):
         ax.set_xlabel("%s — %s" % (xlabel, qid), fontsize=9)
         self._fig.tight_layout()
         self._canvas.draw_idle()
+
+    def _result_scheme(self):
+        plan = self._run_plan or self.plan
+        return getattr(plan, "scheme", None)
+
+    def _elasticity_note(self, result, qid) -> str:
+        """Why some bars are missing from an elasticity ranking."""
+        a = result.analyses.get(qid, {})
+        rows = {p: d for p, d in a.items() if isinstance(d, dict)}
+        if rows and not any("elasticity" in d for d in rows.values()):
+            return ("Field QoI have no elasticity: compare the \u0394% (rel) "
+                    "columns, with the same Delta% on every row.")
+        missing = [p for p, d in rows.items()
+                   if not np.isfinite(d.get("elasticity", np.nan))]
+        if not missing:
+            return ""
+        if len(missing) == len(rows):
+            return ("No elasticity for a temperature QoI (°C has no "
+                    "physical zero): rank by sensitivity instead.")
+        labels = []
+        for p in missing:
+            try:
+                labels.append(pr.spec_for(p).label)
+            except Exception:
+                labels.append(p)
+        return ("Not ranked (no elasticity for a temperature, or no "
+                "value): %s." % ", ".join(labels))
 
     def _raw_ranking_note(self, result, qid) -> str:
         """Warning shown above a raw-sensitivity ranking whose bars are not
@@ -1617,14 +1689,14 @@ class SensitivityTab(QWidget):
         return ""
 
     @staticmethod
-    def _result_cell(plan_kind, analysis, path):
+    def _result_cell(plan_kind, analysis, path, scheme=None):
         if "error" in analysis:
             return "err"
         if plan_kind == "jacobian":
             d = analysis.get(path)
             if not d:
                 return "—"
-            return _fmt(d["sensitivity"])
+            return _fmt(d["sensitivity"]) + _cell_marks(d, scheme)
         # morris: analysis has names / mu_star / sigma arrays
         names = list(analysis.get("names", []))
         if path not in names:
@@ -1699,3 +1771,16 @@ def _fmt_duration(seconds: float) -> str:
     if h < 48:
         return "%.1f h" % h
     return "%.1f days" % (h / 24.0)
+
+
+def _cell_marks(d, scheme=None) -> str:
+    """Suffixes flagging how a Jacobian value was obtained: 'raw' when Norm
+    was ticked but no elasticity exists (temperature), 'fwd'/'bwd' when a
+    central difference fell back to one side because a run failed."""
+    marks = []
+    if d.get("raw_fallback"):
+        marks.append("raw")
+    used = d.get("scheme_used")
+    if scheme == "central" and used in ("forward", "backward"):
+        marks.append("fwd" if used == "forward" else "bwd")
+    return (" (%s)" % ", ".join(marks)) if marks else ""
