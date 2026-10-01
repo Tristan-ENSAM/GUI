@@ -164,7 +164,26 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
 - **Déploiement PC distant** : venv recréé depuis Anaconda + correctif SSL
   (ajout de `Library\bin` au PATH pour pip) ; lanceurs `run_gui.bat` et
   `run_gui_debug.bat` (chemin rapide si dépendances présentes, host Python
-  requis uniquement pour créer le venv).
+  requis uniquement pour créer le venv). `run_gui_debug.bat` se ferme avec
+  la fenêtre si la GUI sort avec le code 0 ; il ne reste ouvert (pause)
+  qu'en cas d'erreur (2026-10-01).
+- **DIC local — prédiction et remplissage (2026-10-01)**, options
+  `DicParams.predict` / `fill_invalid` (désactivées par défaut dans le
+  moteur, cochées par défaut dans l'onglet), tests
+  `tests/test_dic_predict_fill.py` :
+  - *Prédiction* : la recherche de chaque paire est centrée sur le
+    déplacement mesuré au même point à la paire précédente (point invalide :
+    médiane des voisins valides). Un point qui échoue autour de la
+    prédiction est recorrélé autour de zéro : jamais moins de points valides
+    que sans prédiction. Mesuré sur une séquence synthétique accélérée
+    (2→10 px/paire, search ±6) : 0 % → 100 % de points valides au-delà de
+    6 px, erreur médiane ≤ 0,012 px.
+  - *Remplissage* : un point sur matière rejeté reçoit la médiane des
+    déplacements de ses voisins valides (≥ 3 sur 8). Champ `Filled`
+    (1 = rempli) affiché et enregistré ; `valid` garde le sens « mesuré ».
+  - Reste à faire : pondérer les points par `ZNCC` (et exclure ou
+    pondérer les `Filled`) dans le futur coût d'identification inverse —
+    aucun code d'identification ne consomme encore les champs DIC.
 
 ---
 

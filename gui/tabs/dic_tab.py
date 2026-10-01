@@ -89,9 +89,11 @@ class _DicWorker(QThread):
         edge = int(info.get("n_edge", 0))
         edge_txt = (" | %d peak(s) on search border: increase Search" % edge
                     if edge else "")
+        filled = int(info.get("n_filled", 0))
+        fill_txt = (" (+%d filled)" % filled) if filled else ""
         self.sig_log.emit(
-            "Frame %d/%d | %d/%d valid | mean ZNCC %s | %.2f s/frame | ETA %s%s"
-            % (i, n, info["n_valid"], info["n_total"], z_txt,
+            "Frame %d/%d | %d/%d valid%s | mean ZNCC %s | %.2f s/frame | ETA %s%s"
+            % (i, n, info["n_valid"], info["n_total"], fill_txt, z_txt,
                info["frame_s"], _fmt_eta(eta), edge_txt))
         _raise_if_cancelled(self, info)
 
@@ -455,11 +457,28 @@ class DICTab(QWidget):
         self.sp_zncc = DecimalSpinBox(); self.sp_zncc.setRange(0.0, 1.0)
         self.sp_zncc.setSingleStep(0.05); self.sp_zncc.setValue(0.5)
         self.lbl_search = QLabel("Search:"); self.lbl_zncc = QLabel("ZNCC min:")
+        self.chk_predict = QCheckBox("Predict from previous pair")
+        self.chk_predict.setChecked(True)
+        self.chk_predict.setToolTip(
+            "Centre each pair's search on the displacement measured at the "
+            "same point in the previous pair (invalid points: median of "
+            "their valid neighbours) instead of on zero. Points that fail "
+            "around the prediction are re-correlated around zero, so it never "
+            "loses a point the plain search would find.")
+        self.chk_fill = QCheckBox("Fill rejected points from neighbours")
+        self.chk_fill.setChecked(True)
+        self.chk_fill.setToolTip(
+            "A point on material whose correlation was rejected (low ZNCC, "
+            "search border, sub-pixel failure, no texture, saturation) gets "
+            "the median displacement of its valid 8-neighbours, if it has "
+            "at least 3. Filled points are shown in the 'Filled' component "
+            "(1) and are NOT counted as measured in 'valid'.")
         self._local_widgets += [self.lbl_subset, self.sp_subset,
                                 self.lbl_step, self.sp_step,
                                 self.lbl_search, self.sp_search,
                                 self.lbl_zncc, self.sp_zncc,
-                                self.lbl_subpix, self.cb_subpix]
+                                self.lbl_subpix, self.cb_subpix,
+                                self.chk_predict, self.chk_fill]
         for sp in (self.sp_subset, self.sp_step, self.sp_search):
             sp.valueChanged.connect(self._preview_points)
 
@@ -602,6 +621,8 @@ class DICTab(QWidget):
         for cb in (self.cb_variant, self.cb_pattern, self.cb_subpix):
             cb.currentIndexChanged.connect(self._update_engine_summary)
         self.chk_mask.toggled.connect(self._update_engine_summary)
+        self.chk_predict.toggled.connect(self._update_engine_summary)
+        self.chk_fill.toggled.connect(self._update_engine_summary)
         self.chk_uinit.toggled.connect(self._update_engine_summary)
         self.chk_convect.toggled.connect(self._update_engine_summary)
         self.cb_pattern.currentIndexChanged.connect(self._sync_convect_enabled)
@@ -638,6 +659,8 @@ class DICTab(QWidget):
         grid.addWidget(self.lbl_search, 1, 0); grid.addWidget(self.sp_search, 1, 1)
         grid.addWidget(self.lbl_zncc, 1, 2); grid.addWidget(self.sp_zncc, 1, 3)
         grid.addWidget(self.lbl_subpix, 2, 0); grid.addWidget(self.cb_subpix, 2, 1, 1, 3)
+        grid.addWidget(self.chk_predict, 3, 0, 1, 2)
+        grid.addWidget(self.chk_fill, 3, 2, 1, 2)
         grid.addWidget(self.lbl_elem, 0, 0); grid.addWidget(self.sp_elem, 0, 1)
         grid.addWidget(self.lbl_variant, 0, 2); grid.addWidget(self.cb_variant, 0, 3)
         grid.addWidget(self.lbl_pattern, 1, 0); grid.addWidget(self.cb_pattern, 1, 1)
@@ -704,6 +727,10 @@ class DICTab(QWidget):
                                        int(self.sp_search.value()),
                                        float(self.sp_zncc.value()),
                                        self.cb_subpix.currentData()))
+            if self.chk_predict.isChecked():
+                txt += " \u00b7 predict"
+            if self.chk_fill.isChecked():
+                txt += " \u00b7 fill"
         if getattr(self, "chk_sat", None) is not None and self.chk_sat.isChecked():
             txt += " \u00b7 sat\u2265%d" % int(self.sp_sat.value())
         if self.chk_mask.isChecked():
@@ -820,7 +847,9 @@ class DICTab(QWidget):
             search=int(self.sp_search.value()), zncc_min=float(self.sp_zncc.value()),
             subpixel=True, subpixel_method=str(self.cb_subpix.currentData()),
             saturation_level=self._saturation_level(),
-            saturation_margin=int(self.sp_sat_margin.value()))
+            saturation_margin=int(self.sp_sat_margin.value()),
+            predict=self.chk_predict.isChecked(),
+            fill_invalid=self.chk_fill.isChecked())
 
     def _tool_polygon(self):
         """Tool polygon (pixel vertices) drawn in the Alignment tab, or None.
@@ -1191,7 +1220,7 @@ class DICTab(QWidget):
         """Freeze engine + mask parameters (they define the frozen grid/mask)."""
         widgets = [getattr(self, n, None) for n in (
             "cb_engine", "sp_subset", "sp_step", "sp_search", "sp_zncc",
-            "cb_subpix",
+            "cb_subpix", "chk_predict", "chk_fill",
             "chk_mask", "sld_int", "sp_bits",
             "chk_sat", "sp_sat", "sp_sat_margin",
             # chk_uncert stays disabled (not wired: no sigma_f source yet)
@@ -1394,7 +1423,8 @@ class DICTab(QWidget):
         self._result = res
         self._result_meta = self._pending_meta
         self.viewer.set_field(res["x"], res["y"], res["t"], res["fields"],
-                              valid=res["valid"], units=res["units"])
+                              valid=_shown_valid(res["valid"], res["fields"]),
+                              units=res["units"])
         f0 = self._seq.frame(0)
         self.viewer.set_background(self._seq.frame, self._mm_per_px(),
                                    f0.shape[1], f0.shape[0])
@@ -1464,6 +1494,23 @@ class DICTab(QWidget):
                  and np.ndim(d[k]) == 2 and np.shape(d[k]) == (n_t, n_p)}
         units = d.get("meta", {}).get("units", {})
         self.viewer.set_field(d["x"], d["y"], d["t"], comps,
-                              valid=d.get("valid"), units=units)
+                              valid=_shown_valid(d.get("valid"), comps),
+                              units=units)
         self.session.dic_field_path = str(path)
         self.lbl_status.setText("Imported %s" % os.path.basename(path))
+
+
+def _shown_valid(valid, fields):
+    """Points to display: measured (`valid`) OR filled from the neighbours
+    (the "Filled" field of the local engine). `valid` itself keeps meaning
+    "measured" in the saved file."""
+    if valid is None:
+        return None
+    v = np.asarray(valid, bool)
+    f = fields.get("Filled") if hasattr(fields, "get") else None
+    if f is None:
+        return v
+    f = np.asarray(f, float)
+    if f.shape != v.shape:
+        return v
+    return v | (np.nan_to_num(f, nan=0.0) > 0.5)
