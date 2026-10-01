@@ -65,7 +65,18 @@ class DicParams:
     `saturation_max_frac` (default 0.5, the Q4 coverage threshold) is
     rejected. Measured: rejecting any subset touching a saturated pixel kept
     only 34 % of the points for 2 % of scattered saturated pixels, for a
-    mean error of 0.0012 -> 0.0007 px."""
+    mean error of 0.0012 -> 0.0007 px.
+
+    `predict`: centre each pair's search on the displacement measured at the
+    same grid point in the previous pair (invalid points: median of their
+    valid neighbours) instead of on zero. Points that fail with the
+    prediction are re-correlated around zero, so it never does worse than
+    the unpredicted search. Same `search` half-width.
+    `fill_invalid`: a point on material (not masked out) whose correlation
+    was rejected gets the median displacement of its valid 8-neighbours when
+    it has at least `fill_min_neighbours` of them. Such points are reported
+    in the "Filled" field (1 = filled, 0 = measured) and stay False in
+    `valid`, which keeps meaning "measured"."""
     engine: str = "local"        # "local" (here) | "global" (q4dic, later)
     subset: int = 31             # subset side in px (odd, >=5)
     step: int = 16               # grid spacing in px
@@ -77,6 +88,9 @@ class DicParams:
     saturation_level: Optional[float] = None
     saturation_margin: int = 3
     saturation_max_frac: float = 0.5
+    predict: bool = False
+    fill_invalid: bool = False
+    fill_min_neighbours: int = 3
 
     def to_json_dict(self) -> dict:
         return asdict(self)
@@ -212,8 +226,13 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
                     min_std_rel: float = 1e-3, return_info: bool = False,
                     saturation_level: Optional[float] = None,
                     saturation_margin: int = 3,
-                    saturation_max_frac: float = 0.5):
+                    saturation_max_frac: float = 0.5,
+                    guess: Optional[np.ndarray] = None):
     """Local subset ZNCC displacement of each point from `ref` to `cur`.
+
+    ``guess`` (optional, (n_points, 2) px): predicted displacement per point;
+    the integer search range is then [round(guess) - search, round(guess) +
+    search] instead of [-search, +search]. NaN rows mean no prediction.
 
     Conventions: image axes (x = column, y = row, y downward); a point is a
     pixel centre, rounded half up (``pixel_centres``); ``disp`` is the motion
@@ -297,9 +316,13 @@ def correlate_local(ref: np.ndarray, cur: np.ndarray, points: np.ndarray,
         if float(tmpl.std()) <= min_std:
             flat[k] = True
             continue
-        # search window in cur, clamped to image
-        x0 = max(0, ix - half - sr); x1 = min(W, ix + half + 1 + sr)
-        y0 = max(0, iy - half - sr); y1 = min(H, iy + half + 1 + sr)
+        # search window in cur (centred on the predicted position, if any),
+        # clamped to image
+        gx = gy = 0
+        if guess is not None and np.all(np.isfinite(guess[k])):
+            gx, gy = int(round(float(guess[k][0]))), int(round(float(guess[k][1])))
+        x0 = max(0, ix + gx - half - sr); x1 = min(W, ix + gx + half + 1 + sr)
+        y0 = max(0, iy + gy - half - sr); y1 = min(H, iy + gy + half + 1 + sr)
         win = C[y0:y1, x0:x1]
         if win.shape[0] < s or win.shape[1] < s:
             continue
@@ -366,6 +389,37 @@ def grid_from_points(x: np.ndarray, y: np.ndarray):
     return ux, uy, ix, iy
 
 
+def neighbour_median(values: np.ndarray, avail: np.ndarray, grid):
+    """Median of each grid point's AVAILABLE 8-neighbours (the point itself
+    excluded), and how many there are.
+
+    values : (n_points,) or (n_points, k) ; avail : (n_points,) bool
+    grid   : (ux, uy, ix, iy) as returned by grid_from_points.
+    Returns (median (n_points[, k]) NaN where no neighbour, count (n_points,)).
+    """
+    ux, uy, ix, iy = grid
+    v = np.asarray(values, float)
+    one = v.ndim == 1
+    if one:
+        v = v[:, None]
+    ny, nx = uy.size, ux.size
+    k = v.shape[1]
+    G = np.full((ny + 2, nx + 2, k), np.nan)
+    G[iy + 1, ix + 1] = np.where(np.asarray(avail, bool)[:, None], v, np.nan)
+    shifts = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+              if (dy, dx) != (0, 0)]
+    stack = np.stack([G[1 + dy:ny + 1 + dy, 1 + dx:nx + 1 + dx]
+                      for dy, dx in shifts])            # (8, ny, nx, k)
+    count = np.isfinite(stack[..., 0]).sum(axis=0)      # (ny, nx)
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            med = np.nanmedian(stack, axis=0)            # (ny, nx, k)
+    med = med[iy, ix]
+    return (med[:, 0] if one else med), count[iy, ix]
+
+
 # von Mises equivalent (2D, incompressible plane assumption: e_zz = -(exx+eyy)).
 # Documented so the convention is explicit and can be changed if needed.
 def _equiv(exx, eyy, exy):
@@ -383,13 +437,18 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     Returns a dict:
       x, y      : (n_points,) mm, model frame
       t         : (n_frames,) s, pair midpoints
-      valid     : (n_frames, n_points) bool
+      valid     : (n_frames, n_points) bool -- MEASURED points only (filled
+                  points, see ``params.fill_invalid``, stay False)
       grid      : (nx, ny) or None
       fields    : {name: (n_frames, n_points)} with
                   Ux, Uy, Umag     incremental displacement (mm)
                   Vx, Vy, Vmag     velocity (mm/s)
                   Exx_dot, Eyy_dot, Exy_dot, Eeq_dot   strain rate (1/s)
                   Exx, Eyy, Exy, Eeq                   cumulative strain (-)
+                  ZNCC             correlation score (-)
+                  Filled           1 where the value was filled from the
+                                   neighbours, 0 where measured, NaN masked
+                                   (only with ``params.fill_invalid``)
       units     : {name: unit}
 
     Strain is the small-strain symmetric gradient of the displacement field
@@ -446,8 +505,13 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     strain_grid = (grid is not None and grid[0].size >= 2
                    and grid[1].size >= 2)
 
+    predict = bool(getattr(params, "predict", False))
+    fill = bool(getattr(params, "fill_invalid", False)) and grid is not None
+    fill_min = int(getattr(params, "fill_min_neighbours", 3))
     names = ["Ux", "Uy", "Umag", "Vx", "Vy", "Vmag",
              "Exx_dot", "Eyy_dot", "Exy_dot", "Eeq_dot", "ZNCC"]
+    if fill:
+        names.append("Filled")
     fields = {k: np.full((n_pairs, n_pts), np.nan) for k in names}
     valid = np.zeros((n_pairs, n_pts), bool)
     t = np.zeros(n_pairs)
@@ -464,6 +528,16 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
         gx_mm = float(np.mean(np.diff(ux))) if ux.size > 1 else 1.0
         gy_mm = float(np.mean(np.diff(uy))) if uy.size > 1 else 1.0
 
+    corr_kw = dict(
+        subset=params.subset, search=params.search,
+        zncc_min=params.zncc_min, subpixel=params.subpixel,
+        subpixel_method=getattr(params, "subpixel_method", "icgn"),
+        min_std_rel=getattr(params, "min_std_rel", 1e-3),
+        return_info=True,
+        saturation_level=getattr(params, "saturation_level", None),
+        saturation_margin=getattr(params, "saturation_margin", 3),
+        saturation_max_frac=getattr(params, "saturation_max_frac", 0.5))
+    guess = None                    # predicted displacement (px) per point
     t_start = time.perf_counter()
     for i in range(n_pairs):
         t_frame0 = time.perf_counter()
@@ -475,24 +549,50 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
         else:
             keep = keep_static
         disp, ok, score, cinfo = correlate_local(
-            frames[i], frames[i + 1], pts,
-            subset=params.subset, search=params.search,
-            zncc_min=params.zncc_min, subpixel=params.subpixel,
-            subpixel_method=getattr(params, "subpixel_method", "icgn"),
-            min_std_rel=getattr(params, "min_std_rel", 1e-3),
-            return_info=True,
-            saturation_level=getattr(params, "saturation_level", None),
-            saturation_margin=getattr(params, "saturation_margin", 3),
-            saturation_max_frac=getattr(params, "saturation_max_frac", 0.5))
+            frames[i], frames[i + 1], pts, guess=guess, **corr_kw)
+        n_retried = 0
+        if guess is not None and n_pts:
+            # Safety net: a point that failed around its prediction is
+            # re-correlated around zero (the unpredicted search), so the
+            # prediction can only add valid points, never lose one.
+            moved = np.any(np.round(guess) != 0, axis=1) & np.all(
+                np.isfinite(guess), axis=1)
+            redo = np.flatnonzero(keep & ~ok & moved)
+            if redo.size:
+                d2, ok2, sc2, info2 = correlate_local(
+                    frames[i], frames[i + 1], pts[redo], **corr_kw)
+                better = ok2
+                sel = redo[better]
+                disp[sel] = d2[better]; ok[sel] = True
+                score[sel] = sc2[better]
+                for key in cinfo:
+                    cinfo[key][sel] = info2[key][better]
+                n_retried = int(redo.size)
         ok = ok & keep                          # masked-out points are invalid
+        if predict and n_pts:
+            # Prediction for the next pair: the displacement measured here;
+            # points without a valid measurement take the median of their
+            # valid neighbours (or no prediction).
+            guess = np.where(ok[:, None], disp, np.nan)
+            if grid is not None:
+                med, cnt = neighbour_median(disp, ok, grid)
+                guess = np.where(ok[:, None], disp,
+                                 np.where((cnt > 0)[:, None], med, np.nan))
+        filled = np.zeros(n_pts, bool)
+        if fill and n_pts:
+            med, cnt = neighbour_median(disp, ok, grid)
+            filled = keep & ~ok & (cnt >= fill_min)
+            disp = np.where(filled[:, None], med, disp)
+            fields["Filled"][i] = np.where(keep, filled.astype(float), np.nan)
+        use = ok | filled                       # displayed / derived points
         # ZNCC peak as the per-point DIC quality/score (kept even where the
         # correlation is below threshold, so low-quality zones are visible);
         # NaN only where masked out.
         fields["ZNCC"][i] = np.where(keep, score, np.nan)
         ux_mm = disp[:, 0] * mm_per_px
         uy_mm = -disp[:, 1] * mm_per_px
-        ux_mm = np.where(ok, ux_mm, np.nan)
-        uy_mm = np.where(ok, uy_mm, np.nan)
+        ux_mm = np.where(use, ux_mm, np.nan)
+        uy_mm = np.where(use, uy_mm, np.nan)
         fields["Ux"][i] = ux_mm
         fields["Uy"][i] = uy_mm
         fields["Umag"][i] = np.hypot(ux_mm, uy_mm)
@@ -528,6 +628,8 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
             mean_zncc = float(np.mean(zncc_valid)) if zncc_valid.size else None
             on_frame({"index": i, "n_pairs": n_pairs,
                       "n_valid": n_valid, "n_total": n_total,
+                      "n_filled": int(filled.sum()),
+                      "n_retried": n_retried,
                       "mean_zncc": mean_zncc,
                       "n_edge": int((cinfo["edge"] & keep).sum()),
                       "n_flat": int((cinfo["flat"] & keep).sum()),
@@ -538,7 +640,9 @@ def compute_dic_fields(frames, points: np.ndarray, params: DicParams,
     units = {"Ux": "mm", "Uy": "mm", "Umag": "mm",
              "Vx": "mm/s", "Vy": "mm/s", "Vmag": "mm/s",
              "Exx_dot": "1/s", "Eyy_dot": "1/s", "Exy_dot": "1/s", "Eeq_dot": "1/s",
-             "ZNCC": "-"}
+             "ZNCC": "-", "Filled": "-"}
+    if not fill:
+        units.pop("Filled")
     return {"x": x_mm, "y": y_mm, "t": t, "valid": valid,
             "grid": (None if grid is None else (grid[0].size, grid[1].size)),
             "fields": fields, "units": units}

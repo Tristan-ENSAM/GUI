@@ -30,7 +30,7 @@ _INTERP = ["nearest", "bilinear", "bicubic", "spline16", "spline36"]
 # Quality/score fields are shown everywhere they were computed (they bypass the
 # `valid` mask) so low-quality or rejected zones stay visible: ZNCC for the
 # local engine, the correlation residual for the global Q4 engine.
-_QUALITY_FIELDS = {"ZNCC", "residual"}
+_QUALITY_FIELDS = {"ZNCC", "residual", "Filled"}
 
 
 def _bilinear_grid(ux, uy, Z, qx, qy):
