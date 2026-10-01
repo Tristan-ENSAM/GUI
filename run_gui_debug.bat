@@ -87,10 +87,18 @@ if not exist "%~dp0gui\main.py" (
     pause
     exit /b 1
 )
-echo [INFO] Launching GUI (console kept open for debug)...
+echo [INFO] Launching GUI (console kept open while it runs)...
 REM "%VENV_PY%" -m gui.main
 "%VENV_PY%" -X faulthandler -m gui.main
+set "GUI_RC=!errorlevel!"
+REM Normal close (exit code 0): the console closes with the window.
+REM Crash / error (non-zero code): keep it open so the traceback can be read
+REM (the session log is also written to %GUI_DEBUG_DIR%).
+if "!GUI_RC!" == "0" (
+    endlocal
+    exit
+)
 echo.
-echo [INFO] GUI exited with code %errorlevel%
+echo [INFO] GUI exited with code !GUI_RC! - console kept open to read the error.
 pause
 endlocal
