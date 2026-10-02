@@ -628,20 +628,24 @@ def create_step(model, RP, p):
     model.HistoryOutputRequest(
         name='H-Output-1', createStepName='Cut',
         region=RP, variables=('RF1', 'RF2',),
-        numIntervals=ho_n_intervals)
+        timeInterval=EVERY_TIME_INCREMENT, filter=ho_filter)
+        # numIntervals=ho_n_intervals)
 
     if ho_filter is not None:
         model.HistoryOutputRequest(
             name='H-Output-1-Filtered', createStepName='Cut',
             region=RP, variables=('RF1', 'RF2',),
-            numIntervals=ho_n_intervals, filter=ho_filter)
+            timeInterval=EVERY_TIME_INCREMENT, filter=ho_filter)
+            # numIntervals=ho_n_intervals, filter=ho_filter)
 
     # PRESELECT carries ALLKE/ALLIE, which the mass-scaling energy guard reads.
     # Deliberately NOT filtered: the guard must see the true energy balance,
     # not a band-limited version of it.
     model.HistoryOutputRequest(
         name='H-Output-2', createStepName='Cut',
-        variables=PRESELECT, numIntervals=ho_n_intervals)
+        variables=PRESELECT,
+        timeInterval=EVERY_TIME_INCREMENT)
+        # numIntervals=ho_n_intervals)
 
     # NO Eulerian mass/volume conservation history is requested. That is a
     # deliberate outcome, not an omission -- three attempts failed and the

@@ -458,6 +458,28 @@ def _extract_history_energy(step):
     return None, None, None
 
 
+def _extract_history_artificial(step):
+    """Return (time, allae) for the whole-model artificial strain energy, or
+    (None, None).
+
+    ALLAE is a history-only whole-model energy ("artificial" strain energy of
+    the constraints that remove singular modes, such as hourglass control;
+    Abaqus documentation quoted by Tristan, 2026-10-01). It is expected in
+    the same whole-model region as ALLKE/ALLIE, i.e. in the PRESELECT history
+    request (cel_model.py:639-644). That PRESELECT really contains ALLAE is
+    hypothesis H2 of the correction report: unverified until a real run, so
+    an absent channel is reported, never fatal."""
+    for region_key, region in step.historyRegions.items():
+        outputs = region.historyOutputs
+        k_ae = _find_history_key(outputs, "ALLAE")
+        if k_ae is not None:
+            ae_pairs = outputs[k_ae].data
+            t = _np.asarray([p[0] for p in ae_pairs], dtype=_np.float64)
+            allae = _np.asarray([p[1] for p in ae_pairs], dtype=_np.float32)
+            return t, allae
+    return None, None
+
+
 def extract_results(job_name, model_cfg):
     """Extract the completed ``job_name.odb`` into the GUI result bundle."""
     print("\n" + "=" * 72)
@@ -645,10 +667,25 @@ def extract_results(job_name, model_cfg):
                 _npz_payload["history__time"] = _he_t
             _npz_payload["history__ALLKE"] = _allke
             _npz_payload["history__ALLIE"] = _allie
-            _history_vars = _history_vars + ["ALLKE", "ALLIE"]
+            # The energy channels carry their OWN time base: history__time is
+            # the RF one when RF exists, and nothing guarantees the two
+            # requests are sampled identically. The run safeguards restrict
+            # the energies to the window T, so they need this time vector.
+            _npz_payload["history__ENERGY_TIME"] = _he_t
+            _history_vars = _history_vars + ["ALLKE", "ALLIE", "ENERGY_TIME"]
             _vprint("  history: %d samples, ALLKE/ALLIE stored" % len(_he_t))
         else:
             _vprint("  no energy history found.")
+
+        _ha_t, _allae = _extract_history_artificial(_step)
+        if _ha_t is not None:
+            _npz_payload["history__ALLAE"] = _allae
+            _npz_payload["history__ALLAE_TIME"] = _ha_t
+            _history_vars = _history_vars + ["ALLAE", "ALLAE_TIME"]
+            _vprint("  history: %d samples, ALLAE stored" % len(_ha_t))
+        else:
+            _vprint("[WARNING] ALLAE not found in any history region: the "
+                    "R_HG safeguard cannot be evaluated for this run.")
 
         # Metadata
         from datetime import datetime as _datetime
