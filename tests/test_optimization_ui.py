@@ -303,3 +303,86 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
     text = tab.log.toPlainText()
     assert "RESULT: every dimension independent" in text
     assert "R_HG=0.01" in text
+
+
+def _analytic_tab(qapp, monkeypatch, tmp_path):
+    from gui.core.domain_sizing import DomainDims
+    tab = OptimizationTab(ModelConfig())
+    tab.cfg.elem_size = 0.01
+    tab.cfg.step.output_filter_enabled = False
+    for k, v in (("xmin", "-0.03"), ("xmax", "0.03"), ("ymin", "-0.03"),
+                 ("ymax", "0.03")):
+        tab.le_zoi[k].setText(v)
+    tab.sp_margin.setValue(1)
+    _fill_thresholds(tab)
+    tab._dom_spins["dom_step_elems"].setValue(4)
+    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_start_progress", lambda: None)
+
+    def fake_make(prefs, run_dir, cpus, prefix):
+        def run_bundle(cfg):
+            g = cfg.euler_geometry
+            return _GridBundle(DomainDims(g.h_wp, g.h_void, g.l_wp, g.l_void),
+                               cfg.elem_size)
+        run_bundle.state = {"sta": None, "job": None}
+        return run_bundle
+    monkeypatch.setattr(tab, "_make_run_bundle", fake_make)
+    return tab
+
+
+def _drain(qapp, worker):
+    assert worker.wait(120000)
+    for _ in range(50):
+        qapp.processEvents()
+
+
+def test_checks_and_exports_through_the_tab(qapp, monkeypatch, tmp_path):
+    """Domain study -> exports, then interaction checks (real GCI on D*) ->
+    checks exports; table and plots filled."""
+    import csv
+    import json
+    tab = _analytic_tab(qapp, monkeypatch, tmp_path)
+    assert not tab.btn_checks.isEnabled()
+    tab._on_run_domain_independence()
+    _drain(qapp, tab._di_worker)
+    res = tab._last_domain_result
+    assert res is not None and res.status == "converged"
+    folder = tab._last_domain_dir
+    for name in ("runs.csv", "comparisons.csv", "dimensions.csv",
+                 "summary.json"):
+        assert (folder / name).exists(), name
+    assert tab.btn_checks.isEnabled()
+    assert tab.table.rowCount() > 0
+    n_runs_before = res.n_runs
+
+    tab._on_run_interaction_checks()
+    _drain(qapp, tab._checks_worker)
+    chk = tab._last_checks
+    assert chk is not None, tab.log.toPlainText()
+    assert [c.name for c in chk.checks] == ["ms_x_mesh", "domain_combined",
+                                            "mesh_x_domain"]
+    # combined domain: exactly one extra run (D* reused from the study)
+    assert res.n_runs == n_runs_before + 1
+    assert chk.checks[2].passed is True          # f constant in h -> exact
+    assert len(chk.gci_calls) == 3
+    rows = list(csv.DictReader(open(folder / "checks.csv")))
+    assert [r["check"] for r in rows] == ["ms_x_mesh", "domain_combined",
+                                          "mesh_x_domain"]
+    s = json.loads((folder / "summary.json").read_text())
+    assert s["interaction_checks"]["status"] == chk.status
+    assert "INTERACTION CHECKS:" in tab.log.toPlainText()
+
+
+def test_gci_records_cost_and_exports(qapp, monkeypatch, tmp_path):
+    tab = _analytic_tab(qapp, monkeypatch, tmp_path)
+    tab.cfg.euler_geometry.h_wp = tab.cfg.euler_geometry.h_void = 0.1
+    tab.cfg.euler_geometry.l_wp = tab.cfg.euler_geometry.l_void = 0.1
+    tab._on_run_mesh_gci()
+    _drain(qapp, tab._mesh_worker)
+    assert tab._last_gci is not None, tab.log.toPlainText()
+    res, calls, tol, folder = tab._last_gci
+    assert len(calls) == len(res.sizes)
+    assert all(c.cost.n_elem_euler for c in calls)
+    assert (folder / "gci.csv").exists() and (folder / "gci_meshes.csv").exists()
+    # the user's config is untouched by the study
+    assert tab.cfg.elem_size == 0.01

@@ -165,3 +165,46 @@ class TestCost:
         c = cost_record(None, None, host_wall_s=5.0, n_cpu=2)
         assert isinstance(c, CostRecord)
         assert c.c_cpu_s is None and c.t_wall_host_s == 5.0
+
+
+class TestRecordingRunner:
+    def _cfg(self, h):
+        from types import SimpleNamespace
+        g = SimpleNamespace(h_wp=0.1, h_void=0.1, l_wp=0.1, l_void=0.1)
+        return SimpleNamespace(elem_size=h, euler_geometry=g)
+
+    def test_records_cost_and_guards_per_call(self, tmp_path):
+        from gui.sensitivity.run_record import RecordingRunner
+        sta = tmp_path / "j.sta"
+        sta.write_text("  10  1.0E-06 1.0E-06  00:00:30 6.0E-10   1  1.0E-06"
+                       "  1.0E-01\n", encoding="latin-1")
+        b = _Bundle(_full(T, np.full(11, 0.5), np.full(11, 100.0),
+                          np.ones(11)))
+
+        def run(cfg):
+            return b
+        run.state = {"sta": sta}
+        rr = RecordingRunner(run, n_cpu=4, guard_settings=GuardSettings())
+        assert rr(self._cfg(0.01)) is b
+        rec = rr.records[0]
+        assert rec.elem_size == 0.01 and rec.job_ok and rec.guards_ok
+        assert rec.cost.n_elem_euler == 400
+        assert rec.cost.c_cpu_s == pytest.approx(120.0)
+        assert rr.state["sta"] == sta
+
+    def test_failed_call_is_recorded_and_reraised(self):
+        from gui.sensitivity.run_record import RecordingRunner
+
+        def boom(cfg):
+            raise RuntimeError("abaqus died")
+        rr = RecordingRunner(boom)
+        with pytest.raises(RuntimeError):
+            rr(self._cfg(0.02))
+        assert rr.records[0].job_ok is False
+        assert "abaqus died" in rr.records[0].error
+
+    def test_none_bundle(self):
+        from gui.sensitivity.run_record import RecordingRunner
+        rr = RecordingRunner(lambda cfg: None)
+        assert rr(self._cfg(0.02)) is None
+        assert rr.records[0].error == "no results bundle"

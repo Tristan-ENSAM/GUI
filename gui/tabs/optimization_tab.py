@@ -29,11 +29,11 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar
+    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -69,6 +69,10 @@ _QUANTITIES = [
     ("Fc", None, "N/mm"),
     ("Ff", None, "N/mm"),
 ]
+# Convergence table (report, Part B, T7): one row per comparison of the
+# domain study, per GCI quantity and per interaction check.
+_TABLE_COLUMNS = ("study", "item", "from", "to", "E_max / ratio", "q_crit",
+                  "safeguards", "decision", "mode", "C_CPU [s]")
 # Default values of the persisted Optimization settings (one instance, read
 # only, so the widget defaults cannot drift from the dataclass).
 OptimizationCfgDefaults = _OptimizationCfg()
@@ -113,13 +117,21 @@ class OptimizationTab(QWidget):
         self._current_proc = None
         self._current_abaqus_cmd = None
         self._current_run_dir = None
-        self._hist = {}                 # param key -> list of (value, {q: E_q})
+        self._last_domain_result = None  # StudyResult of the domain study
+        self._last_domain_dir = None     # its study folder (exports)
+        self._last_gci = None            # (MeshGciResult, calls, tol, dir)
+        self._last_checks = None         # ChecksResult
         self._current_sta = None        # current job's .sta path (for progress)
         self._sim_timer = QTimer(self)
         self._sim_timer.setInterval(500)
         self._sim_timer.timeout.connect(self._poll_sta)
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # Top (inputs + run controls) and bottom (log / plots / table) share
+        # a vertical splitter, so the outputs can be enlarged by the user.
+        _top = QWidget()
+        root = QVBoxLayout(_top)
 
         # (Inputs-from-model panel removed as requested — the values are read
         # directly from the config when needed.)
@@ -336,6 +348,16 @@ class OptimizationTab(QWidget):
             "geometric tail. The domain diagonal only raises a warning.")
         self.btn_domain.clicked.connect(self._on_run_domain_independence)
         rc.addWidget(self.btn_domain)
+        self.btn_checks = QPushButton("Run interaction checks")
+        self.btn_checks.setToolTip(
+            "A-posteriori checks of the sized model (paper \u00a75.7):\n"
+            "mass-scaling factor inside its window at (h*, D*), the four\n"
+            "dimensions grown together (1 run), and the GCI plan of panel 3\n"
+            "run again on D* (h* must stay within tolerance). Available once\n"
+            "a domain study has finished.")
+        self.btn_checks.setEnabled(False)
+        self.btn_checks.clicked.connect(self._on_run_interaction_checks)
+        rc.addWidget(self.btn_checks)
         self.btn_open_wd = QPushButton("Open working dir")
         self.btn_open_wd.setToolTip("Open the Preferences working directory.")
         self.btn_open_wd.clicked.connect(self._open_working_dir)
@@ -366,32 +388,24 @@ class OptimizationTab(QWidget):
         # Matplotlib navigation toolbar: interactive zoom / pan / home / save.
         self._nav = NavigationToolbar2QT(self.canvas, conv)
         cv.addWidget(self._nav)
-        # One axis per identified parameter: mass scaling, wp element size and
-        # tool element size get their own axis (incompatible value scales); the
-        # four Eulerian domain dimensions share a single axis (same mm scale).
-        (self._ax_ms, self._ax_wp), (self._ax_tool, self._ax_domain) = \
-            self.fig.subplots(2, 2)
-        # Route a single-parameter history key to its dedicated axis.
-        self._param_axes = {
-            "mass_scaling": self._ax_ms,
-            "wp_elem": self._ax_wp,
-            "tool_elem": self._ax_tool,
-        }
-        self._ax_titles = {
-            id(self._ax_ms): "mass scaling",
-            id(self._ax_wp): "wp element size",
-            id(self._ax_tool): "tool element size",
-            id(self._ax_domain): "Eulerian domain",
-        }
+        # Three axes (report, Part B, T8): the domain study (E_max per
+        # comparison versus the tested value, one series per dimension), the
+        # GCI study (f_q(h) relative to its reference, per quantity) and the
+        # cost-E_max map (paper Fig. 13).
+        self._ax_domain, self._ax_gci, self._ax_cost = self.fig.subplots(1, 3)
         cv.addWidget(self.canvas, 1)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(
-            ["parameter", "initial", "intermediate", "final"])
+        self.table = QTableWidget(0, len(_TABLE_COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(_TABLE_COLUMNS))
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch)
-        cv.addWidget(self.table)
         self.tabs.addTab(conv, "Convergence")
-        root.addWidget(self.tabs, 1)
+        self.tabs.addTab(self.table, "Table")
+        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter.addWidget(_top)
+        self._splitter.addWidget(self.tabs)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        outer.addWidget(self._splitter)
 
         # Auto-refresh the preview when the inputs that affect it change.
         for _d in _DIM_ORDER:
@@ -796,74 +810,6 @@ class OptimizationTab(QWidget):
         # signals would be cleaner; appendPlainText is used read-mostly here.
         self.log.appendPlainText(text.rstrip("\n"))
 
-    def _e_max(self, errors) -> float:
-        """E_max = max over quantities of the normalized error E_q / eps_q (the
-        admissibility criterion is E_max < 1). NaN components are skipped."""
-        thr = self.thresholds()
-        vals = [errors[q] / thr[q] for q in thr
-                if q in errors and errors[q] == errors[q] and thr[q] > 0]
-        return max(vals) if vals else float("nan")
-
-    def _plot(self):
-        """Redraw the four per-parameter convergence axes from `self._hist`.
-
-        Each axis shows, versus the parameter value, the per-quantity
-        normalized errors E_q/eps_q (thin) and E_max (bold), with the
-        admissibility line E_max = 1. Mass scaling, wp and tool element sizes
-        each get their own axis (incompatible value scales); the four Eulerian
-        domain dimensions share the fourth axis (same mm scale)."""
-        thr = self.thresholds()
-        axes = [self._ax_ms, self._ax_wp, self._ax_tool, self._ax_domain]
-        drawn = set()
-        for ax in axes:
-            ax.clear()
-
-        def _series(ax, pts, prefix=""):
-            """Plot one (value, errors) history on `ax`. Returns True if drawn."""
-            if not pts:
-                return False
-            xs = [v for (v, _e) in pts]
-            for q in pts[0][1].keys():
-                if q not in thr or thr[q] <= 0:
-                    continue
-                ys = [e.get(q, float("nan")) / thr[q] for (_v, e) in pts]
-                ax.plot(xs, ys, marker="o", lw=0.8, alpha=0.5,
-                        label="%s%s" % (prefix, q))
-            ymax = [self._e_max(e) for (_v, e) in pts]
-            ax.plot(xs, ymax, marker="s", lw=1.8,
-                    label="%sE_max" % prefix)
-            return True
-
-        # single-parameter axes
-        for key, ax in self._param_axes.items():
-            if _series(ax, self._hist.get(key, [])):
-                drawn.add(id(ax))
-        # domain axis: the four dimensions share one axis
-        for name in _DIM_ORDER:
-            if _series(self._ax_domain, self._hist.get(name, []),
-                       prefix="%s·" % name):
-                drawn.add(id(self._ax_domain))
-
-        for ax in axes:
-            ax.axhline(1.0, ls="--", lw=1.0, color="#b91c1c", alpha=0.85)
-            ax.set_title(self._ax_titles[id(ax)], fontsize=8)
-            ax.set_yscale("log")
-            ax.tick_params(labelsize=6)
-            if id(ax) in drawn:
-                ax.legend(fontsize=5, ncol=2)
-        # Mass scaling, wp and tool span decades on their value axis -> log x.
-        for ax in (self._ax_ms, self._ax_wp, self._ax_tool):
-            ax.set_xscale("log")
-        for ax in (self._ax_tool, self._ax_domain):
-            ax.set_xlabel("parameter value", fontsize=7)
-        for ax in (self._ax_ms, self._ax_tool):
-            ax.set_ylabel("E_q/ε_q", fontsize=7)
-        try:
-            self.fig.tight_layout()
-        except Exception:
-            pass
-        self.canvas.draw_idle()
-
     # ===================================================================
     # ZOI (measurement zone) — distinct from the ROI
     # ===================================================================
@@ -898,6 +844,16 @@ class OptimizationTab(QWidget):
                     pass
         return out
 
+    def _gci_tolerances(self):
+        """Relative GCI tolerances keyed by the GCI quantity names (the panel
+        "force" entry applies to Fc and Ff)."""
+        tol = self._tolerances()
+        out = {q: tol[q] for q in ("EVF", "TEMP", "V1", "V2") if q in tol}
+        if "force" in tol:
+            out["Fc"] = tol["force"]
+            out["Ff"] = tol["force"]
+        return out
+
     def _dims_from_cfg(self):
         g = self.cfg.euler_geometry
         return DomainDims(h_wp=float(g.h_wp), h_void=float(g.h_void),
@@ -906,6 +862,7 @@ class OptimizationTab(QWidget):
     def _busy(self, on, msg="", color="#1d4ed8"):
         self.btn_mesh.setEnabled(not on)
         self.btn_domain.setEnabled(not on)
+        self.btn_checks.setEnabled((not on) and self._checks_available())
         self.btn_cancel.setEnabled(on)
         if msg:
             self.lbl_status.setStyleSheet("color: %s;" % color)
@@ -1051,6 +1008,7 @@ class OptimizationTab(QWidget):
                              "l_wp": dims0.l_wp, "l_void": dims0.l_void}}
         run_dir = self._study_run_dir(wd, "domainsizing", study_cfg)
         run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "domainsizing")
+        self._pending_domain_dir = run_dir
 
         def cost_fn(bundle, dims, host_wall_s):
             return cost_record(bundle, run_bundle.state.get("sta"),
@@ -1068,6 +1026,7 @@ class OptimizationTab(QWidget):
             return out
 
         self._last_domain_result = None
+        self._last_checks = None
         self._cancel_evt.clear()
         self.log.clear()
         self.tabs.setCurrentIndex(0)
@@ -1151,8 +1110,9 @@ class OptimizationTab(QWidget):
 
     def _on_di_done(self, res):
         self._stop_progress()
-        self._busy(False)
         self._last_domain_result = res
+        self._last_domain_dir = getattr(self, "_pending_domain_dir", None)
+        self._busy(False)
         why = {
             "converged": "every dimension independent",
             "partial": "at least one dimension NOT converged (largest tested "
@@ -1172,10 +1132,269 @@ class OptimizationTab(QWidget):
                                   res.n_runs))
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
+        self._write_domain_exports()
+        self._refresh_convergence_view()
+        if self._checks_available():
+            self._log_ui("  next: 'Run interaction checks' (paper \u00a75.7)")
         ok = res.status == "converged"
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if ok else "#b45309"))
         self.lbl_status.setText("Domain sizing \u2014 %s" % why)
+
+    # ===================================================================
+    # Convergence view: table, plots, exports (report, Part B, T7, T8, T11)
+    # ===================================================================
+    def _t1(self):
+        """Uncut chip thickness t1 = wp y0 - tool y0 (paper Eq. 24)."""
+        try:
+            return float(self.config_inputs()["t1"]) or None
+        except Exception:
+            return None
+
+    def _ms_factor(self):
+        st = self.cfg.step
+        return (float(st.mass_scaling_factor)
+                if getattr(st, "mass_scaling_enabled", False) else 1.0)
+
+    def _add_table_row(self, values):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        for c, v in enumerate(values):
+            self.table.setItem(r, c, QTableWidgetItem(
+                "" if v is None else str(v)))
+
+    def _refresh_convergence_view(self):
+        """Rebuild the table and the three plots from the last results."""
+        self.table.setRowCount(0)
+        res = self._last_domain_result
+        runs = {r.index: r for r in res.runs} if res is not None else {}
+        if res is not None:
+            for name, d in res.per_dimension.items():
+                for c in d.comparisons:
+                    rf = runs.get(c.run_from)
+                    cost = getattr(getattr(rf, "cost", None), "c_cpu_s", None)
+                    self._add_table_row([
+                        "domain", name, "%.4g" % c.value_from,
+                        "%.4g" % c.value_to, self._fmt(c.e_max, "%.3g"),
+                        c.q_crit, "ok" if c.guards_ok else "FAIL",
+                        "independent" if c.success else "not independent",
+                        c.mode, self._fmt(cost, "%.0f")])
+                self._add_table_row([
+                    "domain", name, "%.4g" % d.initial, "%.4g" % d.retained,
+                    self._fmt(d.criterion, "%.3g"), d.q_crit, "",
+                    "RETAINED", d.status, ""])
+        if self._last_gci is not None:
+            gres = self._last_gci[0]
+            for q, g in gres.per_quantity.items():
+                self._add_table_row([
+                    "GCI", q, "", "", self._fmt(g.gci_fine, "%.3g"), "",
+                    "", "reliable" if g.reliable else "unreliable",
+                    "p=%s" % self._fmt(g.p, "%.3g"), ""])
+        if self._last_checks is not None:
+            for c in self._last_checks.checks:
+                self._add_table_row([
+                    "check", c.name, "", "", self._fmt(c.e_max, "%.3g"),
+                    c.q_crit, {True: "ok", False: "FAIL",
+                               None: ""}[c.safeguards_ok],
+                    {True: "passed", False: "FAILED",
+                     None: "not evaluable"}[c.passed], "", ""])
+        self._plot_convergence()
+
+    def _plot_convergence(self):
+        axd, axg, axc = self._ax_domain, self._ax_gci, self._ax_cost
+        for ax in (axd, axg, axc):
+            ax.clear()
+        res = self._last_domain_result
+        if res is not None:
+            runs = {r.index: r for r in res.runs}
+            pts = []
+            for name, d in res.per_dimension.items():
+                xs = [c.value_from for c in d.comparisons]
+                ys = [c.e_max if math.isfinite(c.e_max) else float("nan")
+                      for c in d.comparisons]
+                if xs:
+                    axd.plot(xs, ys, marker="o", lw=1.2, label=name)
+                    axd.plot([d.retained], [d.criterion if math.isfinite(
+                        d.criterion) else float("nan")], marker="*",
+                        ms=10, color=axd.lines[-1].get_color())
+                for c in d.comparisons:
+                    cr = getattr(runs.get(c.run_from), "cost", None)
+                    if math.isfinite(c.e_max) and cr is not None:
+                        pts.append((getattr(cr, "c_cpu_s", None),
+                                    getattr(cr, "n_elem_euler", None),
+                                    c.e_max))
+            axd.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
+            axd.set_yscale("log")
+            axd.set_xlabel("dimension value p_j [mm]", fontsize=7)
+            axd.set_ylabel("E_max(p_j, p_j+1)", fontsize=7)
+            if axd.get_legend_handles_labels()[0]:
+                axd.legend(fontsize=6)
+            # Cost axis: C_CPU (Eq. 11) when every point has it, else the
+            # Eulerian element count as a proxy (stated on the axis).
+            use_cpu = bool(pts) and all(p[0] is not None for p in pts)
+            pts2 = [((p[0] if use_cpu else p[1]), p[2]) for p in pts
+                    if (p[0] if use_cpu else p[1]) is not None]
+            if pts2:
+                from gui.sensitivity.study_export import pareto_flags
+                flags = pareto_flags(pts2)
+                for (cx, ey), f in zip(pts2, flags):
+                    axc.plot([cx], [ey], marker="o" if f else "x",
+                             color="#1d4ed8" if f else "#9ca3af",
+                             ls="none")
+                axc.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
+                axc.set_yscale("log")
+                axc.set_xlabel("C_CPU of the candidate [s]" if use_cpu else
+                               "N_elem of the candidate (C_CPU unavailable)",
+                               fontsize=7)
+                axc.set_ylabel("E_max", fontsize=7)
+        if self._last_gci is not None:
+            gres = self._last_gci[0]
+            for q, g in gres.per_quantity.items():
+                ref = g.f_extrapolated if g.reliable else g.f_fine
+                hs = [h for h in gres.sizes if q in gres.scalars.get(h, {})]
+                ys = []
+                for h in hs:
+                    v = gres.scalars[h][q]
+                    ys.append(abs(v / ref - 1.0) if (
+                        v is not None and ref and math.isfinite(ref))
+                        else float("nan"))
+                if hs:
+                    axg.plot(hs, ys, marker="s", lw=1.0, label=q)
+            axg.set_xscale("log")
+            axg.set_xlabel("h [mm]", fontsize=7)
+            axg.set_ylabel("|f_q(h)/f_ref - 1|", fontsize=7)
+            if axg.get_legend_handles_labels()[0]:
+                axg.legend(fontsize=6)
+        for ax, title in ((axd, "Domain study"), (axg, "Mesh GCI"),
+                          (axc, "Cost \u2013 E_max")):
+            ax.set_title(title, fontsize=8)
+            ax.tick_params(labelsize=6)
+        try:
+            self.fig.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+    def _write_domain_exports(self):
+        """Write the domain-study files (and the checks, if any) into the
+        domain study folder; logs the written names."""
+        res, folder = self._last_domain_result, self._last_domain_dir
+        if res is None or folder is None:
+            return []
+        from gui.sensitivity.study_export import write_domain_exports
+        try:
+            paths = write_domain_exports(
+                folder, res, self._t1(), res.settings.get("elem_size"),
+                self._ms_factor(), self._last_checks)
+        except Exception as e:
+            self._log_ui("[EXPORT] failed: %s: %s" % (type(e).__name__, e))
+            return []
+        self._log_ui("[EXPORT] %s -> %s" % (", ".join(p.name for p in paths),
+                                            folder))
+        return paths
+
+    def _checks_available(self) -> bool:
+        res = self._last_domain_result
+        return bool(res is not None and res.runs and
+                    res.status in ("converged", "partial"))
+
+    # ===================================================================
+    # 6 - Interaction checks (paper §5.7, report T9)
+    # ===================================================================
+    def _on_run_interaction_checks(self):
+        study = self._last_domain_result
+        if not self._checks_available():
+            QMessageBox.warning(self, "Interaction checks",
+                                "Run a domain study first.")
+            return
+        val = self._validate_launch()
+        if val is None:
+            return
+        prefs, wd, cpus = val
+        try:
+            guards = self.guard_settings()
+            window = tuple(study.settings["window"])
+        except ValueError as e:
+            QMessageBox.warning(self, "Interaction checks", str(e))
+            return
+        h_star = float(study.settings["elem_size"])
+        finest = self._float_or(self.le_gci_finest, h_star)
+        gci_plan = {
+            "zoi": tuple(study.settings["zoi"]),
+            "grid_step": float(study.settings["grid_step"]),
+            "finest_elem_size": finest,
+            "ratio": self._float_or(self.le_gci_ratio, 2.0),
+            "n_meshes": int(self.sp_gci_n.value()),
+            "min_elem_size": self._float_or(self.le_gci_min, None),
+            "field_vars": ("EVF", "TEMP", "V1", "V2"), "window": window,
+            "evf_threshold": 0.5}
+        gci_tol = self._gci_tolerances()
+        folder = self._last_domain_dir or wd
+        run_bundle = self._make_run_bundle(prefs, folder, cpus, "checks")
+
+        def cost_fn(bundle, dims, host_wall_s):
+            return cost_record(bundle, run_bundle.state.get("sta"),
+                               host_wall_s=host_wall_s, n_cpu=cpus,
+                               dims=dims, elem_size=h_star)
+
+        from gui.sensitivity.interaction_checks_worker import (
+            InteractionChecksWorker)
+        from gui.sensitivity.run_record import RecordingRunner
+        self._cancel_evt.clear()
+        self.tabs.setCurrentIndex(0)
+        self._busy(True, "Interaction checks\u2026")
+        self._log_ui("=" * 68)
+        self._log_ui("INTERACTION CHECKS on h*=%.4g mm, D*: h_wp=%.4g "
+                     "h_void=%.4g l_wp=%.4g l_void=%.4g"
+                     % (h_star, study.final.h_wp, study.final.h_void,
+                        study.final.l_wp, study.final.l_void))
+        self._log_ui("  GCI plan on D*: finest %.4g | ratio %.3g | n %d"
+                     % (finest, gci_plan["ratio"], gci_plan["n_meshes"]))
+        self._log_ui("=" * 68)
+        self._checks_worker = InteractionChecksWorker(
+            run_bundle=run_bundle, base_cfg=self._study_cfg_copy(),
+            study=study, h_star=h_star, gci_plan=gci_plan,
+            gci_tolerances=gci_tol, guard_fn=make_guard_fn(guards),
+            cost_fn=cost_fn,
+            gci_runner_factory=lambda rb: RecordingRunner(
+                rb, n_cpu=cpus, guard_settings=guards))
+        self._checks_worker.progress.connect(self._on_checks_progress)
+        self._checks_worker.finished_ok.connect(self._on_checks_done)
+        self._checks_worker.failed.connect(self._on_fail)
+        self._start_progress()
+        self._checks_worker.start()
+
+    def _on_checks_progress(self, ev):
+        phase = ev.get("phase")
+        if phase in ("run", "warning"):
+            self._on_di_progress(ev)
+        elif phase == "gci":
+            self._on_mesh_progress(dict(ev, phase="mesh_gci"))
+        elif phase == "check":
+            c = ev["check"]
+            self._log_ui("  [%s] %s \u2014 %s%s"
+                         % (c.name, {True: "PASSED", False: "FAILED",
+                                     None: "NOT EVALUABLE"}[c.passed],
+                            c.conclusion,
+                            "".join("\n      warning: %s" % w
+                                    for w in c.warnings)))
+
+    def _on_checks_done(self, res):
+        self._stop_progress()
+        self._last_checks = res
+        self._busy(False)
+        why = {"accepted": "model ACCEPTED (all checks passed)",
+               "rejected": "model REJECTED (at least one check failed)",
+               "incomplete": "INCOMPLETE (a check could not be evaluated)",
+               "cancelled": "cancelled"}.get(res.status, res.status)
+        self._log_ui("=" * 68)
+        self._log_ui("INTERACTION CHECKS: %s" % why)
+        self._write_domain_exports()
+        self._refresh_convergence_view()
+        self.lbl_status.setStyleSheet(
+            "color: %s;" % ("#15803d" if res.status == "accepted"
+                            else "#b45309"))
+        self.lbl_status.setText("Interaction checks \u2014 %s" % why)
 
     # ===================================================================
     # 3 - Mesh convergence by GCI / Richardson (fixed domain)
@@ -1189,11 +1408,7 @@ class OptimizationTab(QWidget):
         ratio = self._float_or(self.le_gci_ratio, 2.0)
         nmesh = int(self.sp_gci_n.value())
         minh = self._float_or(self.le_gci_min, None)
-        tol = self._tolerances()
-        gci_tol = {q: tol[q] for q in ("EVF", "TEMP", "V1", "V2") if q in tol}
-        if "force" in tol:
-            gci_tol["Fc"] = tol["force"]
-            gci_tol["Ff"] = tol["force"]
+        gci_tol = self._gci_tolerances()
         dims = self._dims_from_cfg()
         zoi = self.zoi()
         try:
@@ -1213,6 +1428,17 @@ class OptimizationTab(QWidget):
                             "l_wp": dims.l_wp, "l_void": dims.l_void}}
         run_dir = self._study_run_dir(wd, "GCI", study_cfg)
         run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "GCI")
+        # T10: every GCI run records its cost and safeguards (mesh_gci has no
+        # hook of its own); the records feed gci_meshes.csv (paper Table 8).
+        from gui.sensitivity.run_record import RecordingRunner
+        try:
+            guards = self.guard_settings()
+        except ValueError as e:
+            QMessageBox.warning(self, "Safeguards", str(e))
+            return
+        recorder = RecordingRunner(run_bundle, n_cpu=cpus,
+                                   guard_settings=guards)
+        self._pending_gci = (recorder, gci_tol, run_dir)
         self._cancel_evt.clear()
         self.log.clear()
         self.tabs.setCurrentIndex(0)
@@ -1229,7 +1455,7 @@ class OptimizationTab(QWidget):
         # it receives (mesh_gci.py:337-341); given self.cfg it used to leave
         # the user's model at the coarsest element size after the study.
         self._mesh_worker = MeshGciWorker(
-            run_bundle=run_bundle, base_cfg=self._study_cfg_copy(), zoi=zoi,
+            run_bundle=recorder, base_cfg=self._study_cfg_copy(), zoi=zoi,
             domain_dims=dims,
             grid_step=self.grid_step(), finest_elem_size=finest, ratio=ratio,
             n_meshes=nmesh, tolerances=(gci_tol or None),
@@ -1268,6 +1494,26 @@ class OptimizationTab(QWidget):
         self._log_ui("  recommended element size: %s"
                      % ("none within tolerance" if rec is None
                         else "%.4g mm" % rec))
+        recorder, tol, folder = getattr(self, "_pending_gci",
+                                        (None, {}, None))
+        calls = list(getattr(recorder, "records", []) or [])
+        for c in calls:
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
+                          for k, (v, ok) in sorted(c.guards.items()))
+            self._log_ui("  h=%.4g | C_CPU=%s | N_elem=%s | %s"
+                         % (c.elem_size, self._fmt(c.cost.c_cpu_s, "%.0f s"),
+                            c.cost.n_elem_euler, g or "no safeguard"))
+        self._last_gci = (res, calls, tol, folder)
+        if folder is not None:
+            from gui.sensitivity.study_export import write_gci_exports
+            try:
+                paths = write_gci_exports(folder, res, calls, tol)
+                self._log_ui("[EXPORT] %s -> %s"
+                             % (", ".join(p.name for p in paths), folder))
+            except Exception as e:
+                self._log_ui("[EXPORT] failed: %s: %s"
+                             % (type(e).__name__, e))
+        self._refresh_convergence_view()
         ok = rec is not None and res.in_asymptotic_range
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if ok else "#b45309"))
@@ -1301,7 +1547,7 @@ class OptimizationTab(QWidget):
         None on a set cancel flag, which the studies already treat as "no
         usable result" -- so a half-written bundle is never read as data.
         """
-        for attr in ("_di_worker", "_mesh_worker"):
+        for attr in ("_di_worker", "_mesh_worker", "_checks_worker"):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
                 w.cancel()
