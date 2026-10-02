@@ -386,3 +386,58 @@ def test_gci_records_cost_and_exports(qapp, monkeypatch, tmp_path):
     assert (folder / "gci.csv").exists() and (folder / "gci_meshes.csv").exists()
     # the user's config is untouched by the study
     assert tab.cfg.elem_size == 0.01
+
+
+# ---------------------------------------------------------------------------
+# Config-derived tab logic (moved from the removed tests/test_domain_opt.py)
+# ---------------------------------------------------------------------------
+class TestTabConfigLogic:
+
+    def _tab(self):
+        from gui.tabs.optimization_tab import OptimizationTab
+        from gui.core.model_config import ModelConfig
+        return OptimizationTab(ModelConfig())
+
+    def test_config_inputs(self, qapp):
+        tab = self._tab()
+        inp = tab.config_inputs()
+        # t1 = wp_y0 - tool_y0 = 0 - (-0.05) = 0.05 (default model)
+        assert inp["t1"] == pytest.approx(0.05)
+        assert inp["elem"] == pytest.approx(0.005)
+        assert len(inp["roi"]) == 4
+
+    def test_initial_domain_is_the_roi_when_zoi_blank(self, qapp):
+        tab = self._tab()
+        c = tab.cfg
+        # set a known measurement ROI (BBox) and a matching element size
+        c.bbox.xmin, c.bbox.xmax = -0.20, 0.05
+        c.bbox.ymin, c.bbox.ymax = -0.10, 0.15
+        c.elem_size = 0.01
+        tab.sp_margin.setValue(0)
+        d0 = tab.compute_initial_dims()
+        # domain-frame mapping: l_wp=-xmin, l_void=xmax, h_wp=-ymin, h_void=ymax
+        assert d0.l_wp == pytest.approx(0.20)
+        assert d0.l_void == pytest.approx(0.05)
+        assert d0.h_wp == pytest.approx(0.10)
+        assert d0.h_void == pytest.approx(0.15)
+
+    def test_quantity_field_map_all_field_backed(self, qapp):
+        tab = self._tab()
+        m = tab.quantity_field_map()
+        assert m == {"Vx": "V1", "Vy": "V2", "T": "TEMP", "EVF": "EVF"}
+        # forces are always present as channels (not in the field map)
+        assert tab.force_channels() == {"Fc": "RF1_RP", "Ff": "RF2_RP"}
+
+    def test_thresholds_required_for_all_fields(self, qapp):
+        tab = self._tab()
+        assert tab.thresholds_complete() is False        # none set yet
+        for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
+            tab._q_eps[q].setText("1")
+        tab._q_eps["Vx"].setText("2.5")
+        tab._q_eps["T"].setText("1,0")                   # comma accepted
+        thr = tab.thresholds()
+        assert thr["Vx"] == pytest.approx(2.5)
+        assert thr["T"] == pytest.approx(1.0)
+        assert tab.thresholds_complete() is True
+
+

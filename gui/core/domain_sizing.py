@@ -159,7 +159,8 @@ def initial_domain_dimensions(t1: float, rake_deg: float, mu: float,
 
 # --- Reverberation ceiling and dimension helpers -----------------------------
 # Relocated from domain_jacobian (now removed) so the sizing helpers live beside
-# DomainDims. Used by domain_convergence and the Optimization tab.
+# DomainDims. diagonal() feeds the diagonal WARNING of the domain study
+# (domain_independence): it no longer stops any study (decision 2026-10-01).
 DIMENSION_NAMES = ("h_wp", "h_void", "l_wp", "l_void")
 
 # The mass-scaling window (see ModelConfig.mass_scaling_bounds) is empty unless

@@ -74,6 +74,7 @@ class TestCombinedDomain:
             for n in ("h_wp", "h_void", "l_wp", "l_void"))
         assert c.details["errors"]["Vx"] == pytest.approx(expect)
         assert c.passed is False
+        assert c.details["action"] == ic.REDO_DOMAIN_ACTION     # D11-a
 
     def test_fails_when_tolerances_too_tight(self):
         study, _ = _study()

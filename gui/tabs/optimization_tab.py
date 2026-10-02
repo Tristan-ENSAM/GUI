@@ -1062,9 +1062,6 @@ class OptimizationTab(QWidget):
         self._start_progress()
         self._di_worker.start()
 
-    # Kept for callers/tests written against the previous study name.
-    _on_run_domain_convergence = _on_run_domain_independence
-
     @staticmethod
     def _fmt(v, fmt="%.4g"):
         return "n/a" if v is None or (isinstance(v, float) and
@@ -1389,6 +1386,9 @@ class OptimizationTab(QWidget):
                "cancelled": "cancelled"}.get(res.status, res.status)
         self._log_ui("=" * 68)
         self._log_ui("INTERACTION CHECKS: %s" % why)
+        for c in res.checks:
+            if c.details.get("action"):
+                self._log_ui("  ACTION (%s): %s" % (c.name, c.details["action"]))
         self._write_domain_exports()
         self._refresh_convergence_view()
         self.lbl_status.setStyleSheet(

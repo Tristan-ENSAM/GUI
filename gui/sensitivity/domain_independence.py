@@ -100,9 +100,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.domain_sizing import DomainDims, diagonal
-from gui.sensitivity.mesh_opt import roi_grid, nearest_samples
+from gui.sensitivity.zoi_sampling import (
+    roi_grid, nearest_samples, window_mask)
 from gui.sensitivity.runner_core import eulerian_instance
-from gui.sensitivity.domain_convergence import window_mask
 
 # Paper quantity label -> bundle element-field name.
 FIELD_QUANTITIES: Dict[str, str] = {"Vx": "V1", "Vy": "V2", "T": "TEMP",

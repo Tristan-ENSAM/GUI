@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "abaqus_scripts"))
 from cel_common import zoi_grid_points                      # noqa: E402
-from gui.sensitivity.mesh_opt import roi_grid               # noqa: E402
+from gui.sensitivity.zoi_sampling import roi_grid           # noqa: E402
 from gui.core.model_config import ModelConfig               # noqa: E402
 
 

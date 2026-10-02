@@ -21,13 +21,12 @@ summary.json        selected model, Eq. (24) normalisation, Eq. (22)-(23)
                     cost gain and speed-up, statuses
 ==================  =======================================================
 
-Eq. (22)-(23) need a reference cost C_initial that the methodology does not
-pin down unambiguously; summary.json therefore reports them against two
-references, both measured in the domain study: the initial search domain
-(ZOI + margin, first run) and the most expensive domain simulated (the
-over-sized reference). Each is given with C = C_CPU (Eq. 11, solver time)
-and with the Eulerian element count as a proxy. Which reference the paper
-uses is the author's choice.
+Eq. (22)-(23): the reference cost C_initial is the REFERENCE (over-sized)
+domain, i.e. the most expensive domain simulated during the study and its
+checks (decision D12 of 2026-10-02). summary.json gives it under
+"cost_eq22_23_paper" with C = C_CPU (Eq. 11, solver time), and keeps, for
+information, the same ratios by Eulerian element count and against the
+initial search domain (ZOI + margin, first run).
 
 Pareto flag (Fig. 13): each comparison is a configuration = its candidate
 run p_(j-1) (the value the comparison judges) with cost C_CPU of that run and
@@ -333,6 +332,11 @@ def summary(study, t1: Optional[float], h_star: Optional[float],
         "dimensions": {n: {"status": d.status, "q_crit": d.q_crit,
                            "criterion": _num(d.criterion)}
                        for n, d in study.per_dimension.items()},
+        "cost_eq22_23_paper": dict(
+            gains("c_cpu_s")["vs_oversized_domain"],
+            reference="over-sized reference domain (decision D12)",
+            reference_run=over.index if over else None,
+            cost="C_CPU = N_CPU * t_wall,solver (Eq. 11)"),
         "cost_eq22_23": {"by_C_CPU": gains("c_cpu_s"),
                          "by_n_elem_euler": gains("n_elem_euler"),
                          "selected_run": rec_opt.index if rec_opt else None,

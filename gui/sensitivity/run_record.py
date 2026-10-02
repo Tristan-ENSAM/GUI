@@ -15,7 +15,7 @@ Each run of a sizing study is checked against:
 
   The ratio of sums avoids the division by ALLIE ~ 0 at the start of the step
   that made the mean of the per-sample ratio explode (D3-a; same form as
-  gui.sensitivity.domain_opt.mean_ke_ie_ratio, here restricted to T);
+  the former mass-scaling guard, here restricted to T);
 * ``R_HG`` - artificial (hourglass-control) over internal energy, same form
   with ALLAE (D4: ALLAE is the artificial strain energy of the constraints
   that remove singular modes, such as hourglass control, per the Abaqus
@@ -60,7 +60,7 @@ from typing import Callable, Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.sta_parser import parse_sta
-from gui.sensitivity.domain_convergence import window_mask
+from gui.sensitivity.zoi_sampling import window_mask
 from gui.sensitivity.runner_core import eulerian_instance
 
 REQUIRED_FIELDS = ("EVF", "TEMP", "V1", "V2")

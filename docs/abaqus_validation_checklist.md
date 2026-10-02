@@ -89,20 +89,41 @@ For the SAME physical case, compare the `.inp` material cards:
       are restored (the working directory resets to the Preferences default
       by design — it is machine-specific).
 
-## 8. Domain sizing by convergence — ZOI (Optimization tab) — *pending wiring*
+## 8. Model sizing studies (Optimization > Model) — first real runs
 
-Applies once the ZOI + `run_domain_convergence` are wired to the Optimization
-tab (the engine `gui/sensitivity/domain_convergence.py` is unit-tested headless;
-the end-to-end needs a real Abaqus install).
+The study engines (`gui/sensitivity/domain_independence.py`, `mesh_gci.py`,
+`interaction_checks.py`, `run_record.py`, `study_export.py`) are unit-tested
+headless on analytic bundles; what follows needs a real Abaqus install.
 
-- [ ] The ZOI (Optimization tab) is edited independently of the ROI (Geometry
-      tab): changing one does not move the other; the study samples the ZOI.
-- [ ] The study refuses to start when the ZOI is not inside the initial domain
-      with the configured margin (`stopped_by="zoi_outside"`).
-- [ ] With the EVF mask on (default threshold 0.5) and the settled window
-      (default 0.3–1.0), the material-field comparison is no longer dominated
-      by the moving material/void interface (TEMP/V no longer saturate as they
-      did with the raw frame-by-frame metric).
-- [ ] Growth is outward-only, in whole elements, and stops at the smallest
-      domain where every quantity is below tolerance (`stopped_by="converged"`)
-      or at the reverberation ceiling (`stopped_by="diagonal"`).
+Extraction (abaqus_scripts/cel_results.py):
+
+- [ ] The extraction log prints `ALLAE stored` (hypothesis H2: PRESELECT
+      contains ALLAE). If it prints the ALLAE warning instead, R_HG cannot be
+      evaluated and every run fails its safeguards.
+- [ ] R_HG = ΣALLAE/ΣALLIE over T is plausible for EC3D8RT with the default
+      (pure viscous) hourglass control (hypotheses H1, H3 of the report).
+- [ ] The bundle holds `history__ENERGY_TIME` and `history__ALLAE_TIME`.
+
+Domain study:
+
+- [ ] The ZOI lies inside the extraction ROI (Geometry tab); otherwise every
+      run is refused with "not contained in the extracted ROI".
+- [ ] The run log shows, per run, `job ok`, the safeguards (outputs, R_K,
+      R_HG) and C_CPU; per comparison, E_q, E_max, q_crit and the mode
+      (`tail_bound` / `successive`).
+- [ ] C_CPU is filled (the job's .sta is found and its wall time parsed).
+- [ ] The domain diagonal only produces warnings; it never stops the study.
+- [ ] The study folder holds runs.csv, comparisons.csv, dimensions.csv and
+      summary.json.
+
+Mesh GCI study:
+
+- [ ] gci.csv and gci_meshes.csv are written; gci_meshes.csv has a cost per
+      mesh; the user's element size is unchanged after the study.
+
+Interaction checks:
+
+- [ ] "Run interaction checks" runs one combined-domain run plus the GCI plan
+      on D*, then writes checks.csv and updates summary.json.
+- [ ] A failed combined check logs the D11-a action (redo the domain study
+      with changed settings).

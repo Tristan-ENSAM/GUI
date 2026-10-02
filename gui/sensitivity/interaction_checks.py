@@ -10,6 +10,10 @@ separately), so three interactions are checked once the domain study is done
    study step in the FOUR directions at once, with the study's own metric
    (Eq. 5, 7) and absolute tolerances; passed iff E_max < 1 and both runs
    pass their safeguards. One run (S(D*) is reused from the study).
+   The boundary influences add up (triangle inequality): each dimension can
+   pass its own criterion while the combined change reaches up to the sum of
+   the four. Decision D11-a: eps_q stays per dimension and a failed check
+   means the domain study is redone with changed settings.
 2. ``mesh_x_domain`` - element size versus final domain: the GCI study is run
    again on D* with the same plan (D8-a), and the element size h* used by the
    domain study must satisfy the GCI selection rule on D*:
@@ -41,6 +45,12 @@ from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.domain_independence import (
     DIMENSIONS, StudyResult, domain_key, e_max, errors_between, run_candidate,
 )
+
+# Action attached to a failed combined-domain check (decision D11-a).
+REDO_DOMAIN_ACTION = (
+    "redo the domain study (decision D11-a, eps_q kept per dimension); an "
+    "identical rerun returns the same D*, so change the start domain, the "
+    "step, n_hold or eps_q")
 
 CHECK_PURPOSES = {
     "ms_x_mesh": "Mass-scaling factor inside its analytic window at the "
@@ -140,6 +150,13 @@ def combined_domain_check(run_bundle: Callable, base_cfg, study: StudyResult,
                       "NOT admissible: %s" % (
                           "safeguards failed" if not res.safeguards_ok
                           else "E_max >= 1 (q_crit %s)" % res.q_crit))
+    if not res.passed:
+        # Decision D11-a (2026-10-02): eps_q stays per dimension; a failed
+        # combined check means the domain study must be redone. The study is
+        # deterministic, so an identical rerun gives the same D*: something
+        # must change (start domain, step, n_hold or eps_q).
+        res.details["action"] = REDO_DOMAIN_ACTION
+        res.warnings.append(REDO_DOMAIN_ACTION)
     return res
 
 
