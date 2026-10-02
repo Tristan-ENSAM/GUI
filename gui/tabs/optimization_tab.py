@@ -33,7 +33,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter
+    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter,
+    QScrollArea, QFrame
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -126,165 +127,233 @@ class OptimizationTab(QWidget):
         self._sim_timer.setInterval(500)
         self._sim_timer.timeout.connect(self._poll_sta)
 
+        # ================================================================
+        # Layout (top to bottom)
+        #   inputs | preview      horizontal splitter; the inputs scroll
+        #   status bar            working dir, cancel, progress, status
+        #   Log | Convergence | Table
+        # A vertical splitter separates inputs and outputs. The inputs are
+        # grouped in the order of the workflow (common settings, 1 mesh,
+        # 2 domain, 3 checks), each step with its own run button.
+        # ================================================================
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        # Top (inputs + run controls) and bottom (log / plots / table) share
-        # a vertical splitter, so the outputs can be enlarged by the user.
-        _top = QWidget()
-        root = QVBoxLayout(_top)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+        _NUM_W = 78                       # width of a numeric field (px)
 
-        # (Inputs-from-model panel removed as requested — the values are read
-        # directly from the config when needed.)
+        def num_edit(text="", placeholder="", tip=""):
+            le = QLineEdit(text)
+            le.setPlaceholderText(placeholder)
+            le.setFixedWidth(_NUM_W)
+            if tip:
+                le.setToolTip(tip)
+            return le
 
-        # ---- Initial domain = the measurement ROI ----------------------
-        gdom = QGroupBox("4 \u00b7 Eulerian domain (initial + caps)")
-        dg = QGridLayout(gdom)
-        self._max = {}
-        self._init_lbl = {}
-        # dim | initial (read-only) | max cap | mm, on two column groups.
-        dg.addWidget(QLabel("dim"), 0, 0)
-        dg.addWidget(QLabel("initial"), 0, 1)
-        dg.addWidget(QLabel("max cap"), 0, 2)
-        dg.addWidget(QLabel("dim"), 0, 5)
-        dg.addWidget(QLabel("initial"), 0, 6)
-        dg.addWidget(QLabel("max cap"), 0, 7)
-        _pairs = [("l_wp", "h_void"), ("h_wp", "l_void")]
-        for r, (d_left, d_right) in enumerate(_pairs, start=1):
-            for d, c0 in ((d_left, 0), (d_right, 5)):
-                dg.addWidget(QLabel(d), r, c0)
-                il = QLabel("—"); il.setStyleSheet("color:#374151;")
-                self._init_lbl[d] = il
-                dg.addWidget(il, r, c0 + 1)
-                mx = QLineEdit(); mx.setPlaceholderText("no cap")
-                self._max[d] = mx
-                dg.addWidget(mx, r, c0 + 2)
-                dg.addWidget(QLabel("mm"), r, c0 + 3)
-        r0 = 3
-        dg.addWidget(QLabel("Margin (elems):"), r0, 0)
-        self.sp_margin = QSpinBox(); self.sp_margin.setRange(0, 50)
-        self.sp_margin.setValue(0)
-        dg.addWidget(self.sp_margin, r0, 1)
-        dg.addWidget(QLabel("Centroid step:"), r0, 5)
-        self.le_grid_step = QLineEdit(); self.le_grid_step.setPlaceholderText(
-            "= element size")
-        dg.addWidget(self.le_grid_step, r0, 6)
-        dg.addWidget(QLabel("mm"), r0, 7)
-        self.btn_init = QPushButton("Compute initial domain")
-        self.btn_init.clicked.connect(self.compute_initial)
-        dg.addWidget(self.btn_init, r0 + 1, 5, 1, 4)
-        self.lbl_init = QLabel("—")
-        self.lbl_init.setStyleSheet("font-weight: bold;")
-        dg.addWidget(self.lbl_init, r0 + 1, 0, 1, 4)
-        # (added to the left column below)
+        def hint(text):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color:#6b7280;")
+            return lab
 
-        # ---- Convergence criterion -------------------------------------
-        gcrit = QGroupBox("2 \u00b7 Domain criterion \u03b5_q (absolute)")
-        cg = QGridLayout(gcrit)
-        cg.addWidget(QLabel("quantity"), 0, 0)
-        cg.addWidget(QLabel("ε_q"), 0, 1)
-        cg.addWidget(QLabel("unit"), 0, 2)
-        cg.addWidget(QLabel("quantity"), 0, 4)
-        cg.addWidget(QLabel("ε_q"), 0, 5)
-        cg.addWidget(QLabel("unit"), 0, 6)
-        self._q_eps = {}
-        _unit = {q: u for (q, _f, u) in _QUANTITIES}
-        _cols = [["Vx", "Vy", "T"], ["EVF", "Fc", "Ff"]]
-        for r in range(3):
-            for col, c0 in ((_cols[0], 0), (_cols[1], 4)):
-                q = col[r]
-                lbl = QLabel(q)
-                if q in ("Fc", "Ff"):
-                    rf = "RF1" if q == "Fc" else "RF2"
-                    lbl.setToolTip(
-                        "%s = %s on the tool RP, divided by the element size "
-                        "(homogeneity across meshes), scalar per time (N_p=1)."
-                        % (q, rf))
-                cg.addWidget(lbl, r + 1, c0)
-                le = QLineEdit()
-                le.setPlaceholderText("threshold")
-                self._q_eps[q] = le
-                cg.addWidget(le, r + 1, c0 + 1)
-                cg.addWidget(QLabel(_unit[q]), r + 1, c0 + 2)
+        def grid(group):
+            g = QGridLayout(group)
+            g.setHorizontalSpacing(8)
+            g.setVerticalSpacing(4)
+            return g
 
-        # ---- 1 · ZOI (measurement zone for the optimization) ----------
-        # DISTINCT from the ROI (Geometry tab, model output set for DIC/IRT):
-        # this is the user zone the domain/mesh studies sample. Own bbox; the
-        # sampling grid reuses the "Centroid step" above. Must stay inside the
-        # domain (margin above). Empty fields default to the ROI.
-        gzoi = QGroupBox("1 \u00b7 ZOI (measurement zone)")
-        zg = QGridLayout(gzoi)
+        # ---- Common settings: ZOI, sampling, window T, safeguards ------
+        # The ZOI is DISTINCT from the ROI (Geometry tab, model output set
+        # for DIC/IRT); empty fields default to the ROI. T and the
+        # safeguards are shared by every study.
+        gcom = QGroupBox("Common settings \u2014 ZOI, window T, safeguards")
+        cg0 = grid(gcom)
         self.le_zoi = {}
-        for c, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax")]):
-            zg.addWidget(QLabel(lbl), 0, 2 * c); le = QLineEdit()
-            le.setPlaceholderText("= ROI"); self.le_zoi[key] = le
-            zg.addWidget(le, 0, 2 * c + 1)
-        for c, (lbl, key) in enumerate([("y min", "ymin"), ("y max", "ymax")]):
-            zg.addWidget(QLabel(lbl), 1, 2 * c); le = QLineEdit()
-            le.setPlaceholderText("= ROI"); self.le_zoi[key] = le
-            zg.addWidget(le, 1, 2 * c + 1)
-        self.btn_zoi_from_roi = QPushButton("Set ZOI = ROI")
+        for c, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax"),
+                                        ("y min", "ymin"), ("y max", "ymax")]):
+            cg0.addWidget(QLabel(lbl), 0, 2 * c)
+            le = num_edit(placeholder="= ROI",
+                          tip="ZOI bound [mm]; empty = ROI bound")
+            self.le_zoi[key] = le
+            cg0.addWidget(le, 0, 2 * c + 1)
+            le.textChanged.connect(self._draw_preview)
+        self.btn_zoi_from_roi = QPushButton("ZOI = ROI")
         self.btn_zoi_from_roi.clicked.connect(self._zoi_from_roi)
-        zg.addWidget(self.btn_zoi_from_roi, 2, 0, 1, 2)
-        _zt = QLabel("mm \u2014 sampled at the Centroid step; kept inside the "
-                     "domain")
-        _zt.setStyleSheet("color:#6b7280;")
-        zg.addWidget(_zt, 2, 2, 1, 2)
-        for _le in self.le_zoi.values():
-            _le.textChanged.connect(self._draw_preview)
-
-        # ---- 3 · Mesh convergence (GCI / Richardson) ------------------
-        gmeshgci = QGroupBox("3 \u00b7 Mesh convergence (GCI)")
-        mgl = QGridLayout(gmeshgci)
-        mgl.addWidget(QLabel("finest elem"), 0, 0)
-        self.le_gci_finest = QLineEdit()
-        self.le_gci_finest.setPlaceholderText("= element size")
-        mgl.addWidget(self.le_gci_finest, 0, 1)
-        mgl.addWidget(QLabel("mm"), 0, 2)
-        mgl.addWidget(QLabel("ratio"), 0, 3)
-        self.le_gci_ratio = QLineEdit("2")
-        mgl.addWidget(self.le_gci_ratio, 0, 4)
-        mgl.addWidget(QLabel("min elem"), 1, 0)
-        self.le_gci_min = QLineEdit()
-        self.le_gci_min.setPlaceholderText("floor e.g. 0.006")
-        mgl.addWidget(self.le_gci_min, 1, 1)
-        mgl.addWidget(QLabel("mm"), 1, 2)
-        mgl.addWidget(QLabel("n meshes"), 1, 3)
-        self.sp_gci_n = QSpinBox(); self.sp_gci_n.setRange(3, 6)
-        self.sp_gci_n.setValue(3)
-        mgl.addWidget(self.sp_gci_n, 1, 4)
-        _gt = QLabel("On a FIXED (large) domain; refine finest\u2192coarse, "
-                     "GCI per quantity.")
-        _gt.setStyleSheet("color:#6b7280;")
-        mgl.addWidget(_gt, 2, 0, 1, 5)
-
-        # ---- 5 · Domain study settings + shared time window -------------
-        # Step, n_max, n_hold, m: integer settings of the sequential domain
-        # study. The time window T is SHARED by both studies. G_K,max and
-        # G_HG,max are the run safeguards (report, Part B, T1-T5).
-        gds = QGroupBox("5 \u00b7 Domain study, window T and safeguards")
-        dsl = QGridLayout(gds)
-        self._dom_spins = {}
-        for i, (attr, label, lo, hi) in enumerate(_DOM_SPINS):
-            dsl.addWidget(QLabel(label), 0, 2 * i)
-            sp = QSpinBox(); sp.setRange(lo, hi)
-            sp.setValue(int(getattr(OptimizationCfgDefaults, attr)))
-            self._dom_spins[attr] = sp
-            dsl.addWidget(sp, 0, 2 * i + 1)
+        cg0.addWidget(self.btn_zoi_from_roi, 0, 8)
+        cg0.addWidget(QLabel("grid step"), 1, 0)
+        self.le_grid_step = num_edit(placeholder="= elem",
+                                     tip="ZOI sampling step [mm]; empty = "
+                                         "element size")
+        cg0.addWidget(self.le_grid_step, 1, 1)
         self._dom_texts = {}
         for i, (attr, label, tip) in enumerate(_DOM_TEXTS):
             lab = QLabel(label); lab.setToolTip(tip)
-            dsl.addWidget(lab, 1, 2 * i)
-            le = QLineEdit(str(getattr(OptimizationCfgDefaults, attr)))
-            le.setToolTip(tip); le.setFixedWidth(58)
+            cg0.addWidget(lab, 1, 2 + 2 * i)
+            le = num_edit(str(getattr(OptimizationCfgDefaults, attr)), tip=tip)
             self._dom_texts[attr] = le
-            dsl.addWidget(le, 1, 2 * i + 1)
-        _dt = QLabel("Constant step from the initial domain = ZOI + margin; "
-                     "tail bound, fallback on the successive rule. T is "
-                     "shared with the GCI study.")
-        _dt.setWordWrap(True)
-        _dt.setStyleSheet("color:#6b7280;")
-        dsl.addWidget(_dt, 2, 0, 1, 8)
+            cg0.addWidget(le, 1, 3 + 2 * i)
+        cg0.setColumnStretch(10, 1)
 
+        # ---- Step 1 · mesh size by Richardson / GCI ---------------------
+        gmesh = QGroupBox("1 \u00b7 Mesh size \u2014 Richardson / GCI on a "
+                          "fixed domain")
+        mg = grid(gmesh)
+        mg.addWidget(QLabel("finest [mm]"), 0, 0)
+        self.le_gci_finest = num_edit(placeholder="= elem")
+        mg.addWidget(self.le_gci_finest, 0, 1)
+        mg.addWidget(QLabel("ratio"), 0, 2)
+        self.le_gci_ratio = num_edit("2")
+        mg.addWidget(self.le_gci_ratio, 0, 3)
+        mg.addWidget(QLabel("floor [mm]"), 0, 4)
+        self.le_gci_min = num_edit(placeholder="none")
+        mg.addWidget(self.le_gci_min, 0, 5)
+        mg.addWidget(QLabel("n meshes"), 0, 6)
+        self.sp_gci_n = QSpinBox(); self.sp_gci_n.setRange(3, 6)
+        self.sp_gci_n.setValue(3); self.sp_gci_n.setFixedWidth(_NUM_W)
+        mg.addWidget(self.sp_gci_n, 0, 7)
+        # Relative tolerances of the GCI study ONLY ("force" applies to Fc
+        # and Ff). The persisted key (sizing_tol) is kept for old profiles.
+        mg.addWidget(QLabel("tolerances (rel.)"), 1, 0)
+        self._dj_eps = {}
+        tol_row = QHBoxLayout()
+        tol_row.setSpacing(4)
+        for q in ("EVF", "TEMP", "V1", "V2", "force"):
+            tol_row.addWidget(QLabel(q))
+            le = num_edit("0.02", tip="Relative tolerance on %s (0.02 = 2%%). "
+                                      "Empty = excluded." % q)
+            le.setFixedWidth(56)
+            self._dj_eps[q] = le
+            tol_row.addWidget(le)
+            tol_row.addSpacing(12)
+        tol_row.addStretch(1)
+        mg.addLayout(tol_row, 1, 1, 1, 8)
+        self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
+        self.btn_mesh.setToolTip(
+            "GCI/Richardson mesh convergence on the current (fixed) domain:\n"
+            "n systematically-refined meshes, observed order p, extrapolated\n"
+            "value and GCI per quantity. Recommends the coarsest mesh within\n"
+            "tolerance of the reference.")
+        self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
+        mg.addWidget(self.btn_mesh, 2, 0, 1, 4)
+        mg.addWidget(hint("Uses the current domain: keep it conservative "
+                          "(paper P9)."), 2, 4, 1, 5)
+        mg.setColumnStretch(8, 1)
+
+        # ---- Step 2 · Eulerian domain -----------------------------------
+        gdom = QGroupBox("2 \u00b7 Eulerian domain \u2014 sequential "
+                         "independence study")
+        dg = grid(gdom)
+        # absolute tolerances eps_q (E_max)
+        dg.addWidget(QLabel("\u03b5_q (absolute)"), 0, 0)
+        self._q_eps = {}
+        _unit = {q: u for (q, _f, u) in _QUANTITIES}
+        eps_row = QHBoxLayout()
+        eps_row.setSpacing(4)
+        for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
+            lbl = QLabel(q)
+            tip = "%s tolerance [%s]" % (q, _unit[q])
+            if q in ("Fc", "Ff"):
+                tip += (" \u2014 %s on the tool RP divided by the element "
+                        "size" % ("RF1" if q == "Fc" else "RF2"))
+            lbl.setToolTip(tip)
+            eps_row.addWidget(lbl)
+            le = num_edit(placeholder=_unit[q], tip=tip)
+            le.setFixedWidth(64)
+            self._q_eps[q] = le
+            eps_row.addWidget(le)
+            eps_row.addSpacing(12)
+        eps_row.addStretch(1)
+        dg.addLayout(eps_row, 0, 1, 1, 9)
+        # initial domain + caps, one row per dimension pair
+        self._max = {}
+        self._init_lbl = {}
+        dg.addWidget(QLabel("dimension"), 1, 0)
+        dg.addWidget(QLabel("initial [mm]"), 1, 1)
+        dg.addWidget(QLabel("max cap [mm]"), 1, 2)
+        dg.addWidget(QLabel("dimension"), 1, 4)
+        dg.addWidget(QLabel("initial [mm]"), 1, 5)
+        dg.addWidget(QLabel("max cap [mm]"), 1, 6)
+        for r, (d_left, d_right) in enumerate(
+                [("l_wp", "h_void"), ("h_wp", "l_void")], start=2):
+            for d, c0 in ((d_left, 0), (d_right, 4)):
+                dg.addWidget(QLabel(d), r, c0)
+                il = QLabel("\u2014"); il.setStyleSheet("color:#374151;")
+                self._init_lbl[d] = il
+                dg.addWidget(il, r, c0 + 1)
+                mx = num_edit(placeholder="no cap")
+                self._max[d] = mx
+                dg.addWidget(mx, r, c0 + 2)
+        # study settings
+        set_row = QHBoxLayout()
+        set_row.setSpacing(4)
+        set_row.addWidget(QLabel("margin (elems)"))
+        self.sp_margin = QSpinBox(); self.sp_margin.setRange(0, 50)
+        self.sp_margin.setValue(0); self.sp_margin.setFixedWidth(64)
+        set_row.addWidget(self.sp_margin)
+        self._dom_spins = {}
+        for attr, label, lo, hi in _DOM_SPINS:
+            set_row.addSpacing(10)
+            set_row.addWidget(QLabel(label))
+            sp = QSpinBox(); sp.setRange(lo, hi)
+            sp.setValue(int(getattr(OptimizationCfgDefaults, attr)))
+            sp.setFixedWidth(64)
+            self._dom_spins[attr] = sp
+            set_row.addWidget(sp)
+        set_row.addStretch(1)
+        dg.addLayout(set_row, 4, 0, 1, 10)
+        self.btn_init = QPushButton("Compute initial domain")
+        self.btn_init.clicked.connect(self.compute_initial)
+        dg.addWidget(self.btn_init, 5, 0, 1, 2)
+        self.lbl_init = QLabel("\u2014")
+        self.lbl_init.setStyleSheet("font-weight: bold;")
+        dg.addWidget(self.lbl_init, 5, 2, 1, 8)
+        self.btn_domain = QPushButton("Run domain sizing (independence)")
+        self.btn_domain.setToolTip(
+            "Sequential independence study: each dimension grown by a constant\n"
+            "step from ZOI + margin (mesh and mass scaling held fixed), runs\n"
+            "compared by the mean absolute difference in the ZOI against the\n"
+            "absolute eps_q, residual influence bounded by a geometric tail.\n"
+            "The domain diagonal only raises a warning.")
+        self.btn_domain.clicked.connect(self._on_run_domain_independence)
+        dg.addWidget(self.btn_domain, 6, 0, 1, 2)
+        dg.addWidget(hint("Initial domain = ZOI + margin. Tail bound on the "
+                          "last m ratios, fallback on the successive rule."),
+                     6, 2, 1, 8)
+        dg.setColumnStretch(9, 1)
+
+        # ---- Step 3 · interaction checks --------------------------------
+        gchk = QGroupBox("3 \u00b7 Interaction checks (paper \u00a75.7)")
+        kg = grid(gchk)
+        self.btn_checks = QPushButton("Run interaction checks")
+        self.btn_checks.setToolTip(
+            "A-posteriori checks of the sized model (paper \u00a75.7):\n"
+            "mass-scaling factor inside its window at (h*, D*), the four\n"
+            "dimensions grown together (1 run), and the GCI plan of step 1\n"
+            "run again on D* (h* must stay within tolerance). Available once\n"
+            "a domain study has finished.")
+        self.btn_checks.setEnabled(False)
+        self.btn_checks.clicked.connect(self._on_run_interaction_checks)
+        kg.addWidget(self.btn_checks, 0, 0)
+        kg.addWidget(hint("f in its window at (h*, D*); D* grown in the four "
+                          "directions (1 run); GCI of step 1 re-run on D*."),
+                     0, 1)
+        kg.setColumnStretch(1, 1)
+
+        # ---- Inputs column (scrolls instead of squeezing) ---------------
+        inputs = QWidget()
+        il_ = QVBoxLayout(inputs)
+        il_.setContentsMargins(0, 0, 4, 0)
+        for gbox in (gcom, gmesh, gdom, gchk):
+            il_.addWidget(gbox)
+        il_.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(inputs)
+        # Never narrower than its content: the preview shrinks instead, and
+        # only a vertical scrollbar can appear.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(inputs.sizeHint().width()
+                               + scroll.verticalScrollBar().sizeHint().width())
 
         # ---- Preview (reuses the Geometry tab's preview widget) --------
         gprev = QGroupBox("Preview")
@@ -295,95 +364,41 @@ class OptimizationTab(QWidget):
         btn_prev.clicked.connect(self._draw_preview)
         pv.addWidget(btn_prev)
 
-        # ---- Two-column assembly ---------------------------------------
-        # Left: inputs, initial domain, then convergence criterion (stacked).
-        # Right: the whole preview.
-        cols = QHBoxLayout()
-        left = QVBoxLayout()
-        left.addWidget(gzoi)
-        # Panels 2 (criteria) and 3 (mesh GCI) share a row to save vertical
-        # space (the left column is cramped at 16:9).
-        row23 = QHBoxLayout()
-        row23.addWidget(gcrit, 1)
-        row23.addWidget(gmeshgci, 1)
-        left.addLayout(row23)
-        left.addWidget(gdom)
-        left.addWidget(gds)
-        left.addStretch(1)
-        cols.addLayout(left, 1)
-        cols.addWidget(gprev, 1)
-        root.addLayout(cols)
+        self._hsplit = QSplitter(Qt.Horizontal)
+        self._hsplit.addWidget(scroll)
+        self._hsplit.addWidget(gprev)
+        self._hsplit.setStretchFactor(0, 3)
+        self._hsplit.setStretchFactor(1, 2)
+        self._hsplit.setChildrenCollapsible(False)
 
-        # ---- Run controls ----------------------------------------------
-        rc = QHBoxLayout()
-        # Relative tolerances (dimensionless) of the mesh GCI study ONLY; the
-        # domain study uses the absolute eps_q of panel 2. "force" applies to
-        # Fc and Ff. The persisted key (sizing_tol) is kept for old profiles.
-        eg = QGroupBox("Mesh GCI tolerances (relative)")
-        egl = QGridLayout(eg)
-        egl.setContentsMargins(8, 6, 8, 6)
-        self._dj_eps = {}
-        for i, q in enumerate(("EVF", "TEMP", "V1", "V2", "force")):
-            egl.addWidget(QLabel(q), 0, 2 * i)
-            le = QLineEdit("0.02"); le.setFixedWidth(58)
-            le.setToolTip("Relative tolerance on %s (0.02 = 2%%). Empty = "
-                          "excluded from the criterion." % q)
-            self._dj_eps[q] = le
-            egl.addWidget(le, 0, 2 * i + 1)
-        rc.addWidget(eg)
-        self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
-        self.btn_mesh.setToolTip(
-            "GCI/Richardson mesh convergence on a FIXED (large) domain: three\n"
-            "systematically-refined meshes, observed order p, extrapolated\n"
-            "value and GCI uncertainty per quantity. Recommends the coarsest\n"
-            "mesh within tolerance of the extrapolated value.")
-        self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
-        rc.addWidget(self.btn_mesh)
-        self.btn_domain = QPushButton("Run domain sizing (independence)")
-        self.btn_domain.setToolTip(
-            "Sequential independence study: each dimension grown by a constant\n"
-            "step from ZOI + margin (mesh and mass scaling held fixed), runs\n"
-            "compared by the mean absolute difference in the ZOI against the\n"
-            "absolute eps_q of panel 2, residual influence bounded by a\n"
-            "geometric tail. The domain diagonal only raises a warning.")
-        self.btn_domain.clicked.connect(self._on_run_domain_independence)
-        rc.addWidget(self.btn_domain)
-        self.btn_checks = QPushButton("Run interaction checks")
-        self.btn_checks.setToolTip(
-            "A-posteriori checks of the sized model (paper \u00a75.7):\n"
-            "mass-scaling factor inside its window at (h*, D*), the four\n"
-            "dimensions grown together (1 run), and the GCI plan of panel 3\n"
-            "run again on D* (h* must stay within tolerance). Available once\n"
-            "a domain study has finished.")
-        self.btn_checks.setEnabled(False)
-        self.btn_checks.clicked.connect(self._on_run_interaction_checks)
-        rc.addWidget(self.btn_checks)
+        # ---- Status bar (always visible) --------------------------------
+        bar = QHBoxLayout()
         self.btn_open_wd = QPushButton("Open working dir")
         self.btn_open_wd.setToolTip("Open the Preferences working directory.")
         self.btn_open_wd.clicked.connect(self._open_working_dir)
-        rc.addWidget(self.btn_open_wd)
+        bar.addWidget(self.btn_open_wd)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
-        rc.addWidget(self.btn_cancel)
-        self.lbl_status = QLabel("")
-        rc.addWidget(self.lbl_status, 1)
-        root.addLayout(rc)
-
+        bar.addWidget(self.btn_cancel)
         # Live per-simulation progress bar (fed by parsing the current job's
         # .sta file, step_time/sim_time).
         self.sim_progress = QProgressBar()
         self.sim_progress.setRange(0, 100)
         self.sim_progress.setFormat("current simulation: %p%")
+        self.sim_progress.setFixedWidth(220)
         self.sim_progress.setVisible(False)
-        root.addWidget(self.sim_progress)
+        bar.addWidget(self.sim_progress)
+        self.lbl_status = QLabel("")
+        bar.addWidget(self.lbl_status, 1)
 
         # ---- Output tabs -----------------------------------------------
         self.tabs = QTabWidget()
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
         self.tabs.addTab(self.log, "Log")
         conv = QWidget(); cv = QVBoxLayout(conv)
-        self.fig = Figure(figsize=(6, 4.5))
+        cv.setContentsMargins(0, 0, 0, 0)
+        self.fig = Figure(figsize=(6, 3.2))
         self.canvas = FigureCanvas(self.fig)
         # Matplotlib navigation toolbar: interactive zoom / pan / home / save.
         self._nav = NavigationToolbar2QT(self.canvas, conv)
@@ -400,11 +415,18 @@ class OptimizationTab(QWidget):
             QHeaderView.Stretch)
         self.tabs.addTab(conv, "Convergence")
         self.tabs.addTab(self.table, "Table")
+
+        _top = QWidget()
+        tl = QVBoxLayout(_top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(self._hsplit, 1)
+        tl.addLayout(bar)
         self._splitter = QSplitter(Qt.Vertical)
         self._splitter.addWidget(_top)
         self._splitter.addWidget(self.tabs)
         self._splitter.setStretchFactor(0, 3)
         self._splitter.setStretchFactor(1, 2)
+        self._splitter.setChildrenCollapsible(False)
         outer.addWidget(self._splitter)
 
         # Auto-refresh the preview when the inputs that affect it change.
@@ -976,7 +998,7 @@ class OptimizationTab(QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Domain criterion",
-                "Set the six absolute tolerances eps_q of panel 2 "
+                "Set the six absolute tolerances eps_q of step 2 "
                 "(Vx, Vy, T, EVF, Fc, Ff): they define E_max for the domain "
                 "study.")
             return
