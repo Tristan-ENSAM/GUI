@@ -21,12 +21,17 @@ summary.json        selected model, Eq. (24) normalisation, Eq. (22)-(23)
                     cost gain and speed-up, statuses
 ==================  =======================================================
 
-Eq. (22)-(23): the reference cost C_initial is the REFERENCE (over-sized)
-domain, i.e. the most expensive domain simulated during the study and its
-checks (decision D12 of 2026-10-02). summary.json gives it under
-"cost_eq22_23_paper" with C = C_CPU (Eq. 11, solver time), and keeps, for
-information, the same ratios by Eulerian element count and against the
-initial search domain (ZOI + margin, first run).
+Eq. (22)-(23): the reference cost C_initial is the cost of the STARTING
+domain of the study, i.e. its first run (ZOI + margin, decision D2-a)
+(decision D12 of 2026-10-02, revised the same day). summary.json gives it
+under "cost_eq22_23_paper" with C = C_CPU (Eq. 11, solver time), and keeps,
+for information, the same ratios by Eulerian element count and against the
+most expensive domain simulated.
+
+Consequence (fact, by construction): the study only GROWS the domain from
+its start at a fixed element size, so C_opt >= C_initial up to run-to-run
+timing noise; with this reference G_C <= 0 and R_C <= 1 (Eq. 22 then
+measures a cost increase, not a reduction).
 
 Pareto flag (Fig. 13): each comparison is a configuration = its candidate
 run p_(j-1) (the value the comparison judges) with cost C_CPU of that run and
@@ -333,9 +338,10 @@ def summary(study, t1: Optional[float], h_star: Optional[float],
                            "criterion": _num(d.criterion)}
                        for n, d in study.per_dimension.items()},
         "cost_eq22_23_paper": dict(
-            gains("c_cpu_s")["vs_oversized_domain"],
-            reference="over-sized reference domain (decision D12)",
-            reference_run=over.index if over else None,
+            gains("c_cpu_s")["vs_initial_domain"],
+            reference="starting domain of the study, ZOI + margin "
+                      "(decision D12)",
+            reference_run=rec_init.index if rec_init else None,
             cost="C_CPU = N_CPU * t_wall,solver (Eq. 11)"),
         "cost_eq22_23": {"by_C_CPU": gains("c_cpu_s"),
                          "by_n_elem_euler": gains("n_elem_euler"),

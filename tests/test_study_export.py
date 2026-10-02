@@ -155,11 +155,13 @@ class TestGciAndFiles:
         assert "nan" not in (tmp_path / "comparisons.csv").read_text()
 
 
-def test_paper_cost_reference_is_the_oversized_domain(study):
+def test_paper_cost_reference_is_the_starting_domain(study):
     s = summary(study, t1=0.05, h_star=_ELEM, ms_factor=1.0)
     paper = s["cost_eq22_23_paper"]
-    over = s["cost_eq22_23"]["by_C_CPU"]["vs_oversized_domain"]
-    assert paper["G_C"] == over["G_C"] and paper["R_C"] == over["R_C"]
-    assert "D12" in paper["reference"]
-    costs = [r.cost.c_cpu_s for r in study.runs]
-    assert paper["C_ref"] == pytest.approx(max(costs))
+    ini = s["cost_eq22_23"]["by_C_CPU"]["vs_initial_domain"]
+    assert paper["G_C"] == ini["G_C"] and paper["R_C"] == ini["R_C"]
+    assert "D12" in paper["reference"] and paper["reference_run"] == 0
+    assert paper["C_ref"] == pytest.approx(study.runs[0].cost.c_cpu_s)
+    # the study only grows the domain: the selected one costs at least as
+    # much as the start, so G_C <= 0 and R_C <= 1 with this reference
+    assert paper["G_C"] <= 0.0 and paper["R_C"] <= 1.0
