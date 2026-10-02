@@ -2,8 +2,8 @@
 """Formal mesh convergence by Richardson extrapolation and the Grid Convergence
 Index (GCI), per Roache / ASME V&V 20.
 
-Unlike the Cauchy successive-difference check in ``mesh_opt.refine_until_stable``
-(refine until the solution stops changing), this quantifies the discretization
+Unlike a Cauchy successive-difference check (refine until the solution stops
+changing; the former mesh_opt module, removed by lot L6), this quantifies the discretization
 error: from three systematically-refined meshes it reports the observed order of
 convergence p, the Richardson-extrapolated (h->0) value, and a GCI uncertainty
 band per monitored quantity, plus an asymptotic-range check.
@@ -11,7 +11,7 @@ band per monitored quantity, plus an asymptotic-range check.
 Robust sampling (essential here): the ZOI field is reduced to a scalar per
 quantity by a WINDOWED, EVF-MASKED, TIME-AVERAGED reduction sampled on a FIXED
 grid via BILINEAR interpolation of the element-centroid field. Nearest-neighbour
-(``mesh_opt.make_mesh_sample_fn``) is a bias when the element size changes
+(the former mesh_opt sampling) is a bias when the element size changes
 because the centroids move; and without the EVF mask + settled window the moving
 material/void interface dominates the comparison (the noise floor seen in the
 domain study). GCI assumes monotonic asymptotic convergence, so this reduction
@@ -27,7 +27,7 @@ Method (three meshes h1 < h2 < h3, h1 finest; r21 = h2/h1, r32 = h3/h2):
     asymptotic range: GCI_32 / (r21^p GCI_21) ~ 1
 
 Pure host-side Python (CPython 3.x). ``run_bundle(cfg)`` returns a
-ResultsBundle-like object (see domain_convergence).
+ResultsBundle-like object (see domain_independence).
 """
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.domain_sizing import DomainDims
-from gui.sensitivity.mesh_opt import roi_grid
-from gui.sensitivity.domain_opt import element_centroids_xy
+from gui.sensitivity.zoi_sampling import (
+    roi_grid, element_centroids_xy, window_mask,
+    history_window_mean as _history_window_mean)
 from gui.sensitivity.runner_core import eulerian_instance
-from gui.sensitivity.domain_convergence import window_mask, _history_window_mean
 
 DEFAULT_QUANTITIES = ("EVF", "TEMP", "V1", "V2", "force")
 _SAFETY_3PLUS = 1.25          # Roache safety factor for >= 3 meshes

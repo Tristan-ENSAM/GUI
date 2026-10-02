@@ -100,9 +100,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.domain_sizing import DomainDims, diagonal
-from gui.sensitivity.mesh_opt import roi_grid, nearest_samples
+from gui.sensitivity.zoi_sampling import (
+    roi_grid, nearest_samples, window_mask)
 from gui.sensitivity.runner_core import eulerian_instance
-from gui.sensitivity.domain_convergence import window_mask
 
 # Paper quantity label -> bundle element-field name.
 FIELD_QUANTITIES: Dict[str, str] = {"Vx": "V1", "Vy": "V2", "T": "TEMP",
@@ -460,6 +460,8 @@ class Comparison:
     mode: str = ""                           # "tail_bound"|"successive"|"pending"
     decay: Dict[str, DecayCheck] = field(default_factory=dict)
     bound: Dict[str, float] = field(default_factory=dict)   # R_q at decision
+    run_from: int = -1                       # RunRecord.index of S(p_(j-1))
+    run_to: int = -1                         # RunRecord.index of S(p_j)
 
 
 @dataclass
@@ -483,10 +485,91 @@ class StudyResult:
     runs: List[RunRecord] = field(default_factory=list)
     status: str = ""     # converged | partial | zoi_outside | cancelled
     warnings: List[str] = field(default_factory=list)
+    # domain key (whole elements) -> (RunRecord, ZoiSample or None). Kept so
+    # the interaction checks can compare against an already simulated domain
+    # without running it again; not meant for export.
+    cache: Dict[Tuple[int, int, int, int],
+                Tuple["RunRecord", Optional["ZoiSample"]]] = field(
+                    default_factory=dict, repr=False)
+    # The settings the study ran with (thresholds, window, step, ...), for the
+    # interaction checks and the exports.
+    settings: Dict[str, object] = field(default_factory=dict)
 
     @property
     def n_runs(self) -> int:
         return len(self.runs)
+
+
+# ---------------------------------------------------------------------------
+# One candidate run
+# ---------------------------------------------------------------------------
+def domain_key(dims: DomainDims, elem_size: float) -> Tuple[int, int, int, int]:
+    """Cache key of a domain: each dimension as a whole number of elements."""
+    return _dims_key(dims, float(elem_size))
+
+
+def run_candidate(run_bundle: Callable, base_cfg, dims: DomainDims, *,
+                  index: int, zoi: Sequence[float], grid_step: float,
+                  elem_size: float, window: Tuple[float, float],
+                  evf_threshold: float, quantities: Sequence[str],
+                  diagonal_coeff: float = DEFAULT_DIAGONAL_COEFF,
+                  guard_fn: Optional[Callable] = None,
+                  cost_fn: Optional[Callable] = None,
+                  warnings: Optional[List[str]] = None,
+                  emit: Optional[Callable[[dict], None]] = None
+                  ) -> Tuple[RunRecord, Optional[ZoiSample]]:
+    """Run ONE candidate domain and reduce it to its ZOI sample.
+
+    `base_cfg` is deep-copied and only its euler_geometry is set to `dims`.
+    Never raises for a failed run: the RunRecord carries job_ok=False and the
+    reason. Used by the study driver and by the interaction checks."""
+    elem = float(elem_size)
+    cfg = copy.deepcopy(base_cfg)
+    g = cfg.euler_geometry
+    g.h_wp, g.h_void = float(dims.h_wp), float(dims.h_void)
+    g.l_wp, g.l_void = float(dims.l_wp), float(dims.l_void)
+    ratio = diagonal(dims) / elem
+    rec = RunRecord(index=int(index), dims=_dims_dict(dims), job_ok=False,
+                    diagonal_ratio=ratio,
+                    diagonal_warning=bool(ratio > diagonal_coeff))
+    if rec.diagonal_warning:
+        msg = ("diagonal/h = %.1f > %.1f for %r (warning only, the study "
+               "continues)" % (ratio, diagonal_coeff, rec.dims))
+        if warnings is not None:
+            warnings.append(msg)
+        if emit is not None:
+            emit({"phase": "warning", "message": msg})
+    sample = None
+    t0 = time.perf_counter()
+    try:
+        bundle = run_bundle(cfg)
+    except Exception as exc:                  # a failed launch is a failed job
+        bundle = None
+        rec.error = "%s: %s" % (type(exc).__name__, exc)
+    rec.host_wall_s = time.perf_counter() - t0
+    if cost_fn is not None:
+        try:
+            rec.cost = cost_fn(bundle, dims, rec.host_wall_s)
+        except Exception as exc:              # cost is informative only
+            if warnings is not None:
+                warnings.append("cost of run %d: %s: %s"
+                                % (rec.index, type(exc).__name__, exc))
+    if bundle is None:
+        rec.error = rec.error or "no results bundle"
+    else:
+        try:
+            sample = sample_zoi(bundle, zoi, grid_step, elem, window,
+                                evf_threshold, quantities)
+            rec.job_ok = True
+        except Exception as exc:
+            rec.error = "%s: %s" % (type(exc).__name__, exc)
+        if guard_fn is not None and rec.job_ok:
+            try:
+                rec.guards = dict(guard_fn(bundle) or {})
+            except Exception as exc:
+                rec.guards = {"guard_eval": (None, False)}
+                rec.error = "safeguards: %s: %s" % (type(exc).__name__, exc)
+    return rec, sample
 
 
 # ---------------------------------------------------------------------------
@@ -561,59 +644,30 @@ def run_domain_independence(
             progress_cb(ev)
 
     result = StudyResult(initial=initial_dims, final=initial_dims)
+    result.settings = {
+        "zoi": tuple(float(v) for v in zoi), "grid_step": float(grid_step),
+        "elem_size": elem, "thresholds": dict(thr), "window": tuple(window),
+        "evf_threshold": float(evf_threshold), "step_elems": int(step_elems),
+        "n_max": int(n_max), "n_hold": int(n_hold),
+        "m_ratios": int(m_ratios), "caps": dict(caps),
+        "order": tuple(order), "margin_elems": int(margin_elems),
+        "offset": tuple(offset), "diagonal_coeff": float(diagonal_coeff)}
     if not zoi_inside(initial_dims, zoi, margin_elems * elem, offset):
         result.status = "zoi_outside"
         return result
 
-    cache: Dict[Tuple[int, int, int, int], Tuple[RunRecord,
-                                                 Optional[ZoiSample]]] = {}
+    cache = result.cache
 
     def simulate(dims: DomainDims) -> Tuple[RunRecord, Optional[ZoiSample]]:
         key = _dims_key(dims, elem)
         if key in cache:
             return cache[key]
-        cfg = copy.deepcopy(base_cfg)
-        g = cfg.euler_geometry
-        g.h_wp, g.h_void = float(dims.h_wp), float(dims.h_void)
-        g.l_wp, g.l_void = float(dims.l_wp), float(dims.l_void)
-        ratio = diagonal(dims) / elem
-        rec = RunRecord(index=len(result.runs), dims=_dims_dict(dims),
-                        job_ok=False, diagonal_ratio=ratio,
-                        diagonal_warning=bool(ratio > diagonal_coeff))
-        if rec.diagonal_warning:
-            msg = ("diagonal/h = %.1f > %.1f for %r (warning only, the study "
-                   "continues)" % (ratio, diagonal_coeff, rec.dims))
-            result.warnings.append(msg)
-            emit({"phase": "warning", "message": msg})
-        sample = None
-        t0 = time.perf_counter()
-        try:
-            bundle = run_bundle(cfg)
-        except Exception as exc:              # a failed launch is a failed job
-            bundle = None
-            rec.error = "%s: %s" % (type(exc).__name__, exc)
-        rec.host_wall_s = time.perf_counter() - t0
-        if cost_fn is not None:
-            try:
-                rec.cost = cost_fn(bundle, dims, rec.host_wall_s)
-            except Exception as exc:          # cost is informative only
-                result.warnings.append("cost of run %d: %s: %s"
-                                       % (rec.index, type(exc).__name__, exc))
-        if bundle is None:
-            rec.error = rec.error or "no results bundle"
-        else:
-            try:
-                sample = sample_zoi(bundle, zoi, grid_step, elem, window,
-                                    evf_threshold, quantities)
-                rec.job_ok = True
-            except Exception as exc:
-                rec.error = "%s: %s" % (type(exc).__name__, exc)
-            if guard_fn is not None and rec.job_ok:
-                try:
-                    rec.guards = dict(guard_fn(bundle) or {})
-                except Exception as exc:
-                    rec.guards = {"guard_eval": (None, False)}
-                    rec.error = "safeguards: %s: %s" % (type(exc).__name__, exc)
+        rec, sample = run_candidate(
+            run_bundle, base_cfg, dims, index=len(result.runs), zoi=zoi,
+            grid_step=grid_step, elem_size=elem, window=window,
+            evf_threshold=evf_threshold, quantities=quantities,
+            diagonal_coeff=diagonal_coeff, guard_fn=guard_fn, cost_fn=cost_fn,
+            warnings=result.warnings, emit=emit)
         result.runs.append(rec)
         cache[key] = (rec, sample)
         emit({"phase": "run", "record": rec, "n_runs": len(result.runs)})
@@ -669,7 +723,8 @@ def run_domain_independence(
             comp = Comparison(dimension=name, j=n, value_from=dres.values[-2],
                               value_to=nxt, errors=errs, e_max=em, q_crit=qc,
                               guards_ok=pair_ok, success=success,
-                              mode="pending")
+                              mode="pending", run_from=rec_a.index,
+                              run_to=rec_b.index)
             dres.comparisons.append(comp)
 
             if n >= m_ratios + 1:
