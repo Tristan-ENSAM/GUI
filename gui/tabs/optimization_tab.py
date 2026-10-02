@@ -149,6 +149,17 @@ class OptimizationTab(QWidget):
                 le.setToolTip(tip)
             return le
 
+        def spin_box(lo, hi, value):
+            # No fixed width: the width comes from the style's size hint,
+            # which accounts for the arrow buttons (side by side in the
+            # Windows 11 style, where a fixed 64 px hid the value) and for
+            # the widest value of the range. _NUM_W is only a floor.
+            sp = QSpinBox()
+            sp.setRange(lo, hi)
+            sp.setValue(value)
+            sp.setMinimumWidth(_NUM_W)
+            return sp
+
         def hint(text):
             lab = QLabel(text)
             lab.setWordWrap(True)
@@ -207,8 +218,7 @@ class OptimizationTab(QWidget):
         self.le_gci_min = num_edit(placeholder="none")
         mg.addWidget(self.le_gci_min, 0, 5)
         mg.addWidget(QLabel("n meshes"), 0, 6)
-        self.sp_gci_n = QSpinBox(); self.sp_gci_n.setRange(3, 6)
-        self.sp_gci_n.setValue(3); self.sp_gci_n.setFixedWidth(_NUM_W)
+        self.sp_gci_n = spin_box(3, 6, 3)
         mg.addWidget(self.sp_gci_n, 0, 7)
         # Relative tolerances of the GCI study ONLY ("force" applies to Fc
         # and Ff). The persisted key (sizing_tol) is kept for old profiles.
@@ -286,16 +296,14 @@ class OptimizationTab(QWidget):
         set_row = QHBoxLayout()
         set_row.setSpacing(4)
         set_row.addWidget(QLabel("margin (elems)"))
-        self.sp_margin = QSpinBox(); self.sp_margin.setRange(0, 50)
-        self.sp_margin.setValue(0); self.sp_margin.setFixedWidth(64)
+        self.sp_margin = spin_box(0, 50, 0)
         set_row.addWidget(self.sp_margin)
         self._dom_spins = {}
         for attr, label, lo, hi in _DOM_SPINS:
             set_row.addSpacing(10)
             set_row.addWidget(QLabel(label))
-            sp = QSpinBox(); sp.setRange(lo, hi)
-            sp.setValue(int(getattr(OptimizationCfgDefaults, attr)))
-            sp.setFixedWidth(64)
+            sp = spin_box(lo, hi,
+                          int(getattr(OptimizationCfgDefaults, attr)))
             self._dom_spins[attr] = sp
             set_row.addWidget(sp)
         set_row.addStretch(1)

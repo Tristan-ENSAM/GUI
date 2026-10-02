@@ -58,6 +58,23 @@ class TestRestructuredTab:
         assert tab._tolerances() == {q: 0.02 for q in
                                      ("EVF", "TEMP", "V1", "V2", "force")}
 
+    def test_spin_boxes_follow_the_style_size_hint(self, tab, qapp):
+        """The spin boxes must be as wide as the style asks (value + arrow
+        buttons). A fixed 64 px hid the value in the Windows 11 style, whose
+        arrows sit side by side; a larger font reproduces it here."""
+        spins = [tab.sp_margin, tab.sp_gci_n, *tab._dom_spins.values()]
+        for sp in spins:
+            sp.setStyleSheet("font-size: 40px;")
+        tab.resize(2400, 1400)
+        tab.show()
+        qapp.processEvents()
+        try:
+            for sp in spins:
+                assert sp.maximumWidth() > sp.minimumWidth()   # not fixed
+                assert sp.width() >= sp.sizeHint().width()
+        finally:
+            tab.hide()
+
     def test_busy_toggles_the_study_buttons(self, tab):
         tab._busy(True, "running")
         assert not tab.btn_mesh.isEnabled()
