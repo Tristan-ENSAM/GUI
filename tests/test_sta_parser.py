@@ -96,3 +96,32 @@ class TestParseSta:
         # Both kinds parsed into the same snapshot.
         assert s.frame_current == 7 and s.inc_number == 12479
         assert s.is_ready() is True
+
+
+# ---------------------------------------------------------------------------
+# Cost descriptors (lot L2): first / min stable increment, wall time in s
+# ---------------------------------------------------------------------------
+class TestCostDescriptors:
+
+    def test_first_min_last_stable_dt(self, tmp_path):
+        rows = [
+            "  100  1.000E-06 1.000E-06  00:00:10 6.000E-10   1  1.0E-06  1.0E-01\n",
+            "  200  2.000E-06 2.000E-06  00:01:05 4.000E-10   1  1.0E-06  1.0E-01\n",
+            "  300  3.000E-06 3.000E-06  01:02:03 5.000E-10   1  1.0E-06  1.0E-01\n",
+        ]
+        p = tmp_path / "job.sta"
+        p.write_text(HEADER + "".join(rows), encoding="latin-1")
+        s = parse_sta(p)
+        assert s.stable_dt_first == pytest.approx(6.0e-10)
+        assert s.stable_dt_min == pytest.approx(4.0e-10)
+        assert s.stable_dt == pytest.approx(5.0e-10)
+        assert s.inc_number == 300
+        assert s.wall_time_seconds() == pytest.approx(3723.0)
+
+    def test_wall_time_conversion(self):
+        from gui.core.sta_parser import wall_time_to_seconds
+        assert wall_time_to_seconds("00:07:22") == 442.0
+        assert wall_time_to_seconds("27:00:00") == 97200.0   # no day rollover
+        assert wall_time_to_seconds(None) is None
+        assert wall_time_to_seconds("7:22") is None
+        assert StaProgress().wall_time_seconds() is None

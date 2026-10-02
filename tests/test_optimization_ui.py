@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """The restructured Optimization tab: ZOI panel + the two study launchers
-(mesh GCI, domain convergence). Guards must fire before any Abaqus launch.
+(mesh GCI, domain independence). Guards must fire before any Abaqus launch.
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
@@ -44,12 +45,14 @@ class TestRestructuredTab:
         assert tab.le_zoi["xmin"].text() != ""
         assert tab.zoi() == pytest.approx(tab.config_inputs()["roi"])
 
-    def test_domain_convergence_requires_a_tolerance(self, tab, warnings):
-        for le in tab._dj_eps.values():
+    def test_domain_study_requires_the_six_absolute_tolerances(self, tab,
+                                                               warnings):
+        for le in tab._q_eps.values():
             le.setText("")
-        tab._on_run_domain_convergence()
-        assert warnings and "tolerance" in warnings[0].lower()
-        assert not hasattr(tab, "_dc_worker")
+        tab._q_eps["Vx"].setText("1")
+        tab._on_run_domain_independence()
+        assert warnings and "tolerances" in warnings[0].lower()
+        assert not hasattr(tab, "_di_worker")
 
     def test_tolerances_default_to_2pct(self, tab):
         assert tab._tolerances() == {q: 0.02 for q in
@@ -81,3 +84,222 @@ class TestRunOutputWiring:
         assert Path(d).parent == Path(tmp_path)
         assert Path(d).name.startswith("prof_GCI_")
         assert (Path(d) / "config.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Lot L3: domain independence study wiring
+# ---------------------------------------------------------------------------
+def _fill_thresholds(tab):
+    for q, v in (("Vx", "10"), ("Vy", "10"), ("T", "1"), ("EVF", "0.01"),
+                 ("Fc", "0.5"), ("Ff", "0.5")):
+        tab._q_eps[q].setText(v)
+
+
+class _CaptureWorker:
+    """Stands in for a QThread worker: records its kwargs, never runs."""
+    last = None
+
+    def __init__(self, parent=None, **kw):
+        type(self).last = kw
+        from unittest.mock import MagicMock
+        self.progress = MagicMock()
+        self.finished_ok = MagicMock()
+        self.failed = MagicMock()
+
+    def start(self):
+        pass
+
+    def isRunning(self):
+        return False
+
+
+@pytest.fixture
+def launch(tab, monkeypatch, tmp_path):
+    import gui.tabs.optimization_tab as ot
+    monkeypatch.setattr(ot, "DomainIndependenceWorker", _CaptureWorker)
+    monkeypatch.setattr(ot, "MeshGciWorker", _CaptureWorker)
+    monkeypatch.setattr(tab, "_validate_launch",
+                        lambda: (type("P", (), {"abaqus_cmd": "a",
+                                                "abaqus_script": "s"})(),
+                                 tmp_path, 4))
+    monkeypatch.setattr(tab, "_start_progress", lambda: None)
+    _CaptureWorker.last = None
+    return tab
+
+
+class TestDomainIndependenceWiring:
+    def test_defaults_match_the_decisions(self, tab):
+        assert tab.domain_settings() == {"dom_step_elems": 10, "dom_n_max": 8,
+                                         "dom_n_hold": 1, "dom_m_ratios": 2}
+        assert tab.window() == (0.3, 1.0)
+        g = tab.guard_settings()
+        assert (g.rk_max, g.rhg_max) == (0.01, 0.05)
+
+    def test_window_validation(self, tab):
+        tab._dom_texts["window_start"].setText("0.8")
+        tab._dom_texts["window_end"].setText("0.5")
+        with pytest.raises(ValueError):
+            tab.window()
+
+    def test_n_max_must_allow_the_decay_test(self, tab):
+        tab._dom_spins["dom_m_ratios"].setValue(3)
+        tab._dom_spins["dom_n_max"].setValue(3)
+        with pytest.raises(ValueError):
+            tab.domain_settings()
+
+    def test_initial_domain_is_zoi_plus_margin_with_offset(self, tab):
+        tab.cfg.elem_size = 0.01
+        tab.cfg.euler_position.x0 = 1.0
+        for k, v in (("xmin", "0.9"), ("xmax", "1.05"), ("ymin", "-0.08"),
+                     ("ymax", "0.02")):
+            tab.le_zoi[k].setText(v)
+        tab.sp_margin.setValue(1)
+        d = tab.compute_initial_dims()
+        assert d.l_wp == pytest.approx(0.11)
+        assert d.l_void == pytest.approx(0.06)
+        assert d.h_wp == pytest.approx(0.09)
+        assert d.h_void == pytest.approx(0.03)
+
+    def test_launch_passes_the_study_settings(self, launch):
+        tab = launch
+        _fill_thresholds(tab)
+        tab._dom_spins["dom_step_elems"].setValue(12)
+        tab._dom_texts["rhg_max"].setText("0.07")
+        tab._max["h_void"].setText("0.4")
+        elem_before = tab.cfg.elem_size
+        tab._on_run_domain_independence()
+        kw = _CaptureWorker.last
+        assert kw is not None
+        assert kw["step_elems"] == 12 and kw["n_max"] == 8
+        assert kw["n_hold"] == 1 and kw["m_ratios"] == 2
+        assert kw["window"] == (0.3, 1.0)
+        assert kw["thresholds"]["Ff"] == pytest.approx(0.5)
+        assert kw["caps"] == {"h_void": 0.4}
+        assert kw["initial_dims"] == tab.compute_initial_dims()
+        # a deep copy with the needed history outputs forced on
+        assert kw["base_cfg"] is not tab.cfg
+        assert kw["base_cfg"].step.output.ho_preselect is True
+        assert kw["base_cfg"].step.output.ho_rf_on_rp is True
+        assert tab.cfg.elem_size == elem_before
+        # safeguards built from the panel
+        assert callable(kw["guard_fn"]) and callable(kw["cost_fn"])
+
+    def test_gci_gets_a_copy_and_the_shared_window(self, launch):
+        tab = launch
+        tab._dom_texts["window_start"].setText("0.5")
+        tab._on_run_mesh_gci()
+        kw = _CaptureWorker.last
+        assert kw["window"] == (0.5, 1.0)
+        assert kw["base_cfg"] is not tab.cfg
+
+    def test_progress_and_result_are_logged(self, tab):
+        from gui.core.domain_sizing import DomainDims
+        from gui.sensitivity.domain_independence import (
+            Comparison, DimensionResult, RunRecord, StudyResult)
+        rec = RunRecord(index=0, dims={"h_wp": .1, "h_void": .1, "l_wp": .1,
+                                       "l_void": .1}, job_ok=True,
+                        guards={"R_K": (0.001, True), "R_HG": (None, False)},
+                        diagonal_ratio=120.0, diagonal_warning=True)
+        tab._on_di_progress({"phase": "run", "record": rec})
+        comp = Comparison("l_wp", 1, 0.1, 0.2, {"Vx": 1.0}, 0.5, "Vx", True,
+                          True, mode="tail_bound")
+        tab._on_di_progress({"phase": "comparison", "comparison": comp})
+        d = DomainDims(.1, .1, .2, .1)
+        dr = DimensionResult("l_wp", 0.1, 0.2, "tail_bound", q_crit="Vx",
+                             criterion=0.4)
+        tab._on_di_progress({"phase": "dimension", "result": dr})
+        tab._on_di_done(StudyResult(initial=d, final=d,
+                                    per_dimension={"l_wp": dr},
+                                    runs=[rec], status="partial",
+                                    warnings=["diag"]))
+        text = tab.log.toPlainText()
+        assert "R_HG=n/a FAIL" in text and "diag/h=120.0" in text
+        assert "E_max=0.5 (Vx)" in text and "retained 0.2" in text
+        assert "NOT converged" in text
+        assert tab._last_domain_result is not None
+
+
+class _GridBundle:
+    """Analytic ResultsBundle over the real Eulerian grid of `dims` (element
+    size h, origin at the cutting corner): every ZOI quantity carries a
+    boundary influence decaying with each dimension, energies are steady."""
+
+    def __init__(self, dims, h, lam=0.05, nt=11):
+        self.dims, self.h, self.lam = dims, h, lam
+        xs = np.arange(-dims.l_wp + h / 2, dims.l_void, h)
+        ys = np.arange(-dims.h_wp + h / 2, dims.h_void, h)
+        X, Y = np.meshgrid(xs, ys)
+        self._c = np.column_stack([X.ravel(), Y.ravel(),
+                                   np.full(X.size, h / 2)])
+        self._mat = self._c[:, 1] < 0.0          # material below y = 0
+        self.times = np.linspace(0.0, 1e-4, nt)
+        self.history_time = np.linspace(0.0, 1e-4, 21)
+        self.instance_names = ["EULER"]
+
+    def instance(self, name):
+        class _I:
+            field_variables = ["EVF", "TEMP", "V1", "V2"]
+            n_elements = len(self._c)
+        return _I()
+
+    def element_centroids_init(self, inst):
+        return self._c
+
+    def _infl(self):
+        return sum(np.exp(-getattr(self.dims, n) / self.lam)
+                   for n in ("h_wp", "h_void", "l_wp", "l_void"))
+
+    def field(self, inst, var):
+        nt, ne = len(self.times), len(self._c)
+        if var == "EVF":
+            return np.tile(self._mat.astype(float), (nt, 1))
+        base = {"TEMP": 300.0, "V1": 1000.0, "V2": -200.0}[var]
+        return np.full((nt, ne), base * (1.0 + self._infl()))
+
+    def history(self, var):
+        n = len(self.history_time)
+        vals = {"RF1_RP": 0.8 * self.h * (1 + self._infl()),
+                "RF2_RP": 0.3 * self.h * (1 + self._infl()),
+                "ALLKE": 0.001, "ALLIE": 1.0, "ALLAE": 0.01}
+        if var in ("ENERGY_TIME", "ALLAE_TIME"):
+            return self.history_time
+        return np.full(n, vals[var])
+
+
+def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
+    """The tab launches the real worker with the real safeguards and cost on
+    an analytic bundle; the study completes and the result is logged."""
+    import gui.tabs.optimization_tab as ot
+    from gui.core.domain_sizing import DomainDims
+    tab = OptimizationTab(ModelConfig())
+    tab.cfg.elem_size = 0.01
+    for k, v in (("xmin", "-0.03"), ("xmax", "0.03"), ("ymin", "-0.03"),
+                 ("ymax", "0.03")):
+        tab.le_zoi[k].setText(v)
+    tab.sp_margin.setValue(1)
+    _fill_thresholds(tab)
+    tab._dom_spins["dom_step_elems"].setValue(4)
+    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_start_progress", lambda: None)
+
+    def fake_make(prefs, run_dir, cpus, prefix):
+        def run_bundle(cfg):
+            g = cfg.euler_geometry
+            return _GridBundle(DomainDims(g.h_wp, g.h_void, g.l_wp, g.l_void),
+                               cfg.elem_size)
+        run_bundle.state = {"sta": None, "job": None}
+        return run_bundle
+    monkeypatch.setattr(tab, "_make_run_bundle", fake_make)
+    tab._on_run_domain_independence()
+    assert tab._di_worker.wait(60000)
+    for _ in range(50):
+        qapp.processEvents()
+    res = tab._last_domain_result
+    assert res is not None, tab.log.toPlainText()
+    assert res.status == "converged"
+    assert all(r.guards_ok for r in res.runs)
+    # ZOI half-width 0.03 + 1 elem (0.01) = 0.04 mm per side -> 8 x 8 elems
+    assert res.runs[0].cost.n_elem_euler == 8 * 8
+    text = tab.log.toPlainText()
+    assert "RESULT: every dimension independent" in text
+    assert "R_HG=0.01" in text

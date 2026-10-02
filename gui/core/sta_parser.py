@@ -77,6 +77,10 @@ class StaProgress:
     critical_elem:  Optional[int]   = None
     kinetic_energy: Optional[float] = None
     total_energy:   Optional[float] = None
+    # Cost descriptors (lot L2): the stable increment of the FIRST increment
+    # row and the smallest one met so far. `stable_dt` above stays the LAST.
+    stable_dt_first: Optional[float] = None
+    stable_dt_min:   Optional[float] = None
 
     def is_ready(self) -> bool:
         """True if at least one progress signal has been parsed."""
@@ -91,6 +95,29 @@ class StaProgress:
                 and self.frame_total > 0):
             return float(self.frame_current) / float(self.frame_total)
         return None
+
+    def wall_time_seconds(self) -> Optional[float]:
+        """Solver wall time of the last increment row, in seconds.
+
+        The .sta prints it as HH:MM:SS (see _INC_ROW); None when no
+        increment row has been parsed."""
+        return wall_time_to_seconds(self.wall_time)
+
+
+def wall_time_to_seconds(text: Optional[str]) -> Optional[float]:
+    """Convert an 'H:M:S' wall-time string to seconds (None if unparsable).
+
+    Hours may exceed 24 (long runs): no day rollover is assumed."""
+    if not text:
+        return None
+    parts = text.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        h, m, sec = (int(x) for x in parts)
+    except ValueError:
+        return None
+    return float(h * 3600 + m * 60 + sec)
 
 
 def parse_sta(sta_path: str | Path) -> StaProgress:
@@ -139,6 +166,11 @@ def parse_sta(sta_path: str | Path) -> StaProgress:
                     snap.step_time      = float(m.group("step_time"))
                     snap.wall_time      = m.group("wall_time")
                     snap.stable_dt      = float(m.group("dt"))
+                    if snap.stable_dt_first is None:
+                        snap.stable_dt_first = snap.stable_dt
+                    if (snap.stable_dt_min is None
+                            or snap.stable_dt < snap.stable_dt_min):
+                        snap.stable_dt_min = snap.stable_dt
                     snap.critical_elem  = int(m.group("crit_elem"))
                     snap.kinetic_energy = float(m.group("kinetic_energy"))
                     snap.total_energy   = float(m.group("total_energy"))

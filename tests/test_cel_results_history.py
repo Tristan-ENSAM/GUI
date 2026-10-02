@@ -231,6 +231,31 @@ class TestExtractHistoryEnergy:
 
 
 # ---------------------------------------------------------------------------
+# _extract_history_artificial (ALLAE, lot L2)
+# ---------------------------------------------------------------------------
+class TestExtractHistoryArtificial:
+    def test_found_with_its_own_time(self, cel_results):
+        region = _energy_region()
+        region.historyOutputs["ALLAE"] = _FakeOutput(_pairs((0.1, 0.2, 0.3)))
+        t, ae = cel_results._extract_history_artificial(
+            _FakeStep({"Assembly ASSEMBLY": region}))
+        np.testing.assert_allclose(ae, [0.1, 0.2, 0.3])
+        np.testing.assert_allclose(t, [0.0, 1.0e-6, 2.0e-6])
+        assert t.dtype == np.float64
+
+    def test_absent_is_not_fatal(self, cel_results):
+        step = _FakeStep({"Assembly ASSEMBLY": _energy_region()})
+        assert cel_results._extract_history_artificial(step) == (None, None)
+
+    def test_energy_triple_contract_unchanged(self, cel_results):
+        region = _energy_region()
+        region.historyOutputs["ALLAE"] = _FakeOutput(_pairs((0.1, 0.2, 0.3)))
+        out = cel_results._extract_history_energy(
+            _FakeStep({"Assembly ASSEMBLY": region}))
+        assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
 # Python 2.7 compatibility — cel_results.py runs under Abaqus Python
 # ---------------------------------------------------------------------------
 class TestPython27Compatibility:
@@ -258,7 +283,8 @@ class TestNoHardCodedBareNames:
         with a literal channel name again."""
         src = _CEL_RESULTS.read_text(encoding="utf-8")
         for literal in ('outputs["RF1"]', 'outputs["RF2"]',
-                        'outputs["ALLKE"]', 'outputs["ALLIE"]'):
+                        'outputs["ALLKE"]', 'outputs["ALLIE"]',
+                        'outputs["ALLAE"]'):
             assert literal not in src, (
                 "%s bypasses _find_history_key and breaks as soon as a "
                 "filter suffixes the name" % literal)

@@ -401,6 +401,22 @@ class OptimizationCfg:
     caps:           dict = field(default_factory=dict)
     margin_elems:   int  = 0
     centroid_step:  str  = ""
+    # Domain independence study (correction report, Part B, T1-T5; defaults
+    # decided by the author on 2026-10-02, all modifiable). criterion_rmse
+    # holds its ABSOLUTE tolerances eps_q (the key name predates the MAD).
+    dom_step_elems: int  = 10      # constant growth step, in elements
+    dom_n_max:      int  = 8       # comparisons per dimension
+    dom_n_hold:     int  = 1       # consecutive successes (fallback rule)
+    dom_m_ratios:   int  = 2       # ratios used by the geometric-decay test
+    # Time window T as fractions of the simulated time (shared by both
+    # studies). 0.3-1.0 is the value previously hard-coded in the workers.
+    window_start:   str  = "0.3"
+    window_end:     str  = "1.0"
+    # Run safeguards. G_HG,max = 5 % (author, 2026-10-02). G_K,max = 0.01 is
+    # the mass-scaling guard default (ModelConfig.mass_scaling_bounds) and is
+    # NOT validated for the domain study: to be confirmed.
+    rk_max:         str  = "0.01"
+    rhg_max:        str  = "0.05"
 
 
 @dataclass

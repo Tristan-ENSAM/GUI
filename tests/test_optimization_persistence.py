@@ -108,3 +108,35 @@ class TestTabPersistence:
         tab.refresh_inputs()          # re-load from cfg must not dirty
         assert not seen
 
+
+
+class TestDomainStudyPersistence:
+    def test_round_trip_and_widgets(self, qapp):
+        cfg = ModelConfig()
+        o = cfg.optimization
+        o.dom_step_elems, o.dom_n_max, o.dom_n_hold, o.dom_m_ratios = 7, 9, 2, 3
+        o.window_start, o.window_end = "0.4", "0.95"
+        o.rk_max, o.rhg_max = "0.02", "0.06"
+        cfg2 = ModelConfig.from_json_dict(cfg.to_json_dict())
+        o2 = cfg2.optimization
+        assert (o2.dom_step_elems, o2.dom_n_max, o2.dom_n_hold,
+                o2.dom_m_ratios) == (7, 9, 2, 3)
+        assert (o2.window_start, o2.window_end) == ("0.4", "0.95")
+        assert (o2.rk_max, o2.rhg_max) == ("0.02", "0.06")
+        tab = OptimizationTab(cfg2)
+        assert tab._dom_spins["dom_step_elems"].value() == 7
+        assert tab._dom_texts["rhg_max"].text() == "0.06"
+        tab._dom_spins["dom_n_hold"].setValue(3)
+        tab._dom_texts["window_end"].setText("0.9")
+        assert tab.cfg.optimization.dom_n_hold == 3
+        assert tab.cfg.optimization.window_end == "0.9"
+
+    def test_legacy_profile_gets_the_decided_defaults(self):
+        cfg = ModelConfig.from_json_dict(
+            {"format_version": ModelConfig().FORMAT_VERSION,
+             "optimization": {"gci_ratio": "2"}})
+        o = cfg.optimization
+        assert (o.dom_step_elems, o.dom_n_max, o.dom_n_hold,
+                o.dom_m_ratios) == (10, 8, 1, 2)
+        assert (o.window_start, o.window_end) == ("0.3", "1.0")
+        assert o.rhg_max == "0.05"
