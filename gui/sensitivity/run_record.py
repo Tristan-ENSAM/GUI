@@ -15,7 +15,7 @@ Each run of a sizing study is checked against:
 
   The ratio of sums avoids the division by ALLIE ~ 0 at the start of the step
   that made the mean of the per-sample ratio explode (D3-a; same form as
-  gui.sensitivity.domain_opt.mean_ke_ie_ratio, here restricted to T);
+  the former mass-scaling guard, here restricted to T);
 * ``R_HG`` - artificial (hourglass-control) over internal energy, same form
   with ALLAE (D4: ALLAE is the artificial strain energy of the constraints
   that remove singular modes, such as hourglass control, per the Abaqus
@@ -25,10 +25,10 @@ Default thresholds:
 
 * G_HG,max = 0.05 - decision of the author (2026-10-02), modifiable; no
   external source.
-* G_K,max = 0.01 - taken from the energy-guard default of
-  ModelConfig.mass_scaling_bounds (gui/core/model_config.py:822). That value
-  was set for the mass-scaling window and is NOT validated for this study:
-  to be confirmed.
+* G_K,max = 0.01 - the energy-guard default of
+  ModelConfig.mass_scaling_bounds (gui/core/model_config.py:822), kept as the
+  default for the sizing studies by the author's decision (2026-10-02),
+  modifiable.
 
 Open hypotheses (to check on the first real run, report T5): H1 the Abaqus
 documentation on EC3D8R holds for EC3D8RT; H2 PRESELECT contains ALLAE; H3
@@ -60,13 +60,13 @@ from typing import Callable, Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from gui.core.sta_parser import parse_sta
-from gui.sensitivity.domain_convergence import window_mask
+from gui.sensitivity.zoi_sampling import window_mask
 from gui.sensitivity.runner_core import eulerian_instance
 
 REQUIRED_FIELDS = ("EVF", "TEMP", "V1", "V2")
 REQUIRED_HISTORY = ("RF1_RP", "RF2_RP", "ALLKE", "ALLIE", "ALLAE")
 
-DEFAULT_RK_MAX = 0.01      # model_config.py:822 (mass-scaling guard default)
+DEFAULT_RK_MAX = 0.01      # model_config.py:822; confirmed by the author 2026-10-02
 DEFAULT_RHG_MAX = 0.05     # author's decision, 2026-10-02
 
 # Guard result: (value or None when not evaluable, ok, reason)
@@ -282,3 +282,86 @@ def cost_record(bundle=None, sta_path=None, host_wall_s: Optional[float] = None,
     if rec.n_cpu is not None and rec.t_wall_solver_s is not None:
         rec.c_cpu_s = float(rec.n_cpu) * rec.t_wall_solver_s
     return rec
+
+
+# ---------------------------------------------------------------------------
+# Recording wrapper (studies that have no cost/safeguard hook of their own)
+# ---------------------------------------------------------------------------
+@dataclass
+class CallRecord:
+    """One call of a RecordingRunner."""
+    index: int
+    elem_size: float
+    dims: Dict[str, float]
+    job_ok: bool
+    cost: CostRecord
+    guards: Dict[str, Tuple[Optional[float], bool]] = field(default_factory=dict)
+    error: str = ""
+
+    @property
+    def guards_ok(self) -> bool:
+        return self.job_ok and all(ok for (_v, ok) in self.guards.values())
+
+
+class RecordingRunner:
+    """Wrap a run_bundle(cfg) so every call records its cost and safeguards.
+
+    Used for the GCI mesh study (mesh_gci has no hook) and the mesh x domain
+    interaction check. `sta_getter()` returns the .sta path of the job just
+    run (OptimizationTab exposes it as run_bundle.state["sta"]); the domain
+    and element size are read from the cfg passed to the call. Exceptions of
+    the wrapped runner propagate unchanged after the call is recorded."""
+
+    def __init__(self, run_bundle: Callable, n_cpu: Optional[int] = None,
+                 guard_settings: Optional[GuardSettings] = None,
+                 sta_getter: Optional[Callable[[], object]] = None):
+        self._run = run_bundle
+        self._n_cpu = n_cpu
+        self._gs = guard_settings
+        if sta_getter is None:
+            state = getattr(run_bundle, "state", None)
+            sta_getter = ((lambda: state.get("sta"))
+                          if isinstance(state, dict) else (lambda: None))
+        self._sta = sta_getter
+        self.records: list = []
+        # Keep the attribute the tab's cost hooks read.
+        self.state = getattr(run_bundle, "state", {})
+
+    def __call__(self, cfg):
+        import time as _time
+        from gui.core.domain_sizing import DomainDims
+        g = cfg.euler_geometry
+        dims = DomainDims(h_wp=float(g.h_wp), h_void=float(g.h_void),
+                          l_wp=float(g.l_wp), l_void=float(g.l_void))
+        elem = float(cfg.elem_size)
+        t0 = _time.perf_counter()
+        bundle, error = None, ""
+        try:
+            bundle = self._run(cfg)
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, exc)
+            raise
+        finally:
+            host = _time.perf_counter() - t0
+            try:
+                sta = self._sta()
+            except Exception:
+                sta = None
+            rec = CallRecord(
+                index=len(self.records), elem_size=elem,
+                dims={n: float(getattr(dims, n))
+                      for n in ("h_wp", "h_void", "l_wp", "l_void")},
+                job_ok=bundle is not None,
+                cost=cost_record(bundle, sta, host_wall_s=host,
+                                 n_cpu=self._n_cpu, dims=dims, elem_size=elem),
+                error=error or ("" if bundle is not None
+                                else "no results bundle"))
+            if bundle is not None and self._gs is not None:
+                try:
+                    rec.guards = evaluate_guards(bundle, self._gs)
+                except Exception as exc:
+                    rec.guards = {"guard_eval": (None, False)}
+                    rec.error = "safeguards: %s: %s" % (type(exc).__name__,
+                                                        exc)
+            self.records.append(rec)
+        return bundle
