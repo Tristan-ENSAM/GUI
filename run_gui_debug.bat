@@ -5,7 +5,7 @@ REM  Uses python.exe (console stays open) so any traceback is visible. If the
 REM  venv already has the core dependencies it just launches - no host Python,
 REM  no network needed. Optional (experimental) deps are installed best-effort.
 REM
-REM  A host Python 3.11+ is needed only to (re)create the venv. It is searched
+REM  A host Python 3.9+ is needed only to (re)create the venv. It is searched
 REM  in this order: %%GUI_HOST_PY%% (full path to python.exe), "py -3", PATH,
 REM  then the default Anaconda / Miniconda / python.org install folders.
 REM ============================================================================
@@ -18,6 +18,7 @@ set "VENV_DIR=%~dp0.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "REQ_MARKER=%VENV_DIR%\.requirements_installed"
 set "REQ_FILE=%~dp0requirements.txt"
+set "REQ_FILE_OLD=%~dp0requirements-py39.txt"
 set "REBUILD="
 
 REM --- Fast path: venv with the CORE deps already present -> just launch ------
@@ -55,8 +56,11 @@ if not exist "%VENV_PY%" (
 call :venv_conda_path
 
 REM --- Full install (fresh venv): requirements.txt --------------------------
+REM Python 3.9/3.10 cannot install the 3.11+ pins: use the fallback file.
 :install
-echo [INFO] Installing dependencies from requirements.txt...
+"%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+if errorlevel 1 set "REQ_FILE=%REQ_FILE_OLD%"
+echo [INFO] Installing dependencies from !REQ_FILE!...
 "%VENV_PY%" -m pip install --upgrade pip
 "%VENV_PY%" -m pip install -r "%REQ_FILE%"
 if !errorlevel! neq 0 (
@@ -109,7 +113,7 @@ if defined REBUILD (
     echo [WARN] Existing .venv is not runnable here ^(copied from another
     echo        PC / Python version^). It is kept until a host Python is found.
 )
-echo [ERROR] No usable .venv here, and no host Python 3.11+ found to create it.
+echo [ERROR] No usable .venv here, and no host Python 3.9+ found to create it.
 echo         Searched: GUI_HOST_PY, "py -3", PATH, and the default Anaconda,
 echo         Miniconda and python.org install folders.
 echo         Either install Python 3.11+ (python.org), or point this launcher
@@ -123,14 +127,14 @@ REM ============================================================================
 REM  Subroutines
 REM ============================================================================
 
-REM --- find_host: sets HOST_PY (quoted command) to a Python 3.11+ ------------
+REM --- find_host: sets HOST_PY (quoted command) to a Python 3.9+ -------------
 :find_host
 set "HOST_PY="
 if defined GUI_HOST_PY call :try_host "%GUI_HOST_PY:"=%"
 if not defined HOST_PY (
     where py >nul 2>&1
     if !errorlevel! == 0 (
-        py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+        py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
         if !errorlevel! == 0 set "HOST_PY=py -3"
     )
 )
@@ -150,10 +154,10 @@ for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*" "%ProgramFiles%\Python3
 )
 goto :eof
 
-REM --- try_host <python.exe>: accept it if it runs and is 3.11+ --------------
+REM --- try_host <python.exe>: accept it if it runs and is 3.9+ ---------------
 :try_host
 if not exist "%~1" goto :eof
-"%~1" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+"%~1" -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
 if errorlevel 1 goto :eof
 set HOST_PY="%~1"
 goto :eof
