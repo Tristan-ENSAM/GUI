@@ -1,0 +1,2 @@
+# Windows cmd parses LF-only batch files unreliably (goto/call labels).
+*.bat text eol=crlf
