@@ -155,10 +155,134 @@ def meta_path_for(npz_path) -> Path:
     return p.with_name(stem + ".meta.json")
 
 
+# ---------------------------------------------------------------------------
+# Reverberation in the force band, and the clean fallback force
+# ---------------------------------------------------------------------------
+# The domain reverberation f_rev = c_d / (2 L sqrt(ms)) (ModelConfig.
+# mass_scaling_bounds keeps it 3x above the CAMERA cutoff) can sit INSIDE the
+# force band: at ms = 1000 on a 0.4 x 0.4 mm domain it is ~176 kHz against a
+# 250 kHz force cutoff. The check measures how much of the force-band signal
+# lies above f_clean = min(force cutoff, f_rev / REVERB_MARGIN):
+#     e_rev = RMS(x_forceband - x_clean) / RMS(x_clean)
+# per component over the analysis window T, both series being zero-phase
+# (sosfiltfilt) order-2 Butterworths of the RAW forces. Passes when
+# e_rev <= REVERB_TOLERANCE = 1 % -- a choice, not an Abaqus figure.
+# Whatever the verdict, the clean series (zero-phase at f_clean) is written
+# next to the bundle: the runtime filter followed by a post-filter is the
+# two-stage approach Abaqus itself recommends in its .sta filter warning.
+REVERB_TOLERANCE = 0.01
+REVERB_MARGIN = 3.0          # same k as ModelConfig._REVERB_MARGIN
+DEFAULT_WINDOW = (0.3, 1.0)  # fractions of the step (Optimization default)
+
+
+def window_from_cfg(cfg) -> Tuple[float, float]:
+    """Analysis window T (fractions of the step) from cfg.optimization, the
+    same one the R_K safeguard uses; DEFAULT_WINDOW when unreadable."""
+    opt = getattr(cfg, "optimization", None)
+    try:
+        a = float(str(opt.window_start).replace(",", "."))
+        b = float(str(opt.window_end).replace(",", "."))
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_WINDOW
+    return (a, b) if 0.0 <= a < b <= 1.0 else DEFAULT_WINDOW
+
+
+def _zero_phase(xu: np.ndarray, dt: float, cutoff_hz: float,
+                order: int = OUTPUT_FILTER_ORDER) -> np.ndarray:
+    from scipy import signal
+    if cutoff_hz <= 0 or cutoff_hz >= 0.5 / dt:
+        return np.asarray(xu, dtype=float)
+    sos = signal.butter(order, cutoff_hz, btype="low", fs=1.0 / dt,
+                        output="sos")
+    return signal.sosfiltfilt(sos, xu)
+
+
+def _rev_inputs(model_cfg: dict) -> Tuple[float, float]:
+    """(f_rev at the run's mass scaling, force cutoff) from a meta
+    model_config (the to_params_dict layout)."""
+    from gui.core.model_config import reverberation_frequency_hz
+    step = model_cfg.get("step") or {}
+    ms = (float(step.get("mass_scaling_factor_eulerian") or 1.0)
+          if step.get("mass_scaling_enabled") else 1.0)
+    g = (((model_cfg.get("geometry") or {}).get("euler") or {})
+         .get("geometry") or {})
+    width = float(g.get("l_wp", 0.0)) + float(g.get("l_void", 0.0))
+    height = float(g.get("h_wp", 0.0)) + float(g.get("h_void", 0.0))
+    mat = (model_cfg.get("materials") or {}).get("euler") or {}
+    f_rev = reverberation_frequency_hz(mat, width, height, ms)
+    return f_rev, float(step.get("output_filter_cutoff_history_hz") or 0.0)
+
+
+def reverberation_check(arrays, model_cfg: dict,
+                        window: Tuple[float, float] = DEFAULT_WINDOW,
+                        tolerance: float = REVERB_TOLERANCE
+                        ) -> Tuple[dict, Dict[str, np.ndarray]]:
+    """Returns (result, clean) where clean maps forceclean__time/RF1/RF2 to
+    the zero-phase series at f_clean (empty when not computable)."""
+    keys = set(getattr(arrays, "files", None) or arrays.keys())
+    out = {"tolerance": tolerance, "window": list(window), "passed": None}
+    f_rev, f_force = _rev_inputs(model_cfg)
+    out.update({"f_rev_hz": f_rev, "force_cutoff_hz": f_force})
+    raw = ["filtercheck__%s__%s" % (RAW_TAG, c) for c in ("time",) + COMPONENTS]
+    if not all(k in keys for k in raw):
+        out["error"] = "raw force series missing from the bundle"
+        return out, {}
+    if f_rev <= 0 or f_force <= 0:
+        out["error"] = "f_rev or the force cutoff is not computable"
+        return out, {}
+    f_clean = min(f_force, f_rev / REVERB_MARGIN)
+    out["clean_cutoff_hz"] = f_clean
+    t_raw = np.asarray(arrays[raw[0]], dtype=float)
+    clean: Dict[str, np.ndarray] = {}
+    verdicts = []
+    for comp, key in zip(COMPONENTS, raw[1:]):
+        tu, xu, dt = _uniform(t_raw, np.asarray(arrays[key], dtype=float))
+        x_band = _zero_phase(xu, dt, f_force)
+        x_clean = _zero_phase(xu, dt, f_clean)
+        clean["forceclean__time"] = tu
+        clean["forceclean__" + comp] = x_clean
+        span = tu[-1] - tu[0]
+        sel = ((tu >= tu[0] + window[0] * span)
+               & (tu <= tu[0] + window[1] * span))
+        rms_clean = float(np.sqrt(np.mean(x_clean[sel] ** 2)))
+        rms_diff = float(np.sqrt(np.mean((x_band[sel] - x_clean[sel]) ** 2)))
+        e_rev = rms_diff / rms_clean if rms_clean > 0 else float("inf")
+        # Spectral peak of the raw force between f_clean and the force cutoff
+        seg = xu[sel] - np.mean(xu[sel])
+        spec = np.abs(np.fft.rfft(seg * np.hanning(seg.size)))
+        freq = np.fft.rfftfreq(seg.size, dt)
+        band = (freq >= f_clean) & (freq <= f_force)
+        peak = float(freq[band][np.argmax(spec[band])]) if band.any() else 0.0
+        out[comp] = {"e_rev": e_rev, "peak_hz": peak,
+                     "peak_over_f_rev": peak / f_rev if f_rev > 0 else 0.0}
+        verdicts.append(e_rev <= tolerance)
+    out["e_rev"] = max(out[c]["e_rev"] for c in COMPONENTS)
+    out["passed"] = bool(all(verdicts))
+    return out, clean
+
+
+def _append_to_npz(npz_path: Path, arrays: Dict[str, np.ndarray]) -> None:
+    """Add arrays to an existing .npz without rewriting it (an .npz is a zip
+    of .npy members). Keys already present are left untouched."""
+    import zipfile
+    with zipfile.ZipFile(npz_path, "a", compression=zipfile.ZIP_DEFLATED) as z:
+        names = set(z.namelist())
+        for key, value in arrays.items():
+            member = key + ".npy"
+            if member in names:
+                continue
+            with z.open(member, "w", force_zip64=True) as f:
+                np.lib.format.write_array(f, np.asarray(value))
+
+
 def check_bundle(npz_path, tolerance: float = DEFAULT_TOLERANCE,
-                 write_meta: bool = True) -> Optional[dict]:
-    """Check a results bundle; store the result under "filter_check" in its
-    .meta.json. None when the run did not request the verification."""
+                 write_meta: bool = True,
+                 window: Tuple[float, float] = DEFAULT_WINDOW
+                 ) -> Optional[dict]:
+    """Check a results bundle; store the result under "filter_check" (and
+    the reverberation check under "reverberation_check") in its .meta.json,
+    and append the clean forces (forceclean__*) to the .npz. None when the
+    run did not request the verification."""
     npz_path = Path(npz_path)
     if not npz_path.name.endswith(".results.npz") or not npz_path.exists():
         return None                 # e.g. a write-.inp-only run
@@ -173,8 +297,22 @@ def check_bundle(npz_path, tolerance: float = DEFAULT_TOLERANCE,
         return None
     with np.load(npz_path) as arrays:
         res = check_arrays(arrays, _cutoffs_from_meta(meta), tolerance)
+        try:
+            rev, clean = reverberation_check(
+                arrays, meta.get("model_config") or {}, window)
+        except Exception as e:                      # reported, not raised
+            rev, clean = {"passed": None, "error": str(e)}, {}
+    res["reverberation"] = rev
     if write_meta:
-        meta["filter_check"] = res
+        if clean:
+            _append_to_npz(npz_path, clean)
+        meta["filter_check"] = {k: v for k, v in res.items()
+                                if k != "reverberation"}
+        meta["reverberation_check"] = rev
+        if clean:
+            meta["forceclean"] = {"cutoff_hz": rev["clean_cutoff_hz"],
+                                  "zero_phase": True,
+                                  "order": OUTPUT_FILTER_ORDER}
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return res
 
@@ -200,4 +338,19 @@ def format_report(res: Optional[dict]) -> str:
                100.0 * r["rel_max_dev"], "OK" if r["passed"] else "FAILED"))
     if not res.get("filters") and not res.get("error"):
         lines.append("  no filtered force series in the bundle")
+    rev = res.get("reverberation")
+    if rev:
+        if rev.get("error"):
+            lines.append("  REVERB not evaluated: %s" % rev["error"])
+        else:
+            worst = max(COMPONENTS, key=lambda c: rev[c]["e_rev"])
+            lines.append(
+                "  REVERB (f_rev = %.4g kHz, clean cutoff %.4g kHz): content "
+                "above clean cutoff %.3g %% (%s, peak %.4g kHz = %.2f f_rev) "
+                "-> %s"
+                % (rev["f_rev_hz"] / 1e3, rev["clean_cutoff_hz"] / 1e3,
+                   100.0 * rev["e_rev"], worst, rev[worst]["peak_hz"] / 1e3,
+                   rev[worst]["peak_over_f_rev"],
+                   "OK" if rev["passed"]
+                   else "use forceclean__RF1/RF2 (clean forces in the bundle)"))
     return "\n".join(lines) + "\n"

@@ -55,6 +55,30 @@ def acquisition_from_cutoff(cutoff_hz: float, atten_db: float,
     return 2.0 * fc * (10.0 ** (a / 10.0) - 1.0) ** (1.0 / (2.0 * order))
 
 
+def reverberation_frequency_hz(material: dict, width_mm: float,
+                               height_mm: float,
+                               mass_scaling: float = 1.0) -> float:
+    """Lowest reverberation frequency of the Eulerian domain (reflecting
+    boundaries), f_rev = c_d / (2 L sqrt(ms)), with c_d the dilatational
+    wave speed sqrt((lambda + 2 mu)/rho) in mm-t-s (mm/s) and L the domain
+    DIAGONAL in mm. Mass scaling lowers it as 1/sqrt(ms). 0.0 when the
+    inputs are unusable."""
+    try:
+        E = float(material.get("E", 0.0))
+        nu = float(material.get("nu", 0.0))
+        rho = float(material.get("rho", 0.0))
+        L = math.hypot(float(width_mm), float(height_mm))
+        ms = max(1.0, float(mass_scaling))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if E <= 0 or rho <= 0 or L <= 0 or not (-1.0 < nu < 0.5):
+        return 0.0
+    lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    mu = E / (2.0 * (1.0 + nu))
+    c_d = math.sqrt((lam + 2.0 * mu) / rho)
+    return c_d / (2.0 * L * math.sqrt(ms))
+
+
 def discretize(dim: float, element_size: float) -> float:
     """Floor `dim` to the nearest multiple of `element_size`, Decimal-safe.
     Mirrors the function in cel_model.py so the GUI preview matches
@@ -953,20 +977,13 @@ class ModelConfig:
         out["ms_min"] = (self._FILTER_MIN_RATIO / (min(cutoffs) * dt0)) ** 2
         out["ms_nyquist"] = (self._FILTER_MAX_RATIO / (max(cutoffs) * dt0)) ** 2
 
-        E = float(self.euler_material.get("E", 0.0))
-        nu = float(self.euler_material.get("nu", 0.0))
-        rho = float(self.euler_material.get("rho", 0.0))
-        lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
-        mu = E / (2.0 * (1.0 + nu))
-        c_d = math.sqrt((lam + 2.0 * mu) / rho)          # mm/s
-
         g = self.euler_geometry
-        width = float(g.l_wp) + float(g.l_void)
-        height = float(g.h_wp) + float(g.h_void)
-        L = math.hypot(width, height)                     # mm, domain diagonal
-        if L > 0:
-            out["ms_freq"] = (c_d / (2.0 * L * self._REVERB_MARGIN
-                                     * filter_cutoff_hz)) ** 2
+        f_rev1 = reverberation_frequency_hz(
+            self.euler_material, float(g.l_wp) + float(g.l_void),
+            float(g.h_wp) + float(g.h_void))       # at ms = 1
+        if f_rev1 > 0:
+            out["ms_freq"] = (f_rev1 / (self._REVERB_MARGIN
+                                        * filter_cutoff_hz)) ** 2
         if guard_coefficient > 0:
             out["ms_guard"] = guard_max / guard_coefficient
 

@@ -44,13 +44,15 @@ def _section_header(title: str) -> QLabel:
     return lbl
 
 
-def _filter_check_report(out_path) -> str:
+def _filter_check_report(out_path, cfg=None) -> str:
     """Offline check of the runtime output filters for a finished run
     (empty when the run did not request it). Never raises: a failed check
     must not turn a good run into a failed one."""
-    from gui.core.filter_check import check_bundle, format_report
+    from gui.core.filter_check import (check_bundle, format_report,
+                                       window_from_cfg)
     try:
-        return format_report(check_bundle(out_path))
+        return format_report(check_bundle(out_path,
+                                          window=window_from_cfg(cfg)))
     except Exception as e:
         return "[FILTER CHECK] failed: %s\n" % e
 
@@ -916,7 +918,7 @@ class JobTab(QWidget):
         success = clean and bundle_ok
 
         if success:
-            self._append_output(_filter_check_report(out_path))
+            self._append_output(_filter_check_report(out_path, self.cfg))
             footer = "\n" + "=" * 72 + "\n[OK] Run finished\n"
         elif clean and not bundle_ok:
             what = ("input deck (.inp)" if pipe.get("write_inp_only")
