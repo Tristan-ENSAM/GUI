@@ -107,6 +107,19 @@ history__RF1_RP
 history__RF2_RP
 ```
 
+Filter verification (only when `step.output_filter_enabled` and
+`step.output_filter_verify` are on): the tool-RP forces at every solver
+increment, raw and through each runtime filter, each with its own time base.
+They are NOT listed in `history.variables`; the .json lists the tags found
+under `filter_check_series`, and the host adds the comparison result under
+`filter_check` (see `gui/core/filter_check.py`).
+
+```
+filtercheck__<TAG>__time                shape (n_increments,)          float64
+filtercheck__<TAG>__RF1 / __RF2         shape (n_increments,)          float64
+    TAG = RAW | SENSORBAND (force filter) | CAMERABAND (camera filter)
+```
+
 
 ## ROI filtering at extraction time
 

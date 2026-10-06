@@ -28,6 +28,7 @@ from PySide6.QtCore import QObject, Signal
 
 from gui.sensitivity import runner_core as rc
 from gui.core.logging_util import log_swallowed
+from gui.core.filter_check import check_bundle, format_report
 from gui.results.reader import ResultsBundle
 
 
@@ -423,6 +424,12 @@ class SensitivityRunWorker(QObject):
                           % (i + 1, rc_code))
             self.runDone.emit(i, False)
             return None
+        try:
+            report = format_report(check_bundle(out_path))
+            if report:
+                self.log.emit(report)
+        except Exception as e:
+            self.log.emit("[run %d] filter check failed: %s\n" % (i + 1, e))
         try:
             bundle = ResultsBundle.load(out_path)
         except Exception as e:

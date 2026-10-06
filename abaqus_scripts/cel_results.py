@@ -436,6 +436,31 @@ def _extract_history_rf(step, filter_suffix=None):
     return None, None, None
 
 
+def _extract_history_rf_exact(step, filter_suffix=None):
+    """Return (time, rf1, rf2) for EXACTLY one series: the raw one when
+    `filter_suffix` is None ('RF1'), else 'RF1_<suffix>'. No fallback, unlike
+    _extract_history_rf: the filter check must never compare a series with
+    itself. (None, None, None) when absent."""
+    def _key(outputs, base):
+        want = base if not filter_suffix else (base + "_" + filter_suffix)
+        for k in outputs.keys():
+            if k.upper() == want.upper():
+                return k
+        return None
+    for region_key, region in step.historyRegions.items():
+        outputs = region.historyOutputs
+        k_rf1 = _key(outputs, "RF1")
+        k_rf2 = _key(outputs, "RF2")
+        if k_rf1 is not None and k_rf2 is not None:
+            rf1_pairs = outputs[k_rf1].data
+            rf2_pairs = outputs[k_rf2].data
+            t = _np.asarray([q[0] for q in rf1_pairs], dtype=_np.float64)
+            rf1 = _np.asarray([q[1] for q in rf1_pairs], dtype=_np.float64)
+            rf2 = _np.asarray([q[1] for q in rf2_pairs], dtype=_np.float64)
+            return t, rf1, rf2
+    return None, None, None
+
+
 def _extract_history_energy(step):
     """Return (time, allke, allie) for the whole-model energies, or
     (None, None, None). ALLKE/ALLIE live in the whole-model / assembly history
@@ -661,6 +686,25 @@ def extract_results(job_name, model_cfg):
                 _vprint("    region %r: %s"
                         % (_rk, sorted(_rg.historyOutputs.keys())))
 
+        # Filter verification (gui/core/filter_check.py): the raw forces and
+        # each Abaqus-filtered version, under their own keys and time bases.
+        # Kept out of history.variables: they do not share history__time.
+        _fc_series = []
+        if _filter_on and bool(cfg_get(model_cfg, "step.output_filter_verify",
+                                       False)):
+            for _sfx, _tag in ((None, "RAW"),
+                               (_HISTORY_FILTER_SUFFIX, _HISTORY_FILTER_SUFFIX),
+                               (_FIELD_FILTER_SUFFIX, _FIELD_FILTER_SUFFIX)):
+                _ft, _f1, _f2 = _extract_history_rf_exact(_step, _sfx)
+                if _ft is None:
+                    _vprint("  filter check: no %s force series" % _tag)
+                    continue
+                _npz_payload["filtercheck__%s__time" % _tag] = _ft
+                _npz_payload["filtercheck__%s__RF1" % _tag] = _f1
+                _npz_payload["filtercheck__%s__RF2" % _tag] = _f2
+                _fc_series.append(_tag)
+                _vprint("  filter check: %s, %d samples" % (_tag, len(_ft)))
+
         _he_t, _allke, _allie = _extract_history_energy(_step)
         if _he_t is not None:
             if "history__time" not in _npz_payload:
@@ -711,6 +755,7 @@ def extract_results(job_name, model_cfg):
                 "n_samples": int(len(_h_t)) if _h_t is not None else 0,
                 "variables": _history_vars,
             },
+            "filter_check_series": _fc_series,
         }
 
         _out_npz  = job_name + ".results.npz"

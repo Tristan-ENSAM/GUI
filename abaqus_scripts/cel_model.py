@@ -129,16 +129,20 @@ def prepare_parameters(model_cfg, run_cfg):
     #     dividing by dt is already a moving average over that interval, which
     #     dominates the exposure blur. Cascade of both -> ~25.6 kHz at 60 kfps
     #     with a 5 us exposure.
-    #   * HISTORY -> forces are sampled far faster (500 kHz), so their runtime
-    #     filter only needs to prevent ALIASING at the output rate; the real
-    #     sensor bandwidth is applied afterwards in post-processing. Keeping
-    #     this cutoff HIGH matters: an IIR filter needs cutoff/(1/dt) > 1e-3,
-    #     so a low cutoff would force an unreachable mass-scaling factor.
+    #   * HISTORY -> the force acquisition (dynamometer).
+    # Both cutoffs are derived in the GUI from an acquisition rate and an
+    # attenuation at its Nyquist frequency (StepCfg.sync_filter_cutoffs).
+    # Abaqus warns in the .sta when cutoff/(1/dt) < 1e-3 (possible filter
+    # instability) and does not filter at all above 0.5; the Step tab checks
+    # both against the mass-scaling factor.
     # -----------------------------------------------------------------------------
     filter_enabled = bool(cfg_get(model_cfg, "step.output_filter_enabled", False))
     filter_cutoff = float(cfg_get(model_cfg, "step.output_filter_cutoff_hz", 0.0))
     filter_cutoff_history = float(
         cfg_get(model_cfg, "step.output_filter_cutoff_history_hz", 0.0))
+    # Offline verification of the runtime filters (gui/core/filter_check.py):
+    # also write the forces through the CameraBand filter.
+    filter_verify = bool(cfg_get(model_cfg, "step.output_filter_verify", False))
 
     # -----------------------------------------------------------------------------
     # Mass scaling (Step tab > Mass scaling)
@@ -620,23 +624,42 @@ def create_step(model, RP, p):
 
     # ---- History output ---------------------------------------------------
     # RF on the tool RP = the cutting forces. Same two-request shape: the raw
-    # series always lands in the ODB, the filtered one is added on top. The
-    # filter only prevents ALIASING at the output rate; the real sensor
-    # bandwidth is applied afterwards in post-processing (a low runtime cutoff
-    # would demand an unreachable mass-scaling factor). Cost of keeping both:
-    # two extra scalar series.
+    # series always lands in the ODB (UNfiltered), the
+    # filtered one is added on top. Cost of keeping both: two extra scalar
+    # series. Several requests on the same region, filtered and unfiltered,
+    # coexist (checked on a 1-element Abaqus/Explicit 2022 deck).
+    #
+    # The filter verification needs the forces at EVERY solver increment, the
+    # rate at which Abaqus runs the filter. timeInterval=EVERY_TIME_INCREMENT
+    # does not give that: it is written as "time interval=1e-100" and a 2022
+    # CEL run with ~730 increments returned only 201 samples, so the offline
+    # filter saw a decimated signal and drifted by 3 %. frequency=1 (every
+    # increment, as on the 1-element deck) is used for the three force
+    # requests when the verification is on.
+    if p.get("filter_verify") and (fo_filter or ho_filter):
+        rf_sampling = {'frequency': 1}
+    else:
+        rf_sampling = {'timeInterval': EVERY_TIME_INCREMENT}
     model.HistoryOutputRequest(
         name='H-Output-1', createStepName='Cut',
-        region=RP, variables=('RF1', 'RF2',),
-        timeInterval=EVERY_TIME_INCREMENT, filter=ho_filter)
+        region=RP, variables=('RF1', 'RF2',), **rf_sampling)
         # numIntervals=ho_n_intervals)
 
     if ho_filter is not None:
         model.HistoryOutputRequest(
             name='H-Output-1-Filtered', createStepName='Cut',
-            region=RP, variables=('RF1', 'RF2',),
-            timeInterval=EVERY_TIME_INCREMENT, filter=ho_filter)
+            region=RP, variables=('RF1', 'RF2',), filter=ho_filter,
+            **rf_sampling)
             # numIntervals=ho_n_intervals, filter=ho_filter)
+
+    # Filter verification: the forces through the CAMERA filter too, so the
+    # host can compare BOTH runtime filters with the same Butterworth applied
+    # offline to the raw series above (gui/core/filter_check.py).
+    if fo_filter is not None and p.get("filter_verify"):
+        model.HistoryOutputRequest(
+            name='H-Output-1-CameraBand', createStepName='Cut',
+            region=RP, variables=('RF1', 'RF2',), filter=fo_filter,
+            **rf_sampling)
 
     # PRESELECT carries ALLKE/ALLIE, which the mass-scaling energy guard reads.
     # Deliberately NOT filtered: the guard must see the true energy balance,
