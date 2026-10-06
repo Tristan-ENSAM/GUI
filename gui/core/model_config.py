@@ -19,6 +19,42 @@ from gui.core.unit_system import UnitSystem
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# Order of the runtime Butterworth filters (cel_model writes order=2).
+OUTPUT_FILTER_ORDER = 2
+
+
+def butterworth_cutoff_hz(acq_hz: float, atten_db: float,
+                          order: int = OUTPUT_FILTER_ORDER) -> float:
+    """Cutoff of a Butterworth of `order` that attenuates by `atten_db` at the
+    Nyquist frequency of an acquisition sampled at `acq_hz`.
+
+        |H(f)|^2 = 1 / (1 + (f/fc)^(2N))   at f = acq/2:
+        fc = (acq/2) / (10^(A/10) - 1)^(1/(2N))
+
+    A = 3.01 dB puts the -3 dB point exactly on the acquisition Nyquist.
+    Returns 0.0 when the inputs are unusable."""
+    try:
+        acq, a = float(acq_hz), float(atten_db)
+    except (TypeError, ValueError):
+        return 0.0
+    if acq <= 0 or a <= 0 or order <= 0:
+        return 0.0
+    return 0.5 * acq / (10.0 ** (a / 10.0) - 1.0) ** (1.0 / (2.0 * order))
+
+
+def acquisition_from_cutoff(cutoff_hz: float, atten_db: float,
+                            order: int = OUTPUT_FILTER_ORDER) -> float:
+    """Inverse of `butterworth_cutoff_hz` (used to migrate profiles that only
+    carry a cutoff). Returns 0.0 when the inputs are unusable."""
+    try:
+        fc, a = float(cutoff_hz), float(atten_db)
+    except (TypeError, ValueError):
+        return 0.0
+    if fc <= 0 or a <= 0 or order <= 0:
+        return 0.0
+    return 2.0 * fc * (10.0 ** (a / 10.0) - 1.0) ** (1.0 / (2.0 * order))
+
+
 def discretize(dim: float, element_size: float) -> float:
     """Floor `dim` to the nearest multiple of `element_size`, Decimal-safe.
     Mirrors the function in cel_model.py so the GUI preview matches
@@ -152,20 +188,26 @@ class StepCfg:
     # *Mass Scaling card directly; we don't expose that here yet)
     # Runtime output filter (Butterworth, applied by Abaqus BEFORE writing to
     # the ODB, so it removes aliasing that no post-processing could undo).
-    # Cutoff in Hz: set it on the camera's integration bandwidth (-3 dB of the
-    # exposure boxcar = 0.443 / t_exposure).
     output_filter_enabled:       bool  = False
-    # FIELD cutoff: the DIC chain. Correlating two images separated by dt and
-    # dividing by dt is already a moving average over that interval, and it
-    # DOMINATES the exposure blur. Cascade of both -> ~25.6 kHz at 60 kfps with
-    # a 5 us exposure (the exposure alone would give 88.6 kHz).
-    output_filter_cutoff_hz:     float = 25600.0
-    # HISTORY cutoff: forces are sampled far faster (500 kHz), so this filter
-    # only has to prevent ALIASING at the output rate; the real sensor
-    # bandwidth is applied afterwards in post-processing. Keep it HIGH: an IIR
-    # filter needs cutoff/(1/dt) > 1e-3, so a low cutoff here would demand an
-    # unreachable mass-scaling factor.
-    output_filter_cutoff_history_hz: float = 139000.0
+    # Each filter is specified by the ACQUISITION it mimics: the sampling
+    # rate and the attenuation wanted at that rate's Nyquist frequency. The
+    # cutoff follows (butterworth_cutoff_hz) and is kept in the two
+    # `..._cutoff_...` fields below, which the generator reads.
+    # FIELD filter: the camera (DIC chain).
+    output_filter_camera_fps:     float = 60000.0
+    output_filter_camera_atten_db: float = 3.0
+    # HISTORY filter: the force acquisition (dynamometer).
+    output_filter_force_acq_hz:   float = 500000.0
+    output_filter_force_atten_db: float = 3.0
+    # Derived cutoffs (Hz) -- do not edit directly, see sync_filter_cutoffs().
+    # Abaqus warns in the .sta when cutoff/(1/dt) < 1e-3 (possible filter
+    # instability); mass_scaling_bounds() turns that into a lower bound.
+    output_filter_cutoff_hz:     float = 30035.6
+    output_filter_cutoff_history_hz: float = 250297.0
+    # When the filter is on, also write the CameraBand-filtered forces and
+    # compare both Abaqus-filtered force series with the same Butterworth
+    # applied offline to the raw forces (gui/core/filter_check.py).
+    output_filter_verify:        bool  = True
 
     mass_scaling_enabled:        bool  = False
     # ONE factor, applied to BOTH the Eulerian workpiece and the tool. They
@@ -173,6 +215,13 @@ class StepCfg:
     # legitimate reason to differ (and, when the tool factor was left at 1,
     # silently halved the intended scaling of the model's inertia).
     mass_scaling_factor:         float = 1.0
+
+    def sync_filter_cutoffs(self) -> None:
+        """Recompute both cutoffs from the acquisition rates and attenuations."""
+        self.output_filter_cutoff_hz = butterworth_cutoff_hz(
+            self.output_filter_camera_fps, self.output_filter_camera_atten_db)
+        self.output_filter_cutoff_history_hz = butterworth_cutoff_hz(
+            self.output_filter_force_acq_hz, self.output_filter_force_atten_db)
 
 
 @dataclass
@@ -624,6 +673,21 @@ class ModelConfig:
             # the OutputCfg instance with a raw dict).
             scalar_data = {k: v for k, v in step_data.items() if k != "output"}
             _apply(cfg.step, scalar_data)
+            # Migration: profiles from before the acquisition/attenuation
+            # inputs only carry the cutoffs. Back-compute the acquisition
+            # rate at the default attenuation so the cutoff is preserved.
+            s = cfg.step
+            if ("output_filter_camera_fps" not in step_data
+                    and "output_filter_cutoff_hz" in step_data):
+                s.output_filter_camera_fps = acquisition_from_cutoff(
+                    step_data["output_filter_cutoff_hz"],
+                    s.output_filter_camera_atten_db)
+            if ("output_filter_force_acq_hz" not in step_data
+                    and "output_filter_cutoff_history_hz" in step_data):
+                s.output_filter_force_acq_hz = acquisition_from_cutoff(
+                    step_data["output_filter_cutoff_history_hz"],
+                    s.output_filter_force_atten_db)
+            s.sync_filter_cutoffs()
             output_data = step_data.get("output")
             if output_data is not None:
                 # Migration: `ho_time_interval` (float, seconds) was
@@ -797,8 +861,17 @@ class ModelConfig:
     # runs, not taken from the documentation: it holds for cubic hexes and
     # should be re-checked on strongly distorted elements.
     _HEX_CHAR_LENGTH_DIVISOR = 3.0 ** 0.5
-    # Abaqus refuses a filter whose cutoff/sampling ratio falls below this.
+    # Below this cutoff/sampling ratio Abaqus/Explicit prints a .sta WARNING
+    # ("The cutoff frequency used with the filter ... is too low ... It is
+    # recommended that the ratio of cutoff frequency to sampling frequency
+    # (which is 1/time increment) be greater than 1e-3 in order to avoid
+    # possible instabilities in filters"). The run goes on and the filter is
+    # applied; the ratio is checked once, with the initial increment.
     _FILTER_MIN_RATIO = 1.0e-3
+    # Above this ratio (cutoff above half the sampling frequency) Abaqus does
+    # not filter at all, silently (Analysis Guide, "Filtering Output and
+    # Operating on Output in Abaqus/Explicit").
+    _FILTER_MAX_RATIO = 0.5
     # Reverberation must stay this many times ABOVE the filter cutoff, so the
     # (2nd-order Butterworth) filter still attenuates it strongly. k = 3 is a
     # deliberate compromise: k = 1 would leave the artefact at the -3 dB point.
@@ -835,18 +908,26 @@ class ModelConfig:
 
     def mass_scaling_bounds(self, filter_cutoff_hz: float,
                             guard_coefficient: float = 1.609e-6,
-                            guard_max: float = 0.01) -> dict:
+                            guard_max: float = 0.01,
+                            history_cutoff_hz: float = 0.0) -> dict:
         """Admissible mass-scaling window, derived analytically.
 
-        LOWER bound - numerical validity of the runtime output filter. The
-        Butterworth is an IIR filter running at the SOLVER increment; Abaqus
-        rejects a normalized cutoff below 1e-3, and mass scaling raises the
-        increment as sqrt(ms):
-            ms > (1e-3 / (fc * dt0))^2
+        `filter_cutoff_hz` is the field (camera) cutoff; `history_cutoff_hz`
+        the optional history (force) cutoff. Both Butterworth filters run at
+        the SOLVER increment, which mass scaling raises as sqrt(ms).
+
+        LOWER bound - numerical validity of the runtime output filters.
+        Abaqus warns in the .sta that a cutoff/sampling ratio below 1e-3 may
+        make the filter unstable; the LOWEST cutoff sets the bound:
+            ms > (1e-3 / (fc_min * dt0))^2
+
+        UPPER bound 0 - above half the sampling frequency Abaqus silently does
+        not filter; the HIGHEST cutoff sets the bound:
+            ms < (0.5 / (fc_max * dt0))^2
 
         UPPER bound 1 - the domain reverberation (an artefact of reflecting
         boundaries) is lowered as 1/sqrt(ms). Scaled too far, it drops INTO
-        the band the filter is supposed to protect, defeating the filter:
+        the band the field filter is supposed to protect, defeating it:
             ms < (c_d / (2 * L * k * fc))^2
         L is taken as the DIAGONAL of the Eulerian domain.
 
@@ -857,16 +938,20 @@ class ModelConfig:
         on the mesh through ALLIE); the default is from one 5 um run and is
         only indicative.
 
-        Returns a dict with the three bounds, the retained window and whether
-        it is empty. Values are 0.0/None when the inputs are unusable."""
+        Returns a dict with the bounds, the retained window and whether it is
+        empty. Values are 0.0/None when the inputs are unusable."""
         out = {"dt0": 0.0, "ms_min": None, "ms_freq": None, "ms_guard": None,
-               "ms_max": None, "empty": True, "limiting": ""}
+               "ms_nyquist": None, "ms_max": None, "empty": True,
+               "limiting": ""}
         dt0 = self.initial_stable_dt()
+        cutoffs = [float(f) for f in (filter_cutoff_hz, history_cutoff_hz)
+                   if f and float(f) > 0]
         if dt0 <= 0 or filter_cutoff_hz <= 0:
             return out
         out["dt0"] = dt0
         # dt0 is in seconds; cutoff in Hz -> the product is dimensionless.
-        out["ms_min"] = (self._FILTER_MIN_RATIO / (filter_cutoff_hz * dt0)) ** 2
+        out["ms_min"] = (self._FILTER_MIN_RATIO / (min(cutoffs) * dt0)) ** 2
+        out["ms_nyquist"] = (self._FILTER_MAX_RATIO / (max(cutoffs) * dt0)) ** 2
 
         E = float(self.euler_material.get("E", 0.0))
         nu = float(self.euler_material.get("nu", 0.0))
@@ -885,14 +970,23 @@ class ModelConfig:
         if guard_coefficient > 0:
             out["ms_guard"] = guard_max / guard_coefficient
 
-        highs = [v for v in (out["ms_freq"], out["ms_guard"]) if v is not None]
+        labels = (("reverberation", out["ms_freq"]),
+                  ("energy guard", out["ms_guard"]),
+                  ("filter Nyquist", out["ms_nyquist"]))
+        highs = [(v, name) for name, v in labels if v is not None]
         if highs:
-            out["ms_max"] = min(highs)
-            out["limiting"] = ("reverberation"
-                               if out["ms_max"] == out["ms_freq"]
-                               else "energy guard")
+            out["ms_max"], out["limiting"] = min(highs)
             out["empty"] = out["ms_max"] <= out["ms_min"]
         return out
+
+    def filter_ratio(self, cutoff_hz: float, mass_scaling: float = 1.0
+                     ) -> float:
+        """Normalised cutoff fc * dt that Abaqus checks at the start of the
+        step: dt = dt0 * sqrt(ms). 0.0 when not computable."""
+        dt0 = self.initial_stable_dt()
+        if dt0 <= 0 or not cutoff_hz or cutoff_hz <= 0:
+            return 0.0
+        return float(cutoff_hz) * dt0 * math.sqrt(max(1.0, float(mass_scaling)))
 
     def stable_dt_estimate(self) -> float:
         """Courant-style explicit stable time increment for the workpiece:

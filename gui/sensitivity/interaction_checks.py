@@ -236,13 +236,21 @@ def mass_scaling_window_check(cfg, h_star: float, d_star: DomainDims
         res.warnings.append("without the output filter the ODB velocity "
                             "fields are not anti-aliased")
         return res
-    b = c.mass_scaling_bounds(float(step.output_filter_cutoff_hz))
+    b = c.mass_scaling_bounds(
+        float(step.output_filter_cutoff_hz),
+        history_cutoff_hz=float(
+            getattr(step, "output_filter_cutoff_history_hz", 0.0) or 0.0))
     res.details.update({k: b.get(k) for k in
-                        ("ms_min", "ms_freq", "ms_guard", "dt0")})
+                        ("ms_min", "ms_freq", "ms_guard", "ms_nyquist",
+                         "dt0")})
     if b.get("ms_min") is None:
         res.conclusion = "not evaluable: window not computable"
         return res
     res.passed = bool(f >= b["ms_min"])
+    if b.get("ms_nyquist") is not None and f > b["ms_nyquist"]:
+        res.warnings.append("f = %.6g above the filter Nyquist bound %.6g: "
+                            "Abaqus does not filter at all above fc*dt = 0.5"
+                            % (f, b["ms_nyquist"]))
     if b.get("ms_freq") is not None and f > b["ms_freq"]:
         res.warnings.append("f = %.6g above the reverberation bound %.6g "
                             "(warning only, same criterion as the diagonal "

@@ -44,6 +44,17 @@ def _section_header(title: str) -> QLabel:
     return lbl
 
 
+def _filter_check_report(out_path) -> str:
+    """Offline check of the runtime output filters for a finished run
+    (empty when the run did not request it). Never raises: a failed check
+    must not turn a good run into a failed one."""
+    from gui.core.filter_check import check_bundle, format_report
+    try:
+        return format_report(check_bundle(out_path))
+    except Exception as e:
+        return "[FILTER CHECK] failed: %s\n" % e
+
+
 
 def _existing_job_files(workdir, job_name):
     """Files of `job_name` already sitting in `workdir`.
@@ -905,6 +916,7 @@ class JobTab(QWidget):
         success = clean and bundle_ok
 
         if success:
+            self._append_output(_filter_check_report(out_path))
             footer = "\n" + "=" * 72 + "\n[OK] Run finished\n"
         elif clean and not bundle_ok:
             what = ("input deck (.inp)" if pipe.get("write_inp_only")
