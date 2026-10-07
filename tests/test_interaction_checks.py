@@ -104,9 +104,9 @@ class TestMeshDomain:
                   0.02: {"TEMP": 104.0}},
                  {"TEMP": QuantityGci(100.0, 2.0, 99.67, 0.004, 0.01, 1.0,
                                       True, True)}, rec=0.01)
-        c = mesh_domain_check(g, 0.01, {"TEMP": 0.02})
+        c = mesh_domain_check(g, 0.01, {"TEMP": 2.0})       # eps_T = 2 K
         assert c.passed is True
-        assert c.e_max == pytest.approx(abs(101 - 99.67) / 99.67 / 0.02)
+        assert c.e_max == pytest.approx(abs(101 - 99.67) / 2.0)
 
     def test_unreliable_uses_finest(self):
         g = _gci([0.005, 0.01, 0.02],
@@ -114,13 +114,23 @@ class TestMeshDomain:
                   0.02: {"Fc": 81.0}},
                  {"Fc": QuantityGci(80.0, float("nan"), float("nan"), 0, 0,
                                     float("nan"), False, False)})
-        c = mesh_domain_check(g, 0.02, {"Fc": 0.02})
+        c = mesh_domain_check(g, 0.02, {"Fc": 2.0})         # N/mm
         assert c.passed is True
-        assert c.e_max == pytest.approx(1.0 / 80.0 / 0.02)
+        assert c.e_max == pytest.approx(1.0 / 2.0)
+
+    def test_reference_close_to_zero_is_evaluable(self):
+        # a mean velocity ~ 0 made the old relative criterion blow up
+        g = _gci([0.005, 0.01, 0.02],
+                 {0.005: {"V2": 0.0}, 0.01: {"V2": 3.0}, 0.02: {"V2": 12.0}},
+                 {"V2": QuantityGci(0.0, 2.0, -1.0, 0.0, 0.0, 1.0,
+                                    True, True)})
+        c = mesh_domain_check(g, 0.01, {"V2": 10.0})        # mm/s
+        assert c.passed is True
+        assert c.e_max == pytest.approx(0.4)
 
     def test_h_star_not_in_plan(self):
         g = _gci([0.005, 0.01, 0.02], {}, {})
-        c = mesh_domain_check(g, 0.0075, {"TEMP": 0.02})
+        c = mesh_domain_check(g, 0.0075, {"TEMP": 2.0})
         assert c.passed is None and "not in the GCI plan" in c.conclusion
 
     def test_outside_tolerance_and_safeguards(self):
@@ -129,9 +139,9 @@ class TestMeshDomain:
                   0.02: {"TEMP": 130.0}},
                  {"TEMP": QuantityGci(100.0, 1.0, 90.0, 0.1, 0.2, 1.0,
                                       True, True)})
-        assert mesh_domain_check(g, 0.01, {"TEMP": 0.02}).passed is False
+        assert mesh_domain_check(g, 0.01, {"TEMP": 10.0}).passed is False
         bad = [SimpleNamespace(guards_ok=False)]
-        c = mesh_domain_check(g, 0.005, {"TEMP": 0.5}, bad)
+        c = mesh_domain_check(g, 0.005, {"TEMP": 50.0}, bad)
         assert c.passed is False and c.safeguards_ok is False
 
     def test_no_result(self):
@@ -209,7 +219,7 @@ class TestRunAll:
             _runner(log), cfg, study, h_star=0.01,
             gci_plan={"zoi": _ZOI, "grid_step": 0.01,
                       "finest_elem_size": 0.01, "ratio": 2.0, "n_meshes": 3},
-            gci_tolerances={"TEMP": 0.02},
+            gci_tolerances={"TEMP": 1.0},
             gci_runner_factory=lambda rb: RecordingRunner(rb, n_cpu=2),
             progress_cb=events.append)
         assert seen["dims"] == study.final
@@ -232,7 +242,7 @@ class TestRunAll:
         cfg.step.output_filter_enabled = False
         out = run_interaction_checks(
             _runner(), cfg, study, h_star=0.01, gci_plan={},
-            gci_tolerances={"TEMP": 0.02})
+            gci_tolerances={"TEMP": 1.0})
         assert out.status == "incomplete"
         assert out.checks[-1].passed is None
         assert any("GCI on D*" in w for w in study.warnings)
@@ -319,10 +329,10 @@ class TestRecoveryRules:
                                          True, True)}, rec=rec)
 
     def test_mesh_failure_adopts_the_size_recommended_on_d_star(self):
-        c = mesh_domain_check(self._failing(0.005), 0.01, {"TEMP": 0.02})
+        c = mesh_domain_check(self._failing(0.005), 0.01, {"TEMP": 10.0})
         assert c.passed is False
         assert "adopt h = 0.005" in c.details["action"]
 
     def test_mesh_failure_without_recommendation_extends_the_plan(self):
-        c = mesh_domain_check(self._failing(None), 0.01, {"TEMP": 0.02})
+        c = mesh_domain_check(self._failing(None), 0.01, {"TEMP": 10.0})
         assert "one level finer" in c.details["action"]

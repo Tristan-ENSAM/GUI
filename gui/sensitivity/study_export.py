@@ -251,7 +251,7 @@ def gci_rows(gci_result, tolerances: Optional[Dict[str, float]] = None
                      "GCI_coarse": _num(g.gci_coarse),
                      "asymptotic_ratio": _num(g.asymptotic_ratio),
                      "monotonic": g.monotonic, "reliable": g.reliable,
-                     "tolerance": _num((tolerances or {}).get(q))})
+                     "eps_q_abs": _num((tolerances or {}).get(q))})
     return rows
 
 

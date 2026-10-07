@@ -65,13 +65,11 @@ class TestTabPersistence:
         tab = OptimizationTab(ModelConfig())
         tab.le_gci_finest.setText("0.008")
         tab.le_zoi["xmin"].setText("-0.06")
-        tab._dj_eps["EVF"].setText("0.05")
         tab.sp_gci_n.setValue(5)
         tab.sp_margin.setValue(3)
         o = tab.cfg.optimization
         assert o.gci_finest == "0.008"
         assert o.zoi["xmin"] == "-0.06"
-        assert o.sizing_tol["EVF"] == "0.05"
         assert o.gci_n_meshes == 5
         assert o.margin_elems == 3
 
@@ -88,7 +86,6 @@ class TestTabPersistence:
         tab = OptimizationTab(cfg)
         assert tab.le_gci_finest.text() == "0.009"
         assert tab.le_zoi["xmin"].text() == "-0.07"
-        assert tab._dj_eps["EVF"].text() == "0.04"
         assert tab.sp_gci_n.value() == 6
         assert tab.sp_margin.value() == 4
 

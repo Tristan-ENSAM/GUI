@@ -151,6 +151,11 @@ _BASE = {"EVF": 0.8, "TEMP": 300.0, "V1": 10.0, "V2": -5.0,
          "Fc": 100.0, "Ff": 50.0}
 
 
+def _abs(rel):
+    """Absolute tolerances eps_q equal to `rel` times |B_q| (units of q)."""
+    return {q: rel * abs(b) for q, b in _BASE.items()}
+
+
 @pytest.fixture(autouse=True)
 def _patch_scalars(monkeypatch):
     def fake_scalars(bundle, zoi, grid_step, field_vars, **kw):
@@ -172,7 +177,7 @@ class TestDriver:
         res = run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
             finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-            tolerances={q: 0.005 for q in _BASE})
+            tolerances=_abs(0.005))
         h1 = min(res.sizes)
         assert res.scalars[h1]["Fc"] == pytest.approx(
             _BASE["Fc"] * (1.0 + 10.0 * h1 * h1), rel=1e-9)
@@ -184,7 +189,7 @@ class TestDriver:
         res = run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
             finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-            tolerances={q: 0.005 for q in _BASE})
+            tolerances=_abs(0.005))
         assert res.n_runs == 3
         assert res.in_asymptotic_range
         for q in ("TEMP", "V1", "Fc"):
@@ -197,15 +202,44 @@ class TestDriver:
         res = run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
             finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-            tolerances={q: 0.005 for q in _BASE})
+            tolerances=_abs(0.005))
         assert res.recommended_size == pytest.approx(0.02)
+
+    def test_selection_is_absolute_and_independent_of_the_t_origin(
+            self, monkeypatch):
+        # TEMP alone drifts by 10 h^2 * 300 K: 1.2 K at h = 0.02. With
+        # eps_T = 1.5 K the coarsest mesh passes, whatever the temperature
+        # origin (K or degC): only the difference |f(h) - f_ref| counts.
+        def fake(bundle, zoi, gs, field_vars, offset=0.0, **kw):
+            h = bundle.elem_size
+            out = {q: _BASE[q] for q in field_vars}
+            out["TEMP"] = offset + 300.0 * (1.0 + 10.0 * h * h)
+            out.update(Fc=_BASE["Fc"] * h, Ff=_BASE["Ff"] * h)
+            return out
+        recs = []
+        for offset in (0.0, -273.15):
+            monkeypatch.setattr(mg, "zoi_scalars",
+                                lambda *a, _o=offset, **k: fake(*a, _o, **k))
+            res = run_mesh_gci(
+                _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+                finest_elem_size=0.005, ratio=2.0, n_meshes=3,
+                tolerances={"TEMP": 1.5})
+            recs.append(res.recommended_size)
+        assert recs == [pytest.approx(0.02), pytest.approx(0.02)]
+
+    def test_no_tolerance_recommends_nothing(self):
+        res = run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.005, ratio=2.0, n_meshes=3)
+        assert res.recommended_size is None
+        assert res.per_quantity["TEMP"].p == pytest.approx(2.0, rel=1e-6)
 
     def test_tighter_tolerance_recommends_finer(self):
         # dev(0.02)=0.004 > 0.002 -> excluded; dev(0.01)=0.001 < 0.002 -> 0.01
         res = run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
             finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-            tolerances={q: 0.002 for q in _BASE})
+            tolerances=_abs(0.002))
         assert res.recommended_size == pytest.approx(0.01)
 
     def test_min_elem_size_floor(self):
@@ -293,7 +327,8 @@ class TestReliabilityGuard:
             (lambda cfg: _Bundle(cfg.elem_size)), _Cfg(),
             (-0.04, 0.04, -0.04, 0.04), DomainDims(0.255, 0.055, 0.255, 0.055),
             grid_step=0.01, finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-            tolerances={q: 0.05 for q in ("EVF", "TEMP", "V1", "V2", "Fc", "Ff")})
+            tolerances=dict({q: 0.05 * abs(v) for q, v in base.items()},
+                            Fc=1.0, Ff=1.0))
         # Fc/Ff are flat -> unreliable -> reference = finest -> deviation 0 ->
         # they no longer block; the fields deviate < 5% -> a mesh is recommended.
         assert res.per_quantity["Fc"].reliable is False
