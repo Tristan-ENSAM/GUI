@@ -86,8 +86,9 @@ class PreferencesDialog(QDialog):
 
         note = QLabel(
             "Paths are stored in your user profile, not in the project file.\n"
-            "Future versions will support remote execution on an HPC cluster\n"
-            "where the local Abaqus paths aren't applicable."
+            "In remote mode Abaqus runs on the compute PC, with the paths set\n"
+            "in the Preferences of the GUI on that PC; the script path above\n"
+            "is still used here to check both PCs have the same scripts."
         )
         note.setStyleSheet("color: #888; font-style: italic;")
         note.setWordWrap(True)
@@ -99,6 +100,21 @@ class PreferencesDialog(QDialog):
         self.fld_workdir = _PathField(prefs.default_workdir, "dir")
         f_wd.addRow("Default workdir:", self.fld_workdir)
         outer.addWidget(g_wd)
+
+        # ---- Execution group ----
+        g_exec = QGroupBox("Execution")
+        f_exec = QFormLayout(g_exec)
+        self.cb_remote = QCheckBox(
+            "Run Abaqus on the compute PC (remote agent through a shared folder)")
+        self.cb_remote.setChecked(prefs.execution_mode == "remote")
+        self.cb_remote.setToolTip(
+            "Runs are queued in the folder below and executed by the agent\n"
+            "started on the compute PC (run_remote_agent.bat). The working\n"
+            "directory must then be on the same shared drive.")
+        f_exec.addRow(self.cb_remote)
+        self.fld_queue = _PathField(prefs.remote_queue_dir, "dir")
+        f_exec.addRow("Queue folder (shared drive):", self.fld_queue)
+        outer.addWidget(g_exec)
 
         # ---- Display group ----
         g_disp = QGroupBox("Display")
@@ -131,4 +147,6 @@ class PreferencesDialog(QDialog):
             abaqus_script         = self.fld_script.value(),
             default_workdir       = self.fld_workdir.value(),
             temp_unit_default     = "K" if self.cb_kelvin_default.isChecked() else "C",
+            execution_mode        = "remote" if self.cb_remote.isChecked() else "local",
+            remote_queue_dir      = self.fld_queue.value(),
         )

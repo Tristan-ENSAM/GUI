@@ -237,8 +237,11 @@ class SensitivityRunWorker(QObject):
                  cpus: int = 1, warmup_frac: float = 0.0,
                  job_prefix: str = "sens", keep_bundles: bool = False,
                  field_vars=None, field_metric: str = "ssd",
-                 solve_fn=None, parent=None):
+                 solve_fn=None, remote_prefs=None, parent=None):
         super().__init__(parent)
+        # Preferences in remote mode (gui.core.remote_exec), else None: the
+        # runs then go to the agent of the compute PC instead of a Popen.
+        self._remote_prefs = remote_prefs
         self._plan = plan
         self._plan_kind = plan_kind
         self._qoi_specs = qoi_specs
@@ -305,6 +308,10 @@ class SensitivityRunWorker(QObject):
         the run loop may have moved on and cleared the attribute, and killing
         the NEXT run's process would be worse than killing nothing.
         """
+        if proc is not None and hasattr(proc, "cancel"):
+            # Remote run: the agent does `abaqus terminate` + tree kill there.
+            proc.cancel()
+            return
         if abaqus_terminate_job(self._abaqus_cmd, job, self._workdir):
             if proc is not None:
                 try:
@@ -370,10 +377,17 @@ class SensitivityRunWorker(QObject):
         # `abaqus terminate` even if the click lands during start-up.
         self._current_job = job_name
         try:
-            self._proc = subprocess.Popen(
-                args, cwd=str(self._workdir),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                **_popen_group_kwargs())
+            if self._remote_prefs is not None:
+                from gui.core.remote_exec import submit_remote
+                self.log.emit("[run %d] submitted to the remote agent\n"
+                              % (i + 1))
+                self._proc = submit_remote(self._remote_prefs, self._workdir,
+                                           model_params, run_params)
+            else:
+                self._proc = subprocess.Popen(
+                    args, cwd=str(self._workdir),
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    **_popen_group_kwargs())
         except Exception as e:
             self.log.emit("[run %d] failed to start Abaqus: %s\n" % (i + 1, e))
             self._current_job = None
@@ -403,6 +417,10 @@ class SensitivityRunWorker(QObject):
                 break
             offset = self._emit_log_tail(log_path, offset)
             time.sleep(0.4)
+        if self._cancel and hasattr(self._proc, "cancel"):
+            # Remote run: a Cancel that landed during the submission found no
+            # process to stop; stop it now (no-op once it has ended).
+            self._proc.cancel()
         # Final drain: the lines written since the last tick are the ones that
         # explain how the run ended.
         self._emit_log_tail(log_path, offset)

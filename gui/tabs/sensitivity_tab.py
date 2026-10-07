@@ -42,6 +42,7 @@ from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
 from gui.sensitivity import map_export as mx
 from gui.sensitivity.run_worker import SensitivityRunWorker
+from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
@@ -899,11 +900,7 @@ class SensitivityTab(QWidget):
             self._warn("No preferences available (Abaqus command/script).")
             return
         from pathlib import Path
-        problems = []
-        if not Path(prefs.abaqus_cmd).exists():
-            problems.append("Abaqus command not found: %s" % prefs.abaqus_cmd)
-        if not Path(prefs.abaqus_script).exists():
-            problems.append("Script not found: %s" % prefs.abaqus_script)
+        problems = launch_problems(prefs, prefs.default_workdir)
         wd = Path(prefs.default_workdir)
         try:
             wd.mkdir(parents=True, exist_ok=True)
@@ -974,7 +971,8 @@ class SensitivityTab(QWidget):
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
             workdir=str(wd), cpus=cpus,
             warmup_frac=float(self.spin_warmup.value()),
-            job_prefix="sensitivity", field_vars=field_vars)
+            job_prefix="sensitivity", field_vars=field_vars,
+            remote_prefs=prefs if is_remote(prefs) else None)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

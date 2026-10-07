@@ -64,6 +64,8 @@ from gui.sensitivity.run_record import (
 from gui.sensitivity.run_worker import (
     abaqus_terminate_job, build_abaqus_args, kill_process_tree_by_pid,
     script_log_path)
+from gui.core.remote_exec import (
+    RemoteProcess, is_remote, launch_problems, submit_remote)
 from gui.results.reader import ResultsBundle
 from gui.widgets.geometry_preview import GeometryPreview
 
@@ -803,9 +805,16 @@ class OptimizationTab(QWidget):
             self._current_abaqus_cmd = prefs.abaqus_cmd
             self._current_run_dir = run_dir
             try:
-                proc = subprocess.Popen(
-                    args, cwd=str(run_dir),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                if is_remote(prefs):
+                    # Same contract as the Popen: poll/stdout/returncode. The
+                    # agent mirrors .sta/.gui.log/.results.npz into run_dir.
+                    self._log_ui("[%s] submitted to the remote agent\n" % job)
+                    proc = submit_remote(prefs, run_dir, cfg.to_params_dict(),
+                                         {"cpus": cpus, "job_name": job})
+                else:
+                    proc = subprocess.Popen(
+                        args, cwd=str(run_dir),
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except Exception as e:
                 self._log_ui("failed to start Abaqus: %s\n" % e)
                 self._current_job = None
@@ -825,6 +834,10 @@ class OptimizationTab(QWidget):
                     break
                 offset = self._emit_log_tail(log_path, offset)
                 time.sleep(0.4)
+            if self._cancel_evt.is_set() and isinstance(proc, RemoteProcess):
+                # A Cancel that landed while the run was being submitted saw
+                # no process to stop; stop it now (no-op if already done).
+                proc.cancel()
             # The lines written since the last tick explain how the run ended.
             self._emit_log_tail(log_path, offset)
             # Whatever the launcher itself put on stdout (licence banner, a
@@ -973,11 +986,7 @@ class OptimizationTab(QWidget):
             QMessageBox.warning(self, "Preferences",
                                 "No preferences (Abaqus command/script).")
             return None
-        problems = []
-        if not Path(prefs.abaqus_cmd).exists():
-            problems.append("Abaqus command not found: %s" % prefs.abaqus_cmd)
-        if not Path(prefs.abaqus_script).exists():
-            problems.append("Script not found: %s" % prefs.abaqus_script)
+        problems = launch_problems(prefs, prefs.default_workdir)
         wd = Path(prefs.default_workdir)
         try:
             wd.mkdir(parents=True, exist_ok=True)
@@ -1884,6 +1893,11 @@ class OptimizationTab(QWidget):
         cmd, run_dir = self._current_abaqus_cmd, self._current_run_dir
         if not (job and cmd):
             return              # nothing started yet: the flag is enough
+        if isinstance(proc, RemoteProcess):
+            # The agent runs `abaqus terminate` (then the tree kill) itself.
+            self._log_ui("[CANCEL] asking the remote agent to stop job %s" % job)
+            run_async(proc.cancel, lambda _r: None, self)
+            return
         self._log_ui("[CANCEL] asking Abaqus to terminate job %s" % job)
         run_async(lambda: abaqus_terminate_job(cmd, job, run_dir),
                   lambda ok: self._after_terminate(bool(ok), proc), self)
