@@ -376,7 +376,9 @@ def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
                           else "E_max >= 1 (q_crit %s)" % res.q_crit))
     if not res.passed:
         res.details["action"] = ("redo the ms study at (h*, D*) and, if ms* "
-                                 "changes, the GCI and the domain study")
+                                 "changes, set it in the Step tab and redo "
+                                 "the domain study and the checks (the GCI "
+                                 "on D* revalidates h* at the new ms*)")
         res.warnings.append(res.details["action"])
     return res
 
