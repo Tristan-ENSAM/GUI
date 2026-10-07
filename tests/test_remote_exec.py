@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Remote execution through the shared-folder queue (gui.core.remote_exec).
+"""Remote execution through the shared-folder queue.
 
-The agent runs a stand-in for Abaqus (a small Python script that writes the
-files a real run leaves behind), so the whole protocol -- submit, claim, live
-mirror, copy-back, cancel, version check -- is exercised without Abaqus and
-without a second PC: the "shared drive" and the compute PC's local folder are
-two temporary directories."""
+Client: gui.core.remote_exec. Agent: gui.core.remote_agent, the standalone
+script the GUI copies into the queue folder and the compute PC runs with the
+Python bundled with Abaqus. A stand-in for abaqus.bat (a small Python script
+that writes the files a real run leaves behind) replaces Abaqus, and the
+"shared drive" and the compute PC's local folder are two temporary
+directories, so the whole protocol is exercised on one machine."""
 from __future__ import annotations
 
 import io
+import os
+import stat
+import subprocess
 import sys
 import textwrap
 import threading
@@ -17,20 +21,30 @@ from pathlib import Path
 
 import pytest
 
+from gui.core import remote_agent as ra
 from gui.core import remote_exec as rx
 from gui.core.preferences import Preferences
 
-FAKE_ABAQUS = textwrap.dedent('''
-    import sys, time
-    job, duration = sys.argv[1], float(sys.argv[2])
-    open(job + ".gui.log", "w").write("building model\\n")
+# Mimics `abaqus.bat cae noGUI=<run_simul.py> -- --model_cfg <repr>
+# --run_cfg <repr>` run in the job folder.
+FAKE_ABAQUS = textwrap.dedent('''\
+    #!%s
+    import ast, os, sys, time
+    a = sys.argv[1:]
+    if a and a[0] == "terminate":
+        sys.exit(1)
+    script = a[1].split("=", 1)[1]
+    assert os.path.isfile(script), script
+    model = ast.literal_eval(a[a.index("--model_cfg") + 1])
+    job = ast.literal_eval(a[a.index("--run_cfg") + 1])["job_name"]
+    open(job + ".gui.log", "w").write("building model with %%s\\n" %% script)
     open(job + ".sta", "w").write("STEP TOTAL\\n")
     open(job + ".odb", "wb").write(b"x" * 1000)
-    time.sleep(duration)
+    time.sleep(float(model.get("duration", 0.3)))
     open(job + ".results.npz", "wb").write(b"npz")
     open(job + ".meta.json", "w").write("{}")
     print("licence banner")
-''')
+''') % sys.executable
 
 
 @pytest.fixture
@@ -38,25 +52,21 @@ def setup(tmp_path):
     scripts = tmp_path / "abaqus_scripts"
     scripts.mkdir()
     (scripts / "run_simul.py").write_text("# generator v1\n")
-    fake = tmp_path / "fake_abaqus.py"
+    (scripts / "cel_common.py").write_text("# helper\n")
+    fake = tmp_path / "abaqus"
     fake.write_text(FAKE_ABAQUS)
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     shared = tmp_path / "Z"
-    queue = shared / "queue"
-    return {"scripts": scripts, "fake": fake, "queue": queue,
-            "shared": shared, "local_root": tmp_path / "C_local"}
+    return {"scripts": scripts, "abaqus": str(fake), "queue": shared / "queue",
+            "shared": shared, "local_root": str(tmp_path / "C_local")}
 
 
-def _agent(setup, duration=0.3, **kw):
-    def build_args(cmd, script, model_params, run_params):
-        return [sys.executable, str(setup["fake"]), run_params["job_name"],
-                str(model_params.get("duration", duration))]
-    return rx.RemoteAgent(setup["queue"], "abaqus.bat",
-                          str(setup["scripts"] / "run_simul.py"),
-                          local_root=str(setup["local_root"]),
-                          build_args=build_args, out=io.StringIO(), **kw)
+def _agent(setup, **kw):
+    return ra.Agent(str(setup["queue"]), setup["abaqus"],
+                    local_root=setup["local_root"], out=io.StringIO(), **kw)
 
 
-def _run_agent(agent, stop):
+def _loop(agent, stop):
     while not stop.is_set():
         agent.step()
         time.sleep(0.05)
@@ -66,18 +76,20 @@ def _run_agent(agent, stop):
 def running_agent(setup):
     agent = _agent(setup)
     stop = threading.Event()
-    th = threading.Thread(target=_run_agent, args=(agent, stop), daemon=True)
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
     th.start()
     yield agent
     stop.set()
     th.join(timeout=5)
 
 
-def _submit(setup, job="job1", model=None, check_agent=False):
-    run_dir = setup["shared"] / "study"
-    return rx.RemoteProcess(setup["queue"], run_dir, model or {},
+def _submit(setup, job="job1", model=None, check_agent=False, sub="study"):
+    run_dir = setup["shared"] / sub
+    proc = rx.RemoteProcess(setup["queue"], run_dir, model or {},
                             {"cpus": 16, "job_name": job}, setup["scripts"],
-                            check_agent=check_agent), run_dir
+                            remote_abaqus_cmd=setup["abaqus"],
+                            check_agent=check_agent)
+    return proc, run_dir
 
 
 def test_round_trip_copies_results_back_and_keeps_odb_local(setup,
@@ -88,13 +100,27 @@ def test_round_trip_copies_results_back_and_keeps_odb_local(setup,
     for name in ("job1.meta.json", "job1.sta", "job1.gui.log"):
         assert (run_dir / name).is_file(), name
     assert not (run_dir / "job1.odb").exists()
-    local = rx.local_run_dir(setup["local_root"], run_dir)
+    local = Path(ra.local_run_dir(setup["local_root"], str(run_dir)))
     assert (local / "job1.odb").is_file()
     assert b"licence banner" in proc.stdout.read()
     assert proc.stdout.read() == b""
-    # The outcome file is consumed; nothing is left in the queue.
     for sub in ("pending", "running", "done", "cancel"):
         assert list((setup["queue"] / sub).iterdir()) == [], sub
+
+
+def test_the_agent_runs_the_scripts_copied_from_the_gui_pc(setup,
+                                                           running_agent):
+    proc, run_dir = _submit(setup)
+    assert proc.wait(timeout=30) == 0
+    staged = Path(rx.stage_scripts(setup["queue"], setup["scripts"]))
+    assert staged.parent == setup["queue"] / "scripts"
+    assert (staged / "cel_common.py").is_file()
+    assert str(staged / "run_simul.py") in (run_dir / "job1.gui.log").read_text()
+    # A new version of the generator goes to a new folder; the old one stays
+    # for runs already queued with it.
+    (setup["scripts"] / "run_simul.py").write_text("# generator v2\n")
+    staged2 = Path(rx.stage_scripts(setup["queue"], setup["scripts"]))
+    assert staged2 != staged and staged.is_dir()
 
 
 def test_live_mirror_of_sta_and_log_while_running(setup, running_agent):
@@ -103,7 +129,7 @@ def test_live_mirror_of_sta_and_log_while_running(setup, running_agent):
     while time.monotonic() < deadline and not (run_dir / "job1.sta").exists():
         time.sleep(0.1)
     assert (run_dir / "job1.sta").exists()
-    assert proc.poll() is None                  # still running
+    assert proc.poll() is None
     assert not (run_dir / "job1.results.npz").exists()
     assert proc.wait(timeout=30) == 0
 
@@ -113,18 +139,10 @@ def test_runs_execute_one_at_a_time_in_order(setup, running_agent):
     time.sleep(0.01)
     p2, run_dir = _submit(setup, job="b", model={"duration": 0.1})
     assert p2.wait(timeout=30) == 0
-    assert p1.returncode == 0 or p1.poll() == 0
-    a = rx.local_run_dir(setup["local_root"], run_dir)
-    assert (a / "a.results.npz").stat().st_mtime \
-        <= (a / "b.results.npz").stat().st_mtime
-
-
-def test_script_version_mismatch_is_refused(setup, running_agent):
-    (setup["scripts"] / "run_simul.py").write_text("# generator v2\n")
-    proc, run_dir = _submit(setup)
-    assert proc.wait(timeout=30) == 1
-    assert "scripts differ" in proc.error
-    assert not (run_dir / "job1.results.npz").exists()
+    assert p1.poll() == 0
+    local = Path(ra.local_run_dir(setup["local_root"], str(run_dir)))
+    assert (local / "a.results.npz").stat().st_mtime \
+        <= (local / "b.results.npz").stat().st_mtime
 
 
 def test_line_endings_do_not_change_the_fingerprint(tmp_path):
@@ -135,21 +153,32 @@ def test_line_endings_do_not_change_the_fingerprint(tmp_path):
     assert rx.scripts_fingerprint(a) == rx.scripts_fingerprint(b)
 
 
+def test_deploy_writes_the_agent_and_a_crlf_launcher(setup):
+    bat = rx.deploy_queue(setup["queue"], r"D:\SIMULIA\Commands\abaqus.bat")
+    assert bat == setup["queue"] / "start_agent.bat"
+    data = bat.read_bytes()
+    assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+    assert b'set "ABQ=D:\\SIMULIA\\Commands\\abaqus.bat"' in data
+    assert b'call "%ABQ%" python "%~dp0remote_agent.py"' in data
+    assert (setup["queue"] / "remote_agent.py").read_bytes() \
+        == rx.AGENT_SOURCE.read_bytes()
+
+
 def test_cancel_before_claim_withdraws_the_request(setup):
-    proc, _ = _submit(setup)                    # no agent running
+    proc, _ = _submit(setup)
     proc.cancel()
     assert proc.poll() == 1 and proc.cancelled
     assert list((setup["queue"] / "pending").iterdir()) == []
     assert list((setup["queue"] / "cancel").iterdir()) == []
 
 
-def test_cancel_while_running_terminates_then_reports(setup):
+def test_cancel_while_running_terminates_then_kills(setup):
     calls = []
-    agent = _agent(setup, terminate=lambda j: calls.append("terminate") or False,
-                   kill_tree=lambda j: (calls.append("kill"),
-                                        j["proc"].kill()))
+    agent = _agent(setup,
+                   terminate=lambda j: calls.append("terminate") or False,
+                   kill=lambda j: (calls.append("kill"), j["proc"].kill()))
     stop = threading.Event()
-    th = threading.Thread(target=_run_agent, args=(agent, stop), daemon=True)
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
     th.start()
     try:
         proc, _ = _submit(setup, model={"duration": 30.0})
@@ -158,8 +187,7 @@ def test_cancel_while_running_terminates_then_reports(setup):
             time.sleep(0.05)
         proc.cancel()
         proc.wait(timeout=20)
-        assert proc.cancelled
-        assert proc.returncode != 0
+        assert proc.cancelled and proc.returncode != 0
         assert calls == ["terminate", "kill"]
     finally:
         stop.set()
@@ -171,13 +199,13 @@ def test_cancel_by_job_name_for_the_job_tab_client(setup):
     other, _ = _submit(setup, job="x-Cutting_job")
     assert rx.request_cancel_by_job(setup["queue"], "Cutting_job")
     assert proc.wait(timeout=5) == 1 and proc.cancelled
-    assert other.poll() is None                 # different job untouched
+    assert other.poll() is None
 
 
 def test_agent_restart_fails_the_interrupted_run(setup):
     proc, _ = _submit(setup)
     pend = setup["queue"] / "pending" / (proc.id + ".json")
-    pend.rename(setup["queue"] / "running" / pend.name)  # claimed, agent died
+    pend.rename(setup["queue"] / "running" / pend.name)
     _agent(setup).recover()
     assert proc.wait(timeout=5) == 1
     assert "restarted" in proc.error
@@ -185,22 +213,18 @@ def test_agent_restart_fails_the_interrupted_run(setup):
 
 def test_submit_refuses_when_no_agent_heartbeat(setup, monkeypatch):
     monkeypatch.setattr(rx, "ALIVE_TIMEOUT", 1.0)
-    with pytest.raises(rx.RemoteError, match="not running"):
+    with pytest.raises(rx.RemoteError, match="start_agent.bat"):
         _submit(setup, check_agent=True)
     assert list((setup["queue"] / "pending").iterdir()) == []
 
 
-def test_agent_alive_sees_the_heartbeat(setup, running_agent):
-    hb = rx.agent_alive(setup["queue"], timeout=10)
-    assert hb is not None and hb["scripts_fingerprint"]
-    assert rx.agent_alive(setup["queue"].parent / "nothing", timeout=1) is None
-
-
 def test_local_run_dir_replaces_the_drive(tmp_path):
-    assert rx.local_run_dir(tmp_path, "/a/b") == tmp_path / "a" / "b"
+    root = str(tmp_path)
+    assert Path(ra.local_run_dir(root, "/a/b")) == tmp_path / "a" / "b"
+    assert Path(ra.local_run_dir(root, "a\\b")) == tmp_path / "a" / "b"
 
 
-def test_launch_problems_remote_requires_workdir_on_shared_drive(tmp_path):
+def test_launch_problems(tmp_path):
     scripts = tmp_path / "abaqus_scripts"
     scripts.mkdir()
     (scripts / "run_simul.py").write_text("")
@@ -210,27 +234,40 @@ def test_launch_problems_remote_requires_workdir_on_shared_drive(tmp_path):
                         remote_queue_dir=r"Z:\ABQ\queue")
     probs = rx.launch_problems(prefs, r"C:\TEMP\wd")
     assert any("shared drive Z:" in p for p in probs)
-    # The local Abaqus command is not needed in remote mode.
     assert not any("Abaqus command" in p for p in probs)
     assert rx.launch_problems(prefs, r"z:\ABQ\wd") == []
+    prefs.remote_queue_dir = r"Z:\my queue"
+    assert any("spaces" in p for p in rx.launch_problems(prefs, r"Z:\wd"))
     prefs.execution_mode = "local"
     assert any("Abaqus command" in p
                for p in rx.launch_problems(prefs, r"C:\TEMP\wd"))
-    prefs.execution_mode, prefs.remote_queue_dir = "remote", ""
-    assert any("no queue folder" in p
-               for p in rx.launch_problems(prefs, r"Z:\wd"))
+
+
+def test_deployed_agent_end_to_end_as_a_separate_process(setup):
+    """The file the GUI deploys, started the way start_agent.bat starts it,
+    serves a submission checked against its heartbeat."""
+    rx.deploy_queue(setup["queue"], setup["abaqus"])
+    agent = subprocess.Popen(
+        [sys.executable, str(setup["queue"] / "remote_agent.py"),
+         "--abaqus", setup["abaqus"], "--local-root", setup["local_root"]],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        proc, run_dir = _submit(setup, check_agent=True)
+        assert proc.wait(timeout=60) == 0
+        assert (run_dir / "job1.results.npz").is_file()
+    finally:
+        agent.kill()
+        agent.wait()
 
 
 def test_job_tab_client_command_round_trip(setup, running_agent):
-    """The Job tab runs `python -m gui.core.remote_exec submit` as a child."""
-    import subprocess
     prefs = Preferences(abaqus_script=str(setup["scripts"] / "run_simul.py"),
                         execution_mode="remote",
-                        remote_queue_dir=str(setup["queue"]))
+                        remote_queue_dir=str(setup["queue"]),
+                        remote_abaqus_cmd=setup["abaqus"])
     run_dir = setup["shared"] / "jobtab"
     program, args, root = rx.submit_command(
         prefs, run_dir, {}, {"cpus": 1, "job_name": "Cutting_job"})
-    import os
     env = dict(os.environ, PYTHONPATH=root)
     out = subprocess.run([program] + args, capture_output=True, env=env,
                          timeout=60)

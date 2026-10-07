@@ -263,6 +263,29 @@ class MainWindow(QMainWindow):
                     self, "Save preferences",
                     f"Failed to save preferences:\n{type(e).__name__}: {e}",
                 )
+            if self.prefs.execution_mode == "remote" \
+                    and self.prefs.remote_queue_dir:
+                self._deploy_remote_agent()
+
+    def _deploy_remote_agent(self):
+        """Put the agent and start_agent.bat in the queue folder now, so the
+        user can start it on the compute PC before the first run."""
+        from gui.core.remote_exec import deploy_queue
+        try:
+            bat = deploy_queue(self.prefs.remote_queue_dir,
+                               self.prefs.remote_abaqus_cmd)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Remote execution",
+                f"Could not prepare the queue folder:\n{type(e).__name__}: {e}")
+            return
+        QMessageBox.information(
+            self, "Remote execution",
+            "On the compute PC, double-click\n\n"
+            f"{bat}\n\n"
+            "and leave its window open (nothing to install there: it uses the\n"
+            "Python bundled with Abaqus). Close Remote Desktop with the cross,\n"
+            "do not sign out.")
 
     # =====================================================================
     # Dirty tracking

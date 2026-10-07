@@ -30,26 +30,27 @@ run_gui_debug.bat
 ## Running the computations on another PC (remote agent)
 
 The GUI can stay on your PC while Abaqus runs on a compute PC, as long as both
-see a common network drive (e.g. `Z:`). No admin rights, SSH or open port are
-needed: runs go through a queue folder on that drive
-(`gui/core/remote_exec.py`).
+see a common network drive (e.g. `Z:`). Nothing is installed on the compute
+PC, and no admin rights, SSH or open port are needed: runs go through a queue
+folder on that drive (`gui/core/remote_exec.py`), and the agent there runs
+with the Python bundled with Abaqus (`gui/core/remote_agent.py`).
 
-1. Same version of this repository on both PCs (`git pull` on both). A run is
-   refused if the `abaqus_scripts/` differ.
-2. On the compute PC (in its Remote Desktop session): set the Abaqus command
-   and script in the GUI Preferences of that PC, then start
-   `run_remote_agent.bat --queue Z:\<folder>\queue`. Leave the window open and
-   close Remote Desktop with the cross (disconnect, not "Sign out").
-3. On your PC: Preferences > Execution > tick "Run Abaqus on the compute PC",
-   Queue folder = the same `Z:\<folder>\queue`, and set the default working
-   directory on `Z:` too.
+1. On your PC: Preferences > Execution > tick "Run Abaqus on the compute PC",
+   set the Queue folder (e.g. `Z:\ABQ_remote\queue`, no spaces) and the path
+   of `abaqus.bat` on the compute PC, and put the default working directory
+   on `Z:` too. On OK the GUI writes `remote_agent.py` and `start_agent.bat`
+   into the queue folder.
+2. On the compute PC (Remote Desktop): double-click
+   `Z:\ABQ_remote\queue\start_agent.bat` and leave the window open. Close
+   Remote Desktop with the cross (disconnect), not "Sign out".
 
 Runs execute one at a time in submission order in a local folder of the
-compute PC (`C:\TEMP\ABQ_remote\<same path as on Z:>`). The `.sta` and the
-script log are copied to `Z:` every 2 s; at the end the results bundle,
-`.meta.json`, `.msg`, `.dat`, `.log` and `.inp` are copied back. The `.odb`
-stays on the compute PC. Cancel works as usual (the agent runs
-`abaqus terminate`). Resume (`continue`) is local-only.
+compute PC (`C:\TEMP\ABQ_remote\<same path as on Z:>`), with the model
+generator (`abaqus_scripts/*.py`) copied from your PC for each version. The
+`.sta` and the script log are copied to `Z:` every 2 s; at the end the
+results bundle, `.meta.json`, `.msg`, `.dat`, `.log` and `.inp` are copied
+back. The `.odb` stays on the compute PC. Cancel works as usual (the agent
+runs `abaqus terminate`). Resume (`continue`) is local-only.
 
 ## Layout
 
