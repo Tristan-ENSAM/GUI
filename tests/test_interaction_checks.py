@@ -154,7 +154,11 @@ class TestMassScalingWindow:
                                        cfg.elem_size, d)
         ko = mass_scaling_window_check(self._cfg(b["ms_min"] * 0.5),
                                        cfg.elem_size, d)
-        assert ok.passed is True and ko.passed is False
+        # informative since 2026-10-07: below the bound is a warning only
+        assert ok.passed is True and ko.passed is True
+        assert ko.details["below_filter_ratio_bound"] is True
+        assert ok.details["below_filter_ratio_bound"] is False
+        assert any("ms_at_point decides" in w for w in ko.warnings)
         assert ko.details["ms_min"] == pytest.approx(b["ms_min"])
 
     def test_upper_bounds_are_warnings_only(self):
@@ -304,3 +308,21 @@ class TestMsAtPoint:
         c = ic.ms_at_point_check(_ms_runner(0.0), _MsCfg(), study,
                                  ms_lower=2000.0)
         assert c.passed is None
+
+
+class TestRecoveryRules:
+    def _failing(self, rec):
+        return _gci([0.005, 0.01, 0.02],
+                    {0.005: {"TEMP": 100.0}, 0.01: {"TEMP": 110.0},
+                     0.02: {"TEMP": 130.0}},
+                    {"TEMP": QuantityGci(100.0, 1.0, 90.0, 0.1, 0.2, 1.0,
+                                         True, True)}, rec=rec)
+
+    def test_mesh_failure_adopts_the_size_recommended_on_d_star(self):
+        c = mesh_domain_check(self._failing(0.005), 0.01, {"TEMP": 0.02})
+        assert c.passed is False
+        assert "adopt h = 0.005" in c.details["action"]
+
+    def test_mesh_failure_without_recommendation_extends_the_plan(self):
+        c = mesh_domain_check(self._failing(None), 0.01, {"TEMP": 0.02})
+        assert "one level finer" in c.details["action"]
