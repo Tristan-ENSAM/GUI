@@ -461,7 +461,9 @@ def ms_comparison_rows(ms_result, quantities: Sequence[str] = ALL_QUANTITIES
                     "safeguards_ok": c.guards_ok,
                     "decision": "independent" if c.success
                     else "not independent",
-                    "run_from": c.run_from, "run_to": c.run_to})
+                    "run_from": c.run_from, "run_to": c.run_to,
+                    "frame_offset_over_interval": _num(getattr(
+                        c, "frame_offset_over_interval", None))})
         rows.append(row)
     return rows
 
