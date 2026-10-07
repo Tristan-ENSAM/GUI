@@ -34,7 +34,8 @@ class TestRestructuredTab:
         assert set(tab.le_zoi) == {"xmin", "xmax", "ymin", "ymax"}
         assert tab.le_gci_finest is not None
         assert tab.sp_gci_n.value() >= 3
-        assert set(tab._dj_eps) == {"EVF", "TEMP", "V1", "V2", "force"}
+        # one tolerance set: no relative GCI tolerance widgets any more
+        assert not hasattr(tab, "_dj_eps")
 
     def test_zoi_defaults_to_roi_when_blank(self, tab):
         roi = tab.config_inputs()["roi"]
@@ -54,9 +55,23 @@ class TestRestructuredTab:
         assert warnings and "tolerances" in warnings[0].lower()
         assert not hasattr(tab, "_di_worker")
 
-    def test_tolerances_default_to_2pct(self, tab):
-        assert tab._tolerances() == {q: 0.02 for q in
-                                     ("EVF", "TEMP", "V1", "V2", "force")}
+    def test_gci_uses_the_absolute_step2_tolerances(self, tab):
+        for q, v in {"Vx": "10", "Vy": "11", "T": "12", "EVF": "0.1",
+                     "Fc": "13", "Ff": "14"}.items():
+            tab._q_eps[q].setText(v)
+        assert tab._gci_tolerances() == {
+            "V1": 10.0, "V2": 11.0, "TEMP": 12.0, "EVF": 0.1,
+            "Fc": 13.0, "Ff": 14.0}
+
+    def test_gci_requires_the_six_absolute_tolerances(self, tab, warnings,
+                                                      monkeypatch):
+        monkeypatch.setattr(tab, "_validate_launch",
+                            lambda: ({}, "wd", 1))
+        for le in tab._q_eps.values():
+            le.setText("")
+        tab._on_run_mesh_gci()
+        assert warnings and "tolerances" in warnings[0].lower()
+        assert getattr(tab, "_mesh_worker", None) is None
 
     def test_spin_boxes_follow_the_style_size_hint(self, tab, qapp):
         """The spin boxes must be as wide as the style asks (value + arrow
@@ -204,10 +219,14 @@ class TestDomainIndependenceWiring:
     def test_gci_gets_a_copy_and_the_shared_window(self, launch):
         tab = launch
         tab._dom_texts["window_start"].setText("0.5")
+        for q, le in tab._q_eps.items():
+            le.setText("10")
         tab._on_run_mesh_gci()
         kw = _CaptureWorker.last
         assert kw["window"] == (0.5, 1.0)
         assert kw["base_cfg"] is not tab.cfg
+        # the GCI selects with the absolute step-2 eps_q
+        assert kw["tolerances"]["TEMP"] == 10.0 and kw["tolerances"]["V2"] == 10.0
 
     def test_progress_and_result_are_logged(self, tab):
         from gui.core.domain_sizing import DomainDims

@@ -49,7 +49,7 @@ def test_worker_emits_result(qapp):
         _runner(), _Cfg(), (-0.04, 0.04, -0.04, 0.04),
         DomainDims(0.255, 0.055, 0.255, 0.055), grid_step=0.01,
         finest_elem_size=0.005, ratio=2.0, n_meshes=3,
-        tolerances={q: 0.005 for q in _BASE})
+        tolerances={q: 0.005 * abs(b) for q, b in _BASE.items()})
     w.finished_ok.connect(lambda r: got.setdefault("res", r))
     w.failed.connect(lambda m: got.setdefault("err", m))
     w.run()

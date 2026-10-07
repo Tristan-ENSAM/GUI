@@ -10,7 +10,9 @@ distinct from the output ROI of the Geometry tab):
     successively against the same ABSOLUTE tolerances eps_q as the domain
     study, with the filter and reverberation checks as extra safeguards;
   * mesh convergence by Richardson extrapolation / GCI on a fixed domain
-    (gui.sensitivity.mesh_gci), with RELATIVE tolerances per quantity;
+    (gui.sensitivity.mesh_gci): the recommended size is the coarsest
+    within the same ABSOLUTE tolerances eps_q of the reference (the relative
+    GCI is reported, not used to select);
   * Eulerian-domain sizing by a sequential independence study
     (gui.sensitivity.domain_independence): each dimension grown by a
     constant step from the initial domain = ZOI + margin, successive runs
@@ -99,6 +101,9 @@ _DOM_TEXTS = [
 ]
 # Force quantities -> the tool-RP reaction-force history channel.
 _FORCE_CHANNELS = {"Fc": "RF1_RP", "Ff": "RF2_RP"}
+# GCI quantity name -> common tolerance label (the GCI selects with eps_q).
+_GCI_NAMES = {"EVF": "EVF", "TEMP": "T", "V1": "Vx", "V2": "Vy",
+              "Fc": "Fc", "Ff": "Ff"}
 _DIM_ORDER = ("l_wp", "h_wp", "h_void", "l_void")
 
 
@@ -184,9 +189,9 @@ class OptimizationTab(QWidget):
 
         # ---- Common settings: ZOI, sampling, window T, safeguards ------
         # The ZOI is DISTINCT from the ROI (Geometry tab, model output set
-        # for DIC/IRT); empty fields default to the ROI. T and the
-        # safeguards are shared by every study.
-        gcom = QGroupBox("Common settings \u2014 ZOI, window T, safeguards")
+        # for DIC/IRT); empty fields default to the ROI. T, the
+        # safeguards and the tolerances eps_q are shared by every study.
+        gcom = QGroupBox("Common settings \u2014 ZOI, window T, safeguards, \u03b5_q")
         cg0 = grid(gcom)
         self.le_zoi = {}
         for c, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax"),
@@ -212,6 +217,28 @@ class OptimizationTab(QWidget):
             le = num_edit(str(getattr(OptimizationCfgDefaults, attr)), tip=tip)
             self._dom_texts[attr] = le
             cg0.addWidget(le, 1, 3 + 2 * i)
+        # Absolute tolerances eps_q: ONE set for every study (decision of
+        # 2026-10-07): the ms and domain E_max and the GCI mesh selection.
+        cg0.addWidget(QLabel("\u03b5_q (absolute)"), 2, 0)
+        self._q_eps = {}
+        _unit = {q: u for (q, _f, u) in _QUANTITIES}
+        eps_row = QHBoxLayout()
+        eps_row.setSpacing(4)
+        for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
+            lbl = QLabel(q)
+            tip = "%s tolerance [%s]" % (q, _unit[q])
+            if q in ("Fc", "Ff"):
+                tip += (" \u2014 %s on the tool RP divided by the element "
+                        "size" % ("RF1" if q == "Fc" else "RF2"))
+            lbl.setToolTip(tip)
+            eps_row.addWidget(lbl)
+            le = num_edit(placeholder=_unit[q], tip=tip)
+            le.setFixedWidth(64)
+            self._q_eps[q] = le
+            eps_row.addWidget(le)
+            eps_row.addSpacing(12)
+        eps_row.addStretch(1)
+        cg0.addLayout(eps_row, 2, 1, 1, 9)
         cg0.setColumnStretch(10, 1)
 
         # ---- Step 0 · mass-scaling factor by an independence study -------
@@ -232,12 +259,12 @@ class OptimizationTab(QWidget):
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
             "compares each run with the previous one (E_max with the absolute\n"
-            "eps_q of step 2). Safeguards: outputs, R_K, R_HG, filter check and\n"
+            "eps_q of the common settings). Safeguards: outputs, R_K, R_HG, filter check and\n"
             "reverberation check. Keeps the largest ms reached by an unbroken\n"
             "chain of successes; stops at the first failure.")
         self.btn_ms.clicked.connect(self._on_run_ms_independence)
         sg.addWidget(self.btn_ms, 1, 0, 1, 2)
-        sg.addWidget(hint("Uses the \u03b5_q of step 2 and the current "
+        sg.addWidget(hint("Uses the common \u03b5_q and the current "
                           "domain. Needs the output filter with verification "
                           "(Step tab)."), 1, 2, 1, 6)
         sg.setColumnStretch(7, 1)
@@ -258,28 +285,19 @@ class OptimizationTab(QWidget):
         mg.addWidget(QLabel("n meshes"), 0, 6)
         self.sp_gci_n = spin_box(3, 6, 3)
         mg.addWidget(self.sp_gci_n, 0, 7)
-        # Relative tolerances of the GCI study ONLY ("force" applies to Fc
-        # and Ff). The persisted key (sizing_tol) is kept for old profiles.
-        mg.addWidget(QLabel("tolerances (rel.)"), 1, 0)
-        self._dj_eps = {}
-        tol_row = QHBoxLayout()
-        tol_row.setSpacing(4)
-        for q in ("EVF", "TEMP", "V1", "V2", "force"):
-            tol_row.addWidget(QLabel(q))
-            le = num_edit("0.02", tip="Relative tolerance on %s (0.02 = 2%%). "
-                                      "Empty = excluded." % q)
-            le.setFixedWidth(56)
-            self._dj_eps[q] = le
-            tol_row.addWidget(le)
-            tol_row.addSpacing(12)
-        tol_row.addStretch(1)
-        mg.addLayout(tol_row, 1, 1, 1, 8)
+        # One tolerance set for the three axes (decision of 2026-10-07): the
+        # mesh is selected with the common absolute eps_q. The old relative
+        # GCI tolerances (persisted key sizing_tol) are no longer read.
+        mg.addWidget(hint("Selection: coarsest mesh with |f_q(h) \u2212 "
+                          "f_q^ref| \u2264 \u03b5_q (common settings) for "
+                          "every quantity; the GCI in % is reported only."),
+                     1, 0, 1, 9)
         self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
         self.btn_mesh.setToolTip(
             "GCI/Richardson mesh convergence on the current (fixed) domain:\n"
             "n systematically-refined meshes, observed order p, extrapolated\n"
             "value and GCI per quantity. Recommends the coarsest mesh within\n"
-            "tolerance of the reference.")
+            "the absolute tolerances eps_q (common settings) of the reference.")
         self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
         mg.addWidget(self.btn_mesh, 2, 0, 1, 4)
         mg.addWidget(hint("Uses the current domain: keep it conservative "
@@ -290,27 +308,6 @@ class OptimizationTab(QWidget):
         gdom = QGroupBox("2 \u00b7 Eulerian domain \u2014 sequential "
                          "independence study")
         dg = grid(gdom)
-        # absolute tolerances eps_q (E_max)
-        dg.addWidget(QLabel("\u03b5_q (absolute)"), 0, 0)
-        self._q_eps = {}
-        _unit = {q: u for (q, _f, u) in _QUANTITIES}
-        eps_row = QHBoxLayout()
-        eps_row.setSpacing(4)
-        for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
-            lbl = QLabel(q)
-            tip = "%s tolerance [%s]" % (q, _unit[q])
-            if q in ("Fc", "Ff"):
-                tip += (" \u2014 %s on the tool RP divided by the element "
-                        "size" % ("RF1" if q == "Fc" else "RF2"))
-            lbl.setToolTip(tip)
-            eps_row.addWidget(lbl)
-            le = num_edit(placeholder=_unit[q], tip=tip)
-            le.setFixedWidth(64)
-            self._q_eps[q] = le
-            eps_row.addWidget(le)
-            eps_row.addSpacing(12)
-        eps_row.addStretch(1)
-        dg.addLayout(eps_row, 0, 1, 1, 9)
         # initial domain + caps, one row per dimension pair
         self._max = {}
         self._init_lbl = {}
@@ -454,7 +451,7 @@ class OptimizationTab(QWidget):
         cv.addWidget(self._nav)
         # Three axes (report, Part B, T8): the domain study (E_max per
         # comparison versus the tested value, one series per dimension), the
-        # GCI study (f_q(h) relative to its reference, per quantity) and the
+        # GCI study (|f_q(h) - f_ref| / eps_q, per quantity) and the
         # cost-E_max map (paper Fig. 13).
         # A fourth axis shows the mass-scaling study (E_max per comparison
         # versus the larger ms of the pair, paper Fig. 8).
@@ -549,7 +546,6 @@ class OptimizationTab(QWidget):
                self.le_gci_min, self.le_ms_values, self.le_ms_elem]
         les += list(self.le_zoi.values())
         les += list(self._q_eps.values())
-        les += list(self._dj_eps.values())
         les += list(self._max.values())
         les += list(self._dom_texts.values())
         return les
@@ -571,7 +567,6 @@ class OptimizationTab(QWidget):
         o.zoi = {k: self.le_zoi[k].text()
                  for k in ("xmin", "xmax", "ymin", "ymax")}
         o.criterion_rmse = {q: le.text() for q, le in self._q_eps.items()}
-        o.sizing_tol = {q: le.text() for q, le in self._dj_eps.items()}
         o.gci_finest = self.le_gci_finest.text()
         o.gci_ratio = self.le_gci_ratio.text()
         o.gci_min = self.le_gci_min.text()
@@ -599,8 +594,6 @@ class OptimizationTab(QWidget):
                 self.le_zoi[k].setText(str(o.zoi.get(k, "")))
             for q, le in self._q_eps.items():
                 le.setText(str(o.criterion_rmse.get(q, "")))
-            for q, le in self._dj_eps.items():
-                le.setText(str(o.sizing_tol.get(q, "0.02")))
             self.le_gci_finest.setText(str(o.gci_finest))
             self.le_gci_ratio.setText(str(o.gci_ratio or "2"))
             self.le_gci_min.setText(str(o.gci_min))
@@ -930,27 +923,11 @@ class OptimizationTab(QWidget):
             self.le_zoi[k].setText("%.6g" % v)
         self._draw_preview()
 
-    def _tolerances(self):
-        """Relative per-quantity tolerances (empty field = quantity excluded)."""
-        out = {}
-        for q, le in self._dj_eps.items():
-            txt = le.text().strip().replace(",", ".")
-            if txt:
-                try:
-                    out[q] = float(txt)
-                except ValueError:
-                    pass
-        return out
-
     def _gci_tolerances(self):
-        """Relative GCI tolerances keyed by the GCI quantity names (the panel
-        "force" entry applies to Fc and Ff)."""
-        tol = self._tolerances()
-        out = {q: tol[q] for q in ("EVF", "TEMP", "V1", "V2") if q in tol}
-        if "force" in tol:
-            out["Fc"] = tol["force"]
-            out["Ff"] = tol["force"]
-        return out
+        """The absolute common tolerances eps_q keyed by the GCI quantity
+        names (TEMP = T, V1 = Vx, V2 = Vy; same units)."""
+        thr = self.thresholds()
+        return {g: thr[q] for g, q in _GCI_NAMES.items() if q in thr}
 
     def _dims_from_cfg(self):
         g = self.cfg.euler_geometry
@@ -1083,7 +1060,7 @@ class OptimizationTab(QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Mass-scaling criterion",
-                "Set the six absolute tolerances eps_q of step 2 "
+                "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): the ms study uses the same E_max.")
             return
         try:
@@ -1240,7 +1217,7 @@ class OptimizationTab(QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Domain criterion",
-                "Set the six absolute tolerances eps_q of step 2 "
+                "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): they define E_max for the domain "
                 "study.")
             return
@@ -1546,21 +1523,23 @@ class OptimizationTab(QWidget):
                                fontsize=7)
                 axc.set_ylabel("E_max", fontsize=7)
         if self._last_gci is not None:
-            gres = self._last_gci[0]
+            gres, gtol = self._last_gci[0], self._last_gci[2] or {}
             for q, g in gres.per_quantity.items():
                 ref = g.f_extrapolated if g.reliable else g.f_fine
+                eps = gtol.get(q)
                 hs = [h for h in gres.sizes if q in gres.scalars.get(h, {})]
                 ys = []
                 for h in hs:
                     v = gres.scalars[h][q]
-                    ys.append(abs(v / ref - 1.0) if (
-                        v is not None and ref and math.isfinite(ref))
+                    ys.append(abs(v - ref) / eps if (
+                        v is not None and eps and math.isfinite(ref))
                         else float("nan"))
-                if hs:
+                if hs and eps:
                     axg.plot(hs, ys, marker="s", lw=1.0, label=q)
+            axg.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
             axg.set_xscale("log")
             axg.set_xlabel("h [mm]", fontsize=7)
-            axg.set_ylabel("|f_q(h)/f_ref - 1|", fontsize=7)
+            axg.set_ylabel("|f_q(h) - f_ref| / eps_q", fontsize=7)
             if axg.get_legend_handles_labels()[0]:
                 axg.legend(fontsize=6)
         for ax, title in ((axm, "Mass scaling"), (axd, "Domain study"),
@@ -1627,6 +1606,12 @@ class OptimizationTab(QWidget):
             window = tuple(study.settings["window"])
         except ValueError as e:
             QMessageBox.warning(self, "Interaction checks", str(e))
+            return
+        if not self.thresholds_complete():
+            QMessageBox.warning(
+                self, "Interaction checks",
+                "Set the six absolute tolerances eps_q of the common settings "
+                "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
             return
         h_star = float(study.settings["elem_size"])
         finest = self._float_or(self.le_gci_finest, h_star)
@@ -1736,6 +1721,12 @@ class OptimizationTab(QWidget):
     def _on_run_mesh_gci(self):
         val = self._validate_launch()
         if val is None:
+            return
+        if not self.thresholds_complete():
+            QMessageBox.warning(
+                self, "Mesh convergence criterion",
+                "Set the six absolute tolerances eps_q of the common settings "
+                "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
             return
         prefs, wd, cpus = val
         finest = self._float_or(self.le_gci_finest, float(self.cfg.elem_size))

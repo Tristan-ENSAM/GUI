@@ -26,6 +26,14 @@ Method (three meshes h1 < h2 < h3, h1 finest; r21 = h2/h1, r32 = h3/h2):
     GCI_fine = Fs |(f1 - f2)/f1| / (r21^p - 1),  Fs = 1.25 for >=3 meshes
     asymptotic range: GCI_32 / (r21^p GCI_21) ~ 1
 
+Mesh selection uses the ABSOLUTE tolerances eps_q of the domain and
+mass-scaling studies (same quantities, same units: EVF [-], TEMP [K],
+V1/V2 [mm/s], Fc/Ff [N/mm]): the recommended size is the coarsest whose
+every scalar satisfies |f_q(h) - f_q^ref| <= eps_q. The relative GCI_fine
+stays a REPORTED uncertainty (Roache); it does not select the mesh. A
+relative criterion would depend on the origin of the temperature scale and
+blow up on a mean velocity close to 0.
+
 Pure host-side Python (CPython 3.x). ``run_bundle(cfg)`` returns a
 ResultsBundle-like object (see domain_independence).
 """
@@ -44,7 +52,6 @@ from gui.sensitivity.zoi_sampling import (
     history_window_mean as _history_window_mean)
 from gui.sensitivity.runner_core import eulerian_instance
 
-DEFAULT_QUANTITIES = ("EVF", "TEMP", "V1", "V2", "force")
 _SAFETY_3PLUS = 1.25          # Roache safety factor for >= 3 meshes
 
 
@@ -316,8 +323,9 @@ def run_mesh_gci(
     the fixed `domain_dims`, reduces each to scalar ZOI quantities, and computes
     the observed order p, the extrapolated value and the GCI per quantity from
     the three FINEST meshes. `recommended_size` is the coarsest mesh whose every
-    quantity is within `tolerances` (default 1 %) of the extrapolated value --
-    the cheapest mesh with a bounded discretization error.
+    quantity is within its ABSOLUTE tolerance eps_q (`tolerances`, physical
+    units, the common values) of the reference -- the cheapest mesh with a
+    bounded discretization error. Without tolerances no size is recommended.
 
     The domain must be large enough that the ZOI is boundary-independent (run
     the domain study, or use a conservative domain); otherwise p/GCI describe a
@@ -325,8 +333,8 @@ def run_mesh_gci(
     """
     if force_channels is None:
         force_channels = {"Fc": "RF1_RP", "Ff": "RF2_RP"}
-    if tolerances is None:
-        tolerances = {q: 0.01 for q in DEFAULT_QUANTITIES}
+    tolerances = {q: float(t) for q, t in (tolerances or {}).items()
+                  if t is not None and float(t) > 0}
     sizes = _mesh_sizes(finest_elem_size, ratio, n_meshes, min_elem_size)
     result = MeshGciResult(sizes=list(sizes))
 
@@ -389,16 +397,17 @@ def run_mesh_gci(
                 continue
             fq = result.scalars[h].get(q, float("nan"))
             ref = g.f_extrapolated if g.reliable else g.f_fine
-            if not (math.isfinite(fq) and math.isfinite(ref)) or ref == 0.0:
+            if not (math.isfinite(fq) and math.isfinite(ref)):
                 return False
-            if abs((fq - ref) / ref) > tol:
+            if abs(fq - ref) > tol:              # absolute, units of q
                 return False
         return True
 
-    for h in sorted(sizes, reverse=True):        # coarsest first
-        if _within_tol(h):
-            result.recommended_size = h
-            break
+    if any(q in tolerances for q in quantities):
+        for h in sorted(sizes, reverse=True):    # coarsest first
+            if _within_tol(h):
+                result.recommended_size = h
+                break
 
     if any(not math.isfinite(g.p) for g in result.per_quantity.values()):
         result.stopped_by = result.stopped_by or "nan"

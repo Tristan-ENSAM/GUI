@@ -17,7 +17,8 @@ separately), so four interactions are checked once the domain study is done
 2. ``mesh_x_domain`` - element size versus final domain: the GCI study is run
    again on D* with the same plan (D8-a), and the element size h* used by the
    domain study must satisfy the GCI selection rule on D*:
-   |f_q(h*) - f_q^ref| / |f_q^ref| <= eps_q for every thresholded quantity,
+   |f_q(h*) - f_q^ref| <= eps_q for every quantity, eps_q the ABSOLUTE
+   common tolerances (decision of 2026-10-07: one tolerance set for ms, h, D),
    f_q^ref = Richardson extrapolate when reliable, else the finest mesh value
    (same rule as mesh_gci.run_mesh_gci). h* must belong to the plan.
    Recovery rule (decision of 2026-10-07): on failure, adopt the size the
@@ -89,7 +90,7 @@ class CheckResult:
     name: str
     purpose: str
     passed: Optional[bool]                 # None = not evaluable
-    e_max: float = float("nan")            # E_max (or max rel/eps for GCI)
+    e_max: float = float("nan")    # E_max (GCI check: max |f - f_ref|/eps)
     q_crit: Optional[str] = None
     safeguards_ok: Optional[bool] = None
     conclusion: str = ""
@@ -205,23 +206,24 @@ def mesh_domain_check(gci_result, h_star: float,
                           % (h_star, sizes))
         return res
     h = match[0]
-    worst, crit, rel = 0.0, None, {}
+    # |f_q(h*) - f_q^ref| / eps_q with the absolute common tolerances (same
+    # criterion as the GCI's recommended size, see mesh_gci).
+    worst, crit, ratio = 0.0, None, {}
     for q, g in gci_result.per_quantity.items():
         tol = tolerances.get(q)
         if tol is None or tol <= 0:
             continue
         fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
         ref = g.f_extrapolated if g.reliable else g.f_fine
-        if fq is None or not (math.isfinite(fq) and math.isfinite(ref)) \
-                or ref == 0.0:
+        if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
             r = float("inf")
         else:
-            r = abs((fq - ref) / ref) / tol
-        rel[q] = r
+            r = abs(fq - ref) / tol
+        ratio[q] = r
         if crit is None or r > worst:
             worst, crit = r, q
     res.e_max, res.q_crit = worst, crit
-    res.details["rel_over_tol"] = rel
+    res.details["dev_over_eps"] = ratio
     within = crit is not None and math.isfinite(worst) and worst <= 1.0
     res.passed = bool(within and res.safeguards_ok is not False)
     if not gci_result.in_asymptotic_range:
