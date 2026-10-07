@@ -11,19 +11,19 @@ from gui.core.run_output import study_folder_name, create_study_dir
 def test_folder_name_format():
     when = datetime(2026, 9, 10, 13, 45, 7)
     assert study_folder_name("myprofile", "GCI", when) \
-        == "myprofile_GCI_20260910_134507"
+        == "myprofile_GCI_2026-09-10_13-45-07"
 
 
 def test_folder_name_defaults_to_untitled():
     name = study_folder_name(None, "domainsizing", datetime(2026, 1, 2, 3, 4, 5))
-    assert name == "Untitled_domainsizing_20260102_030405"
+    assert name == "Untitled_domainsizing_2026-01-02_03-04-05"
 
 
 def test_create_study_dir_writes_config(tmp_path):
     when = datetime(2026, 9, 10, 13, 45, 7)
     d = create_study_dir(tmp_path, "prof", "GCI",
                          {"finest": 0.006, "ratio": 2}, when=when)
-    assert d == tmp_path / "prof_GCI_20260910_134507"
+    assert d == tmp_path / "prof_GCI_2026-09-10_13-45-07"
     assert d.is_dir()
     cfg = json.loads((d / "config.json").read_text(encoding="utf-8"))
     assert cfg["study"] == "GCI"

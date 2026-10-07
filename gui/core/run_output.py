@@ -3,7 +3,7 @@
 
 Each study launch (mesh GCI, domain sizing, sensitivity, and later inverse
 identification) gets its OWN timestamped folder in the working directory,
-named ``{profile}_{PREFIX}_{YYYYMMDD_HHMMSS}``, containing a ``config.json``
+named ``{profile}_{PREFIX}_{YYYY-MM-DD_HH-MM-SS}``, containing a ``config.json``
 that records the study type, timestamp and parameters. Every sub-run of the
 study writes inside that folder and its files are prefixed by PREFIX, so GCI,
 domain-sizing and sensitivity runs never collide and stay grouped.
@@ -18,10 +18,10 @@ from typing import Optional
 
 def study_folder_name(profile_name: Optional[str], prefix: str,
                       when: Optional[datetime] = None) -> str:
-    """`{profile}_{PREFIX}_{YYYYMMDD_HHMMSS}` (profile defaults to 'Untitled')."""
+    """`{profile}_{PREFIX}_{YYYY-MM-DD_HH-MM-SS}` (profile defaults to 'Untitled')."""
     when = when or datetime.now()
     return "%s_%s_%s" % (profile_name or "Untitled", prefix,
-                         when.strftime("%Y%m%d_%H%M%S"))
+                         when.strftime("%Y-%m-%d_%H-%M-%S"))
 
 
 def create_study_dir(workdir, profile_name: Optional[str], prefix: str,
