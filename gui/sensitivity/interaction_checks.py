@@ -20,12 +20,20 @@ separately), so four interactions are checked once the domain study is done
    |f_q(h*) - f_q^ref| / |f_q^ref| <= eps_q for every thresholded quantity,
    f_q^ref = Richardson extrapolate when reliable, else the finest mesh value
    (same rule as mesh_gci.run_mesh_gci). h* must belong to the plan.
+   Recovery rule (decision of 2026-10-07): on failure, adopt the size the
+   GCI recommends ON D* (or, when none is within tolerance, extend the GCI
+   plan one level finer), redo the domain study at that size, then the
+   checks. One iteration: a second failure is reported as is.
 3. ``ms_x_mesh`` - mass-scaling factor versus final mesh and domain: the
    fixed factor f is checked against the analytic window of
    ModelConfig.mass_scaling_bounds evaluated at (h*, D*). No run.
 
-   Interpretation to be validated by the author: only the LOWER bound (the
-   numerical validity of the runtime output filter) decides the check. The
+   Since 2026-10-07 the check no longer rejects: f below the lower bound
+   (fc*dt < 1e-3) only triggers an Abaqus .sta WARNING, not a rejection,
+   and the filter check MEASURES the deviation of the runtime filter on the
+   run of check 4. A factor below the bound is reported as a warning and
+   check 4 decides. Earlier interpretation: only the LOWER bound (the
+   numerical validity of the runtime output filter) decided the check. The
    reverberation upper bound is the criterion behind the domain-diagonal
    ceiling, which the author ruled too restrictive (warning only, decision of
    2026-10-01); the energy upper bound relies on an indicative coefficient
@@ -64,8 +72,8 @@ REDO_DOMAIN_ACTION = (
     "step, n_hold or eps_q")
 
 CHECK_PURPOSES = {
-    "ms_x_mesh": "Mass-scaling factor inside its analytic window at the "
-                 "final mesh and domain",
+    "ms_x_mesh": "Mass-scaling factor against its analytic filter-ratio "
+                 "bound at the final mesh and domain (informative)",
     "mesh_x_domain": "Element size h* still within the GCI tolerance on the "
                      "final domain",
     "domain_combined": "Domain dimensions sized separately remain "
@@ -223,6 +231,15 @@ def mesh_domain_check(gci_result, h_star: float,
                           "safeguards failed" if res.safeguards_ok is False
                           else "h* outside the GCI tolerance on D* "
                                "(q_crit %s)" % crit))
+    if not res.passed:
+        rec = gci_result.recommended_size
+        res.details["action"] = (
+            ("adopt h = %.6g mm (recommended by the GCI on D*), redo the "
+             "domain study at that size, then the checks" % rec)
+            if rec is not None else
+            "no mesh within tolerance on D*: extend the GCI plan one level "
+            "finer, then redo the domain study and the checks")
+        res.warnings.append(res.details["action"])
     return res
 
 
@@ -259,7 +276,16 @@ def mass_scaling_window_check(cfg, h_star: float, d_star: DomainDims
     if b.get("ms_min") is None:
         res.conclusion = "not evaluable: window not computable"
         return res
-    res.passed = bool(f >= b["ms_min"])
+    # Informative since 2026-10-07: below the bound Abaqus only warns in the
+    # .sta; the measured filter check of ms_at_point decides.
+    res.passed = True
+    below = bool(f < b["ms_min"])
+    res.details["below_filter_ratio_bound"] = below
+    if below:
+        res.warnings.append("f = %.6g below the filter-ratio bound %.6g "
+                            "(fc*dt < 1e-3: Abaqus .sta warning only); the "
+                            "filter check of ms_at_point decides"
+                            % (f, b["ms_min"]))
     if b.get("ms_nyquist") is not None and f > b["ms_nyquist"]:
         res.warnings.append("f = %.6g above the filter Nyquist bound %.6g: "
                             "Abaqus does not filter at all above fc*dt = 0.5"
@@ -273,9 +299,9 @@ def mass_scaling_window_check(cfg, h_star: float, d_star: DomainDims
                             "(R_K is measured on every run)"
                             % (f, b["ms_guard"]))
     res.conclusion = ("f = %.6g >= filter lower bound %.6g" % (f, b["ms_min"])
-                      if res.passed else
-                      "NOT admissible: f = %.6g below the filter lower bound "
-                      "%.6g" % (f, b["ms_min"]))
+                      if not below else
+                      "f = %.6g below the filter lower bound %.6g: warning "
+                      "only, decided by ms_at_point" % (f, b["ms_min"]))
     return res
 
 
