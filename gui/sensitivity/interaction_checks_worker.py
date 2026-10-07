@@ -19,8 +19,8 @@ class InteractionChecksWorker(QThread):
     def __init__(self, parent=None, **kwargs):
         """`kwargs` go to run_interaction_checks (run_bundle, base_cfg, study,
         h_star, gci_plan, gci_tolerances, guard_fn, cost_fn,
-        gci_runner_factory); `should_cancel` and `progress_cb` are supplied
-        here."""
+        gci_runner_factory, ms_lower, ms_guard_fn); `should_cancel` and
+        `progress_cb` are supplied here."""
         super().__init__(parent)
         self._kw = dict(kwargs)
         self._cancel = False

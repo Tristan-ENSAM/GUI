@@ -2,7 +2,7 @@
 """A-posteriori interaction checks of the sized model (paper §5.7, Table 10).
 
 The sizing is sequential (element size by GCI, then each domain dimension
-separately), so three interactions are checked once the domain study is done
+separately), so four interactions are checked once the domain study is done
 (report, Part B, T9; decisions D8-a and of 2026-10-02):
 
 1. ``domain_combined`` - combined domain dimensions versus separately
@@ -31,6 +31,15 @@ separately), so three interactions are checked once the domain study is done
    2026-10-01); the energy upper bound relies on an indicative coefficient
    while R_K is MEASURED on every run. Both upper bounds are reported as
    warnings, not failures.
+4. ``ms_at_point`` - mass-scaling factor measured at the final point (h*, D*)
+   (decision of 2026-10-07): S(h*, D*, ms*) is compared with
+   S(h*, D*, ms_lower), ms_lower being the value before ms* in the ms study
+   (default ms*/2), with the study's metric and absolute tolerances; passed
+   iff E_max < 1 and both runs pass their safeguards. One run (S(h*, D*,
+   ms*) is the retained run of the domain study, reused). With checks 1 and
+   2 it re-checks each of the three axes (ms, h, D) at the final point.
+   The filter and reverberation safeguards (`ms_guard_fn`) are evaluated on
+   the new run; the reused run keeps the safeguards of the domain study.
 
 Pure host-side module; run_bundle is injected.
 """
@@ -43,8 +52,10 @@ from typing import Callable, Dict, List, Optional
 
 from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.domain_independence import (
-    DIMENSIONS, StudyResult, domain_key, e_max, errors_between, run_candidate,
+    AlignmentError, DIMENSIONS, StudyResult, domain_key, e_max,
+    errors_between, run_candidate,
 )
+from gui.sensitivity.ms_independence import align_samples, with_mass_scaling
 
 # Action attached to a failed combined-domain check (decision D11-a).
 REDO_DOMAIN_ACTION = (
@@ -59,6 +70,8 @@ CHECK_PURPOSES = {
                      "final domain",
     "domain_combined": "Domain dimensions sized separately remain "
                        "independent when grown together",
+    "ms_at_point": "Mass-scaling factor ms* still independent at the final "
+                   "mesh and domain (measured)",
 }
 
 
@@ -267,7 +280,83 @@ def mass_scaling_window_check(cfg, h_star: float, d_star: DomainDims
 
 
 # ---------------------------------------------------------------------------
-# All three
+# 4. Mass scaling measured at (h*, D*)
+# ---------------------------------------------------------------------------
+def _factor(cfg) -> float:
+    st = cfg.step
+    return (float(st.mass_scaling_factor)
+            if getattr(st, "mass_scaling_enabled", False) else 1.0)
+
+
+def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
+                      ms_lower: Optional[float] = None,
+                      guard_fn: Optional[Callable] = None,
+                      cost_fn: Optional[Callable] = None,
+                      emit: Optional[Callable[[dict], None]] = None
+                      ) -> CheckResult:
+    """Check 4 (see module docstring). Adds its run to study.runs."""
+    s = study.settings
+    elem = float(s["elem_size"])
+    res = CheckResult("ms_at_point", CHECK_PURPOSES["ms_at_point"],
+                      passed=None)
+    ms_star = _factor(base_cfg)
+    lower = float(ms_lower) if ms_lower is not None else ms_star / 2.0
+    res.details = {"ms_star": ms_star, "ms_lower": lower}
+    if ms_star <= 1.0:
+        res.passed = True
+        res.conclusion = "no mass scaling (ms = 1): nothing to check"
+        return res
+    if not (1.0 <= lower < ms_star):
+        res.conclusion = ("not evaluable: ms_lower = %.6g must be in [1, ms*"
+                          " = %.6g)" % (lower, ms_star))
+        return res
+    d_star = study.final
+    key = domain_key(d_star, elem)
+    rec_a, s_a = study.cache.get(key, (None, None))
+    if rec_a is None or s_a is None:
+        res.conclusion = "not evaluable: no usable run at D* in the study"
+        return res
+    quantities = tuple(s["thresholds"].keys())
+    rec_b, s_b = run_candidate(
+        run_bundle, with_mass_scaling(base_cfg, lower), d_star,
+        index=len(study.runs), zoi=s["zoi"], grid_step=s["grid_step"],
+        elem_size=elem, window=s["window"], evf_threshold=s["evf_threshold"],
+        quantities=quantities, diagonal_coeff=float("inf"),
+        guard_fn=guard_fn, cost_fn=cost_fn, warnings=study.warnings,
+        emit=emit)
+    study.runs.append(rec_b)
+    if emit is not None:
+        emit({"phase": "run", "record": rec_b, "n_runs": len(study.runs)})
+    res.details["runs"] = [rec_a.index, rec_b.index]
+    res.safeguards_ok = bool(rec_a.guards_ok and rec_b.guards_ok)
+    if s_b is None:
+        res.conclusion = "not evaluable: %s" % (rec_b.error or "no bundle")
+        return res
+    try:
+        b2, a2, info = align_samples(s_b, s_a)
+        errs = errors_between(a2, b2, quantities)
+    except AlignmentError as exc:
+        res.conclusion = "not evaluable: %s" % exc
+        return res
+    res.details.update(info)
+    res.details["errors"] = errs
+    res.e_max, res.q_crit = e_max(errs, s["thresholds"])
+    res.passed = bool(math.isfinite(res.e_max) and res.e_max < 1.0
+                      and res.safeguards_ok)
+    res.conclusion = ("ms* = %.6g independent of ms = %.6g at (h*, D*)"
+                      % (ms_star, lower) if res.passed else
+                      "NOT admissible: %s" % (
+                          "safeguards failed" if not res.safeguards_ok
+                          else "E_max >= 1 (q_crit %s)" % res.q_crit))
+    if not res.passed:
+        res.details["action"] = ("redo the ms study at (h*, D*) and, if ms* "
+                                 "changes, the GCI and the domain study")
+        res.warnings.append(res.details["action"])
+    return res
+
+
+# ---------------------------------------------------------------------------
+# All four
 # ---------------------------------------------------------------------------
 @dataclass
 class ChecksResult:
@@ -287,11 +376,17 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
                            guard_fn: Optional[Callable] = None,
                            cost_fn: Optional[Callable] = None,
                            gci_runner_factory: Optional[Callable] = None,
+                           ms_lower: Optional[float] = None,
+                           ms_guard_fn: Optional[Callable] = None,
                            should_cancel: Optional[Callable[[], bool]] = None,
                            progress_cb: Optional[Callable[[dict], None]] = None
                            ) -> ChecksResult:
-    """Run the three checks in cost order: mass scaling (no run), combined
-    domain (1 run), mesh x domain (one GCI plan on D*).
+    """Run the four checks in cost order: mass-scaling window (no run),
+    combined domain (1 run), ms at (h*, D*) (1 run), mesh x domain (one GCI
+    plan on D*).
+
+    ms_lower : ms compared with ms* in check 4 (default ms*/2).
+    ms_guard_fn : safeguards of the check-4 run (default guard_fn).
 
     gci_plan : kwargs of mesh_gci.run_mesh_gci other than run_bundle,
         base_cfg, domain_dims, tolerances (finest_elem_size, ratio, n_meshes,
@@ -324,6 +419,15 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
                                emit)
     out.checks.append(c1)
     emit({"phase": "check", "check": c1})
+    if cancelled():
+        out.status = "cancelled"
+        return out
+
+    c4 = ms_at_point_check(run_bundle, base_cfg, study, ms_lower,
+                           ms_guard_fn if ms_guard_fn is not None
+                           else guard_fn, cost_fn, emit)
+    out.checks.append(c4)
+    emit({"phase": "check", "check": c4})
     if cancelled():
         out.status = "cancelled"
         return out

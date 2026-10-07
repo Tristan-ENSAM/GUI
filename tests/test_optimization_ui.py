@@ -377,14 +377,14 @@ def test_checks_and_exports_through_the_tab(qapp, monkeypatch, tmp_path):
     chk = tab._last_checks
     assert chk is not None, tab.log.toPlainText()
     assert [c.name for c in chk.checks] == ["ms_x_mesh", "domain_combined",
-                                            "mesh_x_domain"]
+                                            "ms_at_point", "mesh_x_domain"]
     # combined domain: exactly one extra run (D* reused from the study)
     assert res.n_runs == n_runs_before + 1
     assert chk.checks[2].passed is True          # f constant in h -> exact
     assert len(chk.gci_calls) == 3
     rows = list(csv.DictReader(open(folder / "checks.csv")))
     assert [r["check"] for r in rows] == ["ms_x_mesh", "domain_combined",
-                                          "mesh_x_domain"]
+                                          "ms_at_point", "mesh_x_domain"]
     s = json.loads((folder / "summary.json").read_text())
     assert s["interaction_checks"]["status"] == chk.status
     assert "INTERACTION CHECKS:" in tab.log.toPlainText()
@@ -570,3 +570,16 @@ class TestMsStudyWiring:
         cells = [[tab.table.item(r, c).text() for c in range(3)]
                  for r in range(tab.table.rowCount())]
         assert ["ms", "ms", "1000"] in cells
+
+
+def test_checks_take_the_ms_value_before_ms_star(qapp):
+    from gui.sensitivity.ms_independence import MsStudyResult
+    tab = OptimizationTab(ModelConfig())
+    assert tab.ms_lower_for_checks() is None
+    tab.cfg.step.mass_scaling_enabled = True
+    tab.cfg.step.mass_scaling_factor = 1000.0
+    tab._last_ms = (MsStudyResult(ms_values=[250., 500., 1000., 2000.]),
+                    None)
+    assert tab.ms_lower_for_checks() == 500.0
+    tab.cfg.step.mass_scaling_factor = 1500.0
+    assert tab.ms_lower_for_checks() is None
