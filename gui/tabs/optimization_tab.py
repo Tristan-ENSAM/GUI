@@ -370,14 +370,16 @@ class OptimizationTab(QWidget):
         self.btn_checks.setToolTip(
             "A-posteriori checks of the sized model (paper \u00a75.7):\n"
             "mass-scaling factor inside its window at (h*, D*), the four\n"
-            "dimensions grown together (1 run), and the GCI plan of step 1\n"
-            "run again on D* (h* must stay within tolerance). Available once\n"
-            "a domain study has finished.")
+            "dimensions grown together (1 run), ms* against the previous ms\n"
+            "at (h*, D*) (1 run), and the GCI plan of step 1 run again on D*\n"
+            "(h* must stay within tolerance). Available once a domain study\n"
+            "has finished.")
         self.btn_checks.setEnabled(False)
         self.btn_checks.clicked.connect(self._on_run_interaction_checks)
         kg.addWidget(self.btn_checks, 0, 0)
         kg.addWidget(hint("f in its window at (h*, D*); D* grown in the four "
-                          "directions (1 run); GCI of step 1 re-run on D*."),
+                          "directions (1 run); ms* vs the previous ms at "
+                          "(h*, D*) (1 run); GCI of step 1 re-run on D*."),
                      0, 1)
         kg.setColumnStretch(1, 1)
 
@@ -1580,6 +1582,18 @@ class OptimizationTab(QWidget):
                                             folder))
         return paths
 
+    def ms_lower_for_checks(self):
+        """The ms value before the current ms* in the last ms study, or None
+        (the check then uses ms*/2)."""
+        if self._last_ms is None:
+            return None
+        values = list(self._last_ms[0].ms_values)
+        ms = self._ms_factor()
+        for a, b in zip(values[:-1], values[1:]):
+            if math.isclose(b, ms, rel_tol=1e-9):
+                return float(a)
+        return None
+
     def _checks_available(self) -> bool:
         res = self._last_domain_result
         return bool(res is not None and res.runs and
@@ -1638,11 +1652,31 @@ class OptimizationTab(QWidget):
         self._log_ui("  GCI plan on D*: finest %.4g | ratio %.3g | n %d"
                      % (finest, gci_plan["ratio"], gci_plan["n_meshes"]))
         self._log_ui("=" * 68)
+        # Check ms_at_point: ms* against the value before it in the last ms
+        # study (ms*/2 without one), with the ms study's safeguards (filter
+        # and reverberation checks) when the output filter is on.
+        base_cfg = self._study_cfg_copy()
+        ms_lower = self.ms_lower_for_checks()
+        guard_core = make_guard_fn(guards)
+        ms_guard_fn = None
+        if getattr(base_cfg.step, "output_filter_enabled", False):
+            base_cfg.step.output_filter_verify = True
+
+            def ms_guard_fn(bundle):
+                out = dict(guard_core(bundle))
+                out.update(filter_guards(run_bundle.state.get("filter_check")))
+                return out
+        else:
+            self._log_ui("  ms_at_point: output filter off, the filter and "
+                         "reverberation safeguards are not evaluated")
+        self._log_ui("  ms_at_point: ms* = %g against ms = %s"
+                     % (self._ms_factor(), "%g" % ms_lower
+                        if ms_lower is not None else "ms*/2"))
         self._checks_worker = InteractionChecksWorker(
-            run_bundle=run_bundle, base_cfg=self._study_cfg_copy(),
+            run_bundle=run_bundle, base_cfg=base_cfg,
             study=study, h_star=h_star, gci_plan=gci_plan,
-            gci_tolerances=gci_tol, guard_fn=make_guard_fn(guards),
-            cost_fn=cost_fn,
+            gci_tolerances=gci_tol, guard_fn=guard_core,
+            cost_fn=cost_fn, ms_lower=ms_lower, ms_guard_fn=ms_guard_fn,
             gci_runner_factory=lambda rb: RecordingRunner(
                 rb, n_cpu=cpus, guard_settings=guards))
         self._checks_worker.progress.connect(self._on_checks_progress)

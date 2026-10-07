@@ -211,6 +211,7 @@ class TestRunAll:
         assert seen["dims"] == study.final
         assert [c.name for c in out.checks] == ["ms_x_mesh",
                                                 "domain_combined",
+                                                "ms_at_point",
                                                 "mesh_x_domain"]
         assert len(out.gci_calls) == 3
         assert out.status == "accepted" and out.accepted
@@ -231,3 +232,75 @@ class TestRunAll:
         assert out.status == "incomplete"
         assert out.checks[-1].passed is None
         assert any("GCI on D*" in w for w in study.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 4. ms measured at (h*, D*)
+# ---------------------------------------------------------------------------
+class _MsCfg(_Cfg):
+    def __init__(self, ms=1000.0, enabled=True):
+        super().__init__()
+        self.step = SimpleNamespace(mass_scaling_enabled=enabled,
+                                    mass_scaling_factor=ms)
+
+
+class _MsBundle(_Bundle):
+    """Vx shifted by k * (ms* - ms): the cached run (ms*) has no shift."""
+
+    def __init__(self, dims, shift):
+        super().__init__(dims)
+        self.shift = shift
+
+    def field(self, inst, var):
+        out = super().field(inst, var)
+        if var == "V1":
+            out = out + self.shift
+        return out
+
+
+def _ms_runner(k, ms_star=1000.0, log=None):
+    def run(cfg):
+        if log is not None:
+            log.append(cfg.step.mass_scaling_factor)
+        return _MsBundle(_dims_of(cfg),
+                         k * (ms_star - cfg.step.mass_scaling_factor))
+    return run
+
+
+class TestMsAtPoint:
+    def test_one_run_at_half_ms_and_pass(self):
+        study, _ = _study()
+        n0 = len(study.runs)
+        log = []
+        c = ic.ms_at_point_check(_ms_runner(0.01, log=log), _MsCfg(), study)
+        assert log == [500.0]                      # S(D*, ms*) reused
+        assert len(study.runs) == n0 + 1
+        assert c.passed is True and c.details["ms_lower"] == 500.0
+        assert c.details["errors"]["Vx"] == pytest.approx(5.0)
+
+    def test_explicit_lower_value_and_failure(self):
+        study, _ = _study()
+        c = ic.ms_at_point_check(_ms_runner(1.0), _MsCfg(), study,
+                                 ms_lower=250.0)
+        assert c.details["ms_lower"] == 250.0
+        assert c.passed is False and "E_max" in c.conclusion
+        assert "redo the ms study" in c.details["action"]
+
+    def test_safeguard_failure_on_the_new_run(self):
+        study, _ = _study()
+        c = ic.ms_at_point_check(_ms_runner(0.0), _MsCfg(), study,
+                                 guard_fn=lambda b: {"reverb": (0.5, False)})
+        assert c.e_max < 1.0 and c.passed is False
+        assert c.safeguards_ok is False
+
+    def test_without_mass_scaling_nothing_to_check(self):
+        study, _ = _study()
+        c = ic.ms_at_point_check(_ms_runner(1.0), _MsCfg(enabled=False),
+                                 study)
+        assert c.passed is True and "no mass scaling" in c.conclusion
+
+    def test_lower_value_must_be_below_ms_star(self):
+        study, _ = _study()
+        c = ic.ms_at_point_check(_ms_runner(0.0), _MsCfg(), study,
+                                 ms_lower=2000.0)
+        assert c.passed is None
