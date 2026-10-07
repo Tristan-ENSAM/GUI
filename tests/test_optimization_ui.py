@@ -458,3 +458,115 @@ class TestTabConfigLogic:
         assert tab.thresholds_complete() is True
 
 
+
+
+# ---------------------------------------------------------------------------
+# Step 0: mass-scaling independence study wiring
+# ---------------------------------------------------------------------------
+class TestMsStudyWiring:
+    @pytest.fixture
+    def ms_launch(self, launch, monkeypatch):
+        import gui.tabs.optimization_tab as ot
+        monkeypatch.setattr(ot, "MsIndependenceWorker", _CaptureWorker)
+        launch.cfg.step.output_filter_enabled = True
+        launch.cfg.step.output_filter_verify = False
+        return launch
+
+    def test_defaults(self, tab):
+        values, elem = tab.ms_settings()
+        assert values == (250.0, 500.0, 1000.0, 2000.0, 4000.0)
+        assert elem == tab.cfg.elem_size
+
+    def test_busy_includes_the_ms_button(self, tab):
+        tab._busy(True, "running")
+        assert not tab.btn_ms.isEnabled()
+        tab._busy(False)
+        assert tab.btn_ms.isEnabled()
+
+    def test_requires_the_tolerances(self, ms_launch, warnings):
+        ms_launch._on_run_ms_independence()
+        assert warnings and "tolerances" in warnings[0].lower()
+        assert _CaptureWorker.last is None
+
+    def test_requires_the_output_filter(self, ms_launch, warnings):
+        _fill_thresholds(ms_launch)
+        ms_launch.cfg.step.output_filter_enabled = False
+        ms_launch._on_run_ms_independence()
+        assert warnings and "filter" in warnings[0].lower()
+        assert _CaptureWorker.last is None
+
+    def test_rejects_bad_ms_values(self, ms_launch, warnings):
+        _fill_thresholds(ms_launch)
+        ms_launch.le_ms_values.setText("1000, 500")
+        ms_launch._on_run_ms_independence()
+        assert warnings and "increasing" in warnings[0]
+        assert _CaptureWorker.last is None
+
+    def test_launch_passes_the_study_settings(self, ms_launch):
+        tab = ms_launch
+        _fill_thresholds(tab)
+        tab.le_ms_values.setText("500 1000 2000")
+        tab.le_ms_elem.setText("0.004")
+        tab._on_run_ms_independence()
+        kw = _CaptureWorker.last
+        assert kw["ms_values"] == (500.0, 1000.0, 2000.0)
+        assert kw["elem_size"] == pytest.approx(0.004)
+        assert kw["thresholds"]["Ff"] == pytest.approx(0.5)
+        assert kw["domain_dims"] == tab._dims_from_cfg()
+        assert kw["base_cfg"] is not tab.cfg
+        assert kw["base_cfg"].step.output_filter_verify is True
+        assert tab.cfg.step.output_filter_verify is False
+        assert callable(kw["guard_fn"]) and callable(kw["cost_fn"])
+
+    def test_guard_fn_adds_the_filter_checks(self, ms_launch, monkeypatch):
+        tab = ms_launch
+        _fill_thresholds(tab)
+        made = {}
+        real = tab._make_run_bundle
+
+        def capture(*a, **k):
+            made["rb"] = real(*a, **k)
+            return made["rb"]
+        monkeypatch.setattr(tab, "_make_run_bundle", capture)
+        tab._on_run_ms_independence()
+        guard_fn = _CaptureWorker.last["guard_fn"]
+        made["rb"].state["filter_check"] = {
+            "passed": True, "filters": {"SENSORBAND": {"rel_max_dev": 0.001}},
+            "reverberation": {"passed": True, "e_rev": 0.002}}
+        b = _GridBundle(tab._dims_from_cfg(), 0.01)
+        g = guard_fn(b)
+        assert g["filter"] == (pytest.approx(0.001), True)
+        assert g["reverb"] == (pytest.approx(0.002), True)
+        assert g["R_K"][1] is True
+        made["rb"].state["filter_check"] = None
+        assert guard_fn(b)["filter"] == (None, False)
+
+    def test_result_is_logged_tabled_and_exported(self, tab, tmp_path):
+        from gui.sensitivity.domain_independence import RunRecord
+        from gui.sensitivity.ms_independence import (MsComparison,
+                                                     MsStudyResult)
+        dims = {"h_wp": .2, "h_void": .2, "l_wp": .2, "l_void": .2}
+        runs = [RunRecord(index=i, dims=dims, job_ok=True,
+                          guards={"reverb": (0.002, True)})
+                for i in range(3)]
+        comps = [MsComparison(1, 500., 1000., {"T": 3.0}, 0.3, "T", True,
+                              True, 0, 1),
+                 MsComparison(2, 1000., 2000., {"T": 12.0}, 1.2, "T", True,
+                              False, 1, 2)]
+        res = MsStudyResult(ms_values=[500., 1000., 2000.], retained=1000.,
+                            status="converged", runs=runs,
+                            run_ms=[500., 1000., 2000.], comparisons=comps,
+                            settings={"elem_size": 0.004,
+                                      "thresholds": {"T": 10.0}})
+        tab._on_ms_progress({"phase": "run", "record": runs[0], "ms": 500.})
+        tab._on_ms_progress({"phase": "comparison", "comparison": comps[1]})
+        tab._pending_ms_dir = tmp_path
+        tab._on_ms_done(res)
+        text = tab.log.toPlainText()
+        assert "ms=500 | job ok | reverb=0.002" in text
+        assert "ms 1000->2000" in text and "not independent" in text
+        assert "largest independent ms = 1000" in text
+        assert (tmp_path / "ms_comparisons.csv").exists()
+        cells = [[tab.table.item(r, c).text() for c in range(3)]
+                 for r in range(tab.table.rowCount())]
+        assert ["ms", "ms", "1000"] in cells
