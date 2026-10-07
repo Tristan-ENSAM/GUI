@@ -210,3 +210,38 @@ def test_exports(tmp_path):
     assert float(comps[-1]["E_T_over_eps"]) == pytest.approx(1.2)
     s = json.loads((tmp_path / "ms_summary.json").read_text())
     assert s["retained_ms"] == 1000.0 and s["status"] == "converged"
+
+
+class _ShiftedBundle(_Bundle):
+    """Frames shifted by an ms-dependent offset (one increment ~ sqrt(ms))
+    and a history sampled at every increment: different count per ms."""
+
+    def __init__(self, ms, slope, shift=1e-9):
+        super().__init__(ms, slope)
+        self.times = np.linspace(0.0, 1e-4, _NT) + shift * np.sqrt(ms)
+        self.history_time = np.linspace(0.0, 1e-4, int(400 / np.sqrt(ms)) + 3)
+
+    def history(self, var):
+        base = {"RF1_RP": 0.8, "RF2_RP": 0.3}[var]
+        return base + 1e-3 * self.history_time / 1e-4
+
+
+class TestTimeAlignment:
+    def _run(self, shift):
+        def run(cfg):
+            return _ShiftedBundle(cfg.step.mass_scaling_factor, 0.012, shift)
+        return _study(0.012, run_bundle=run)
+
+    def test_runs_of_different_ms_are_compared(self):
+        res = self._run(1e-9)
+        assert res.status == "converged" and res.retained == 1000.0
+        assert not res.warnings
+        c = res.comparisons[0]
+        # identical linear forces: interpolation leaves no error
+        assert c.errors["Fc"] == pytest.approx(0.0, abs=1e-9)
+        assert 0.0 < c.frame_offset_over_interval < 0.5
+
+    def test_frames_offset_beyond_half_an_interval_are_refused(self):
+        res = self._run(1e-6)
+        assert res.status == "below_range"
+        assert "half the frame interval" in res.warnings[0]

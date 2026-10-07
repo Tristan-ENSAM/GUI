@@ -1169,11 +1169,15 @@ class OptimizationTab(QWidget):
             c = ev["comparison"]
             errs = "  ".join("%s=%s" % (q, self._fmt(v))
                              for q, v in c.errors.items())
-            self._log_ui("  ms %g->%g | %s | E_max=%s (%s) | %s%s"
+            off = getattr(c, "frame_offset_over_interval", float("nan"))
+            self._log_ui("  ms %g->%g | %s | E_max=%s (%s) | %s%s%s"
                          % (c.ms_from, c.ms_to, errs,
                             self._fmt(c.e_max, "%.3g"), c.q_crit or "-",
                             "success" if c.success else "not independent",
-                            "" if c.guards_ok else " (safeguards)"))
+                            "" if c.guards_ok else " (safeguards)",
+                            "" if not math.isfinite(off) else
+                            " | frame offset %.2g %% of the interval"
+                            % (100.0 * off)))
         elif phase == "warning":
             self._log_ui("  [WARNING] %s" % ev.get("message", ""))
 

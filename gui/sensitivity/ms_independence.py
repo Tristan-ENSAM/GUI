@@ -29,6 +29,22 @@ chain of successes:
   (independence not shown at ms_1: the sequence must start lower)
 * cancelled                  -> ms* as reached so far status "cancelled"
 
+Time alignment (why the domain study's exact rule is relaxed here)
+-----------------------------------------------------------------
+Abaqus/Explicit writes a field frame at the end of the increment that
+reaches the requested output time, and the stable increment scales with
+sqrt(ms). Two runs with different ms therefore have the SAME number of
+frames but frame times shifted by up to about one increment, and their
+history (written every increment) has different sample counts. The exact
+time match of the domain study (same ms, same increment) would refuse every
+comparison. Here (`align_samples`):
+
+* field frames are paired by index; the pairing is accepted when every
+  offset is at most half the median frame interval (so each frame pairs
+  with its nearest neighbour), otherwise the comparison is refused;
+* forces of the earlier run are linearly interpolated onto the history
+  times of the later run, over the window part both runs cover.
+
 Safeguards
 ----------
 Injected `guard_fn(bundle) -> {name: (value, ok)}`, as in the domain study.
@@ -49,6 +65,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from gui.core.domain_sizing import DomainDims
+import numpy as np
+
 from gui.sensitivity.domain_independence import (
     ALL_QUANTITIES, AlignmentError, RunRecord, ZoiSample, e_max,
     errors_between, run_candidate)
@@ -100,6 +118,47 @@ def filter_guards(res: Optional[dict]) -> Dict[str, Tuple[Optional[float],
             "reverb": (None if rval is None else float(rval), rok)}
 
 
+def align_samples(sa: ZoiSample, sb: ZoiSample
+                  ) -> Tuple[ZoiSample, ZoiSample, Dict[str, float]]:
+    """Bring two runs of different ms onto common sample times.
+
+    Returns (a', b', info) where a' and b' share field_times and
+    force_times, so `errors_between` applies unchanged. info gives the
+    largest frame offset and its ratio to the median frame interval.
+    Raises AlignmentError when the frames cannot be paired one to one."""
+    ta = np.asarray(sa.field_times, dtype=float)
+    tb = np.asarray(sb.field_times, dtype=float)
+    info: Dict[str, float] = {}
+    a2 = ZoiSample(fields=dict(sa.fields), field_times=tb.copy())
+    b2 = ZoiSample(fields=dict(sb.fields), field_times=tb.copy())
+    if sa.fields or sb.fields:
+        if ta.shape != tb.shape:
+            raise AlignmentError(
+                "Field-frame counts differ in the window (%d vs %d): the "
+                "comparison is refused." % (ta.size, tb.size))
+        off = float(np.max(np.abs(ta - tb))) if ta.size else 0.0
+        step = float(np.median(np.diff(tb))) if tb.size > 1 else float("inf")
+        info = {"frame_offset_s": off,
+                "frame_offset_over_interval": off / step if step > 0
+                else float("inf")}
+        if off > 0.5 * step:
+            raise AlignmentError(
+                "Field frames are offset by %.3g s, more than half the frame "
+                "interval (%.3g s): the comparison is refused." % (off, step))
+    fa = np.asarray(sa.force_times, dtype=float)
+    fb = np.asarray(sb.force_times, dtype=float)
+    common = [q for q in sa.forces if q in sb.forces]
+    if common and fa.size >= 2 and fb.size:
+        keep = (fb >= fa[0]) & (fb <= fa[-1])
+        a2.force_times = fb[keep]
+        b2.force_times = fb[keep]
+        for q in common:
+            a2.forces[q] = np.interp(fb[keep], fa,
+                                     np.asarray(sa.forces[q], dtype=float))
+            b2.forces[q] = np.asarray(sb.forces[q], dtype=float)[keep]
+    return a2, b2, info
+
+
 @dataclass
 class MsComparison:
     """Comparison k: S(ms_k) against S(ms_(k-1))."""
@@ -113,6 +172,7 @@ class MsComparison:
     success: bool                           # E_max < 1 and guards_ok
     run_from: int = -1
     run_to: int = -1
+    frame_offset_over_interval: float = float("nan")
 
 
 @dataclass
@@ -220,11 +280,13 @@ def run_ms_independence(
             break
         cur = simulate(ms_values[k])
         (rec_a, s_a), (rec_b, s_b) = prev, cur
+        info: Dict[str, float] = {}
         if s_a is None or s_b is None:
             errs = {q: float("nan") for q in quantities}
         else:
             try:
-                errs = errors_between(s_b, s_a, quantities)
+                a2, b2, info = align_samples(s_a, s_b)
+                errs = errors_between(b2, a2, quantities)
             except AlignmentError as exc:
                 errs = {q: float("nan") for q in quantities}
                 result.warnings.append("ms comparison %d: %s" % (k, exc))
@@ -234,7 +296,10 @@ def run_ms_independence(
         comp = MsComparison(k=k, ms_from=ms_values[k - 1],
                             ms_to=ms_values[k], errors=errs, e_max=em,
                             q_crit=qc, guards_ok=pair_ok, success=success,
-                            run_from=rec_a.index, run_to=rec_b.index)
+                            run_from=rec_a.index, run_to=rec_b.index,
+                            frame_offset_over_interval=float(
+                                info.get("frame_offset_over_interval",
+                                         float("nan"))))
         result.comparisons.append(comp)
         emit({"phase": "comparison", "comparison": comp,
               "n_runs": len(result.runs)})
