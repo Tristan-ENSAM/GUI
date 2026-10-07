@@ -86,9 +86,8 @@ class PreferencesDialog(QDialog):
 
         note = QLabel(
             "Paths are stored in your user profile, not in the project file.\n"
-            "In remote mode Abaqus runs on the compute PC, with the paths set\n"
-            "in the Preferences of the GUI on that PC; the script path above\n"
-            "is still used here to check both PCs have the same scripts."
+            "In remote mode the model-generator script above is still the one\n"
+            "used: it is copied to the queue folder for the compute PC."
         )
         note.setStyleSheet("color: #888; font-style: italic;")
         note.setWordWrap(True)
@@ -109,11 +108,17 @@ class PreferencesDialog(QDialog):
         self.cb_remote.setChecked(prefs.execution_mode == "remote")
         self.cb_remote.setToolTip(
             "Runs are queued in the folder below and executed by the agent\n"
-            "started on the compute PC (run_remote_agent.bat). The working\n"
-            "directory must then be on the same shared drive.")
+            "started on the compute PC (start_agent.bat, written in that\n"
+            "folder when you click OK). The working directory must then be\n"
+            "on the same shared drive.")
         f_exec.addRow(self.cb_remote)
         self.fld_queue = _PathField(prefs.remote_queue_dir, "dir")
         f_exec.addRow("Queue folder (shared drive):", self.fld_queue)
+        self.fld_remote_abq = QLineEdit(prefs.remote_abaqus_cmd)
+        self.fld_remote_abq.setToolTip(
+            "Path of abaqus.bat ON THE COMPUTE PC (not browsable from here).\n"
+            "Written into start_agent.bat in the queue folder.")
+        f_exec.addRow("Abaqus command on the compute PC:", self.fld_remote_abq)
         outer.addWidget(g_exec)
 
         # ---- Display group ----
@@ -149,4 +154,5 @@ class PreferencesDialog(QDialog):
             temp_unit_default     = "K" if self.cb_kelvin_default.isChecked() else "C",
             execution_mode        = "remote" if self.cb_remote.isChecked() else "local",
             remote_queue_dir      = self.fld_queue.value(),
+            remote_abaqus_cmd     = self.fld_remote_abq.text().strip(),
         )

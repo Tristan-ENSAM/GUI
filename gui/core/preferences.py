@@ -81,6 +81,8 @@ class Preferences:
     #      the working directory must be on that same shared drive. ----
     execution_mode: str = "local"    # "local" | "remote"
     remote_queue_dir: str = ""
+    # abaqus.bat of the COMPUTE PC (written into start_agent.bat).
+    remote_abaqus_cmd: str = r"C:\SIMULIA\Commands\abaqus.bat"
 
 
 # ----------------------------------------------------------------------------
