@@ -17,6 +17,11 @@ dimensions.csv      initial / selected / normalised dimension (Table 9)
 gci.csv             per-quantity GCI outcome (Table 8 as rewritten, P7)
 gci_meshes.csv      per-mesh scalars and cost of a GCI study (Table 8)
 checks.csv          interaction checks (Table 10)
+ms_runs.csv         every run of the mass-scaling study: ms, cost,
+                    safeguards incl. filter and reverberation (Fig. 8)
+ms_comparisons.csv  successive ms comparisons: E_q, E_q/eps_q, E_max,
+                    q_crit, decision (Table 7)
+ms_summary.json     retained ms, status, settings of the ms study
 summary.json        selected model, Eq. (24) normalisation, Eq. (22)-(23)
                     cost gain and speed-up, statuses
 ==================  =======================================================
@@ -409,3 +414,73 @@ def write_gci_exports(folder, gci_result, calls=None,
     return [write_csv(folder / "gci.csv", gci_rows(gci_result, tolerances)),
             write_csv(folder / "gci_meshes.csv",
                       gci_mesh_rows(gci_result, calls))]
+
+
+# ---------------------------------------------------------------------------
+# Mass-scaling independence study (paper step 0, Table 7, Fig. 8)
+# ---------------------------------------------------------------------------
+_MS_GUARDS = ("outputs", "R_K", "R_HG", "filter", "reverb")
+
+
+def ms_run_rows(ms_result) -> List[Dict[str, object]]:
+    """One row per ms run: factor, cost, safeguards (filter and
+    reverberation checks included)."""
+    rows = []
+    for r, ms in zip(ms_result.runs, ms_result.run_ms):
+        row = {"run": r.index, "mass_scaling_factor": ms,
+               "mesh_size_mm": ms_result.settings.get("elem_size")}
+        row.update({n + "_mm": r.dims.get(n) for n in DIMENSIONS})
+        row.update(_cost(r))
+        for name in _MS_GUARDS:
+            v, ok = r.guards.get(name, (None, None))
+            row[name] = _num(v)
+            row[name + "_ok"] = ok
+        row["safeguards_ok"] = r.guards_ok
+        row["retained"] = (ms_result.retained is not None
+                           and ms == ms_result.retained)
+        row["job_ok"] = r.job_ok
+        row["error"] = r.error
+        rows.append(row)
+    return rows
+
+
+def ms_comparison_rows(ms_result, quantities: Sequence[str] = ALL_QUANTITIES
+                       ) -> List[Dict[str, object]]:
+    """One row per successive comparison S(ms_k) vs S(ms_(k-1)) (Table 7)."""
+    thr = ms_result.settings.get("thresholds", {})
+    rows = []
+    for c in ms_result.comparisons:
+        row = {"k": c.k, "ms_from": c.ms_from, "ms_to": c.ms_to}
+        for q in quantities:
+            e = _num(c.errors.get(q))
+            row["E_" + q] = e
+            eps = thr.get(q)
+            row["E_%s_over_eps" % q] = (e / eps if e is not None and eps
+                                        else None)
+        row.update({"E_max": _num(c.e_max), "q_crit": c.q_crit,
+                    "safeguards_ok": c.guards_ok,
+                    "decision": "independent" if c.success
+                    else "not independent",
+                    "run_from": c.run_from, "run_to": c.run_to})
+        rows.append(row)
+    return rows
+
+
+def write_ms_exports(folder, ms_result) -> List[Path]:
+    """ms_runs.csv, ms_comparisons.csv and ms_summary.json for one study."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    summ = {"status": ms_result.status, "retained_ms": ms_result.retained,
+            "n_runs": ms_result.n_runs,
+            "settings": {k: (list(v) if isinstance(v, tuple) else v)
+                         for k, v in ms_result.settings.items()},
+            "c_cpu_total_s": _num(sum(
+                getattr(r.cost, "c_cpu_s", None) or 0.0
+                for r in ms_result.runs if r.cost is not None) or None),
+            "warnings": list(ms_result.warnings)}
+    p_json = folder / "ms_summary.json"
+    p_json.write_text(json.dumps(summ, indent=2), encoding="utf-8")
+    return [write_csv(folder / "ms_runs.csv", ms_run_rows(ms_result)),
+            write_csv(folder / "ms_comparisons.csv",
+                      ms_comparison_rows(ms_result)),
+            p_json]

@@ -140,3 +140,17 @@ class TestDomainStudyPersistence:
                 o.dom_m_ratios) == (10, 8, 1, 2)
         assert (o.window_start, o.window_end) == ("0.3", "1.0")
         assert o.rhg_max == "0.05"
+
+
+def test_ms_study_settings_round_trip(qapp):
+    cfg = ModelConfig()
+    assert cfg.optimization.ms_values == "250, 500, 1000, 2000, 4000"
+    tab = OptimizationTab(cfg)
+    tab.le_ms_values.setText("500, 1000")
+    tab.le_ms_elem.setText("0.004")
+    assert (cfg.optimization.ms_values, cfg.optimization.ms_elem_size) == \
+        ("500, 1000", "0.004")
+    cfg2 = ModelConfig.from_json_dict(cfg.to_json_dict())
+    tab2 = OptimizationTab(cfg2)
+    assert tab2.le_ms_values.text() == "500, 1000"
+    assert tab2.le_ms_elem.text() == "0.004"

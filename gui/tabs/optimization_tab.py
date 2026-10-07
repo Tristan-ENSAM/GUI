@@ -2,9 +2,13 @@
 """
 Optimization tab: size the CEL model for the paper's methodology.
 
-Two studies, both measured in the ZOI (the Optimization measurement zone,
+Three studies, all measured in the ZOI (the Optimization measurement zone,
 distinct from the output ROI of the Geometry tab):
 
+  * the mass-scaling factor by an independence study on a fixed mesh and
+    domain (gui.sensitivity.ms_independence): increasing ms compared
+    successively against the same ABSOLUTE tolerances eps_q as the domain
+    study, with the filter and reverberation checks as extra safeguards;
   * mesh convergence by Richardson extrapolation / GCI on a fixed domain
     (gui.sensitivity.mesh_gci), with RELATIVE tolerances per quantity;
   * Eulerian-domain sizing by a sequential independence study
@@ -14,7 +18,7 @@ distinct from the output ROI of the Geometry tab):
     ABSOLUTE tolerances eps_q, residual influence bounded by a geometric tail
     (fallback: successive criterion), run safeguards R_K, R_HG and outputs.
 
-Both studies share the time window T. Each candidate is one Abaqus run
+All studies share the time window T. Each candidate is one Abaqus run
 (run_simul) launched here, replicating the Sensitivity tab's run mechanism;
 the studies receive a deep copy of the current config, which is never
 modified. The study cores are unit-tested elsewhere.
@@ -51,6 +55,8 @@ from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
 from gui.sensitivity.domain_independence import initial_dims_from_zoi
 from gui.sensitivity.domain_independence_worker import DomainIndependenceWorker
+from gui.sensitivity.ms_independence import filter_guards, parse_ms_values
+from gui.sensitivity.ms_independence_worker import MsIndependenceWorker
 from gui.sensitivity.run_record import (
     GuardSettings, cost_record, guard_reasons, make_guard_fn)
 from gui.sensitivity.run_worker import (
@@ -122,6 +128,7 @@ class OptimizationTab(QWidget):
         self._last_domain_dir = None     # its study folder (exports)
         self._last_gci = None            # (MeshGciResult, calls, tol, dir)
         self._last_checks = None         # ChecksResult
+        self._last_ms = None             # (MsStudyResult, folder)
         self._current_sta = None        # current job's .sta path (for progress)
         self._sim_timer = QTimer(self)
         self._sim_timer.setInterval(500)
@@ -203,6 +210,34 @@ class OptimizationTab(QWidget):
             self._dom_texts[attr] = le
             cg0.addWidget(le, 1, 3 + 2 * i)
         cg0.setColumnStretch(10, 1)
+
+        # ---- Step 0 · mass-scaling factor by an independence study -------
+        gms = QGroupBox("0 \u00b7 Mass scaling \u2014 independence study")
+        sg = grid(gms)
+        sg.addWidget(QLabel("ms values"), 0, 0)
+        self.le_ms_values = QLineEdit(OptimizationCfgDefaults.ms_values)
+        self.le_ms_values.setToolTip(
+            "Mass-scaling factors to test, strictly increasing, separated by\n"
+            "commas or spaces.")
+        sg.addWidget(self.le_ms_values, 0, 1, 1, 4)
+        sg.addWidget(QLabel("mesh [mm]"), 0, 5)
+        self.le_ms_elem = num_edit(placeholder="= elem",
+                                   tip="Element size of the ms runs [mm]; "
+                                       "empty = Mesh tab element size")
+        sg.addWidget(self.le_ms_elem, 0, 6)
+        self.btn_ms = QPushButton("Run mass-scaling study")
+        self.btn_ms.setToolTip(
+            "Runs the ms values in increasing order on the current domain and\n"
+            "compares each run with the previous one (E_max with the absolute\n"
+            "eps_q of step 2). Safeguards: outputs, R_K, R_HG, filter check and\n"
+            "reverberation check. Keeps the largest ms reached by an unbroken\n"
+            "chain of successes; stops at the first failure.")
+        self.btn_ms.clicked.connect(self._on_run_ms_independence)
+        sg.addWidget(self.btn_ms, 1, 0, 1, 2)
+        sg.addWidget(hint("Uses the \u03b5_q of step 2 and the current "
+                          "domain. Needs the output filter with verification "
+                          "(Step tab)."), 1, 2, 1, 6)
+        sg.setColumnStretch(7, 1)
 
         # ---- Step 1 · mesh size by Richardson / GCI ---------------------
         gmesh = QGroupBox("1 \u00b7 Mesh size \u2014 Richardson / GCI on a "
@@ -350,7 +385,7 @@ class OptimizationTab(QWidget):
         inputs = QWidget()
         il_ = QVBoxLayout(inputs)
         il_.setContentsMargins(0, 0, 4, 0)
-        for gbox in (gcom, gmesh, gdom, gchk):
+        for gbox in (gcom, gms, gmesh, gdom, gchk):
             il_.addWidget(gbox)
         il_.addStretch(1)
         scroll = QScrollArea()
@@ -406,7 +441,7 @@ class OptimizationTab(QWidget):
         self.tabs.addTab(self.log, "Log")
         conv = QWidget(); cv = QVBoxLayout(conv)
         cv.setContentsMargins(0, 0, 0, 0)
-        self.fig = Figure(figsize=(6, 3.2))
+        self.fig = Figure(figsize=(8, 3.2))
         self.canvas = FigureCanvas(self.fig)
         # Matplotlib navigation toolbar: interactive zoom / pan / home / save.
         self._nav = NavigationToolbar2QT(self.canvas, conv)
@@ -415,7 +450,10 @@ class OptimizationTab(QWidget):
         # comparison versus the tested value, one series per dimension), the
         # GCI study (f_q(h) relative to its reference, per quantity) and the
         # cost-E_max map (paper Fig. 13).
-        self._ax_domain, self._ax_gci, self._ax_cost = self.fig.subplots(1, 3)
+        # A fourth axis shows the mass-scaling study (E_max per comparison
+        # versus the larger ms of the pair, paper Fig. 8).
+        (self._ax_ms, self._ax_domain, self._ax_gci,
+         self._ax_cost) = self.fig.subplots(1, 4)
         cv.addWidget(self.canvas, 1)
         self.table = QTableWidget(0, len(_TABLE_COLUMNS))
         self.table.setHorizontalHeaderLabels(list(_TABLE_COLUMNS))
@@ -502,7 +540,7 @@ class OptimizationTab(QWidget):
     # ===================================================================
     def _opt_line_edits(self):
         les = [self.le_grid_step, self.le_gci_finest, self.le_gci_ratio,
-               self.le_gci_min]
+               self.le_gci_min, self.le_ms_values, self.le_ms_elem]
         les += list(self.le_zoi.values())
         les += list(self._q_eps.values())
         les += list(self._dj_eps.values())
@@ -539,6 +577,8 @@ class OptimizationTab(QWidget):
             setattr(o, attr, int(sp.value()))
         for attr, le in self._dom_texts.items():
             setattr(o, attr, le.text())
+        o.ms_values = self.le_ms_values.text()
+        o.ms_elem_size = self.le_ms_elem.text()
         self.changed.emit()
 
     def _load_opt_from_cfg(self):
@@ -569,6 +609,9 @@ class OptimizationTab(QWidget):
             for attr, le in self._dom_texts.items():
                 le.setText(str(getattr(o, attr, getattr(
                     OptimizationCfgDefaults, attr))))
+            self.le_ms_values.setText(str(getattr(
+                o, "ms_values", OptimizationCfgDefaults.ms_values)))
+            self.le_ms_elem.setText(str(getattr(o, "ms_elem_size", "")))
         finally:
             self._loading = False
 
@@ -729,7 +772,7 @@ class OptimizationTab(QWidget):
         counter = {"i": 0}
         # Path of the LAST launched job's .sta and its name, readable by the
         # study's cost hook right after run_bundle returns (same thread).
-        state = {"sta": None, "job": None}
+        state = {"sta": None, "job": None, "filter_check": None}
 
         def run_bundle(cfg):
             i = counter["i"]; counter["i"] += 1
@@ -737,6 +780,7 @@ class OptimizationTab(QWidget):
             out_path = Path(run_dir) / ("%s.results.npz" % job)
             self._current_sta = Path(run_dir) / ("%s.sta" % job)
             state["sta"], state["job"] = self._current_sta, job
+            state["filter_check"] = None
             try:
                 if out_path.exists():
                     out_path.unlink()
@@ -800,6 +844,18 @@ class OptimizationTab(QWidget):
                     or not out_path.exists():
                 self._log_ui("[%s] no bundle (rc=%s)\n" % (job, proc.returncode))
                 return None
+            # Same post-run check as the Sensitivity runs (run_worker): a
+            # no-op unless the Step tab requests the filter verification.
+            try:
+                from gui.core.filter_check import (
+                    check_bundle, format_report, window_from_cfg)
+                fc = check_bundle(out_path, window=window_from_cfg(cfg))
+                state["filter_check"] = fc
+                report = format_report(fc)
+                if report:
+                    self._log_ui(report)
+            except Exception as e:
+                self._log_ui("[%s] filter check failed: %s\n" % (job, e))
             try:
                 return ResultsBundle.load(out_path)
             except Exception as e:
@@ -890,6 +946,7 @@ class OptimizationTab(QWidget):
                           l_wp=float(g.l_wp), l_void=float(g.l_void))
 
     def _busy(self, on, msg="", color="#1d4ed8"):
+        self.btn_ms.setEnabled(not on)
         self.btn_mesh.setEnabled(not on)
         self.btn_domain.setEnabled(not on)
         self.btn_checks.setEnabled((not on) and self._checks_available())
@@ -993,6 +1050,167 @@ class OptimizationTab(QWidget):
         except AttributeError:
             log_swallowed("forcing the history outputs", level=logging.DEBUG)
         return cfg
+
+    # ===================================================================
+    # 0 - Mass-scaling factor: independence study (paper step 0, §5.3)
+    # ===================================================================
+    def ms_settings(self):
+        """(ms values, element size) of step 0; raises ValueError."""
+        values = parse_ms_values(self.le_ms_values.text())
+        elem = self._float_or(self.le_ms_elem, float(self.cfg.elem_size))
+        if elem is None or elem <= 0:
+            raise ValueError("the element size of the ms study must be > 0")
+        return values, float(elem)
+
+    def _on_run_ms_independence(self):
+        val = self._validate_launch()
+        if val is None:
+            return
+        prefs, wd, cpus = val
+        thr = self.thresholds()
+        if not self.thresholds_complete():
+            QMessageBox.warning(
+                self, "Mass-scaling criterion",
+                "Set the six absolute tolerances eps_q of step 2 "
+                "(Vx, Vy, T, EVF, Fc, Ff): the ms study uses the same E_max.")
+            return
+        try:
+            window = self.window()
+            guards = self.guard_settings()
+            ms_values, elem = self.ms_settings()
+        except ValueError as e:
+            QMessageBox.warning(self, "Mass-scaling study settings", str(e))
+            return
+        if not getattr(self.cfg.step, "output_filter_enabled", False):
+            QMessageBox.warning(
+                self, "Mass-scaling study",
+                "Enable the output filter (Step tab): the filter and "
+                "reverberation checks are safeguards of the ms study.")
+            return
+        base_cfg = self._study_cfg_copy()
+        base_cfg.step.output_filter_verify = True
+        zoi = self.zoi()
+        dims = self._dims_from_cfg()
+        study_cfg = {
+            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
+                    "ymin": zoi[2], "ymax": zoi[3]},
+            "elem_size": elem, "ms_values": list(ms_values),
+            "grid_step": self.grid_step(), "thresholds_abs": thr,
+            "window": list(window), "evf_threshold": 0.5,
+            "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
+            "domain_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
+                            "l_wp": dims.l_wp, "l_void": dims.l_void}}
+        run_dir = self._study_run_dir(wd, "massscaling", study_cfg)
+        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "ms")
+        self._pending_ms_dir = run_dir
+
+        def cost_fn(bundle, d, host_wall_s):
+            return cost_record(bundle, run_bundle.state.get("sta"),
+                               host_wall_s=host_wall_s, n_cpu=cpus,
+                               dims=d, elem_size=elem)
+
+        guard_fn_core = make_guard_fn(guards)
+
+        def guard_fn(bundle):
+            out = dict(guard_fn_core(bundle))
+            why = guard_reasons(bundle, guards)
+            fc = run_bundle.state.get("filter_check")
+            if fc is None:
+                why["filter"] = "filter check not run (no verification data)"
+            out.update(filter_guards(fc))
+            if why:
+                self._log_ui("    safeguards not evaluable: %s"
+                             % "; ".join("%s: %s" % kv for kv in why.items()))
+            return out
+
+        self._last_ms = None
+        self._cancel_evt.clear()
+        self.log.clear()
+        self.tabs.setCurrentIndex(0)
+        self._busy(True, "Mass-scaling study (independence)\u2026")
+        self._log_ui("=" * 68)
+        self._log_ui("MASS-SCALING FACTOR BY INDEPENDENCE (mesh, domain fixed)")
+        self._log_ui("  ms: %s | mesh %.4g mm | domain h_wp=%.4g h_void=%.4g "
+                     "l_wp=%.4g l_void=%.4g | T [%.3g, %.3g]"
+                     % (", ".join("%g" % v for v in ms_values), elem,
+                        dims.h_wp, dims.h_void, dims.l_wp, dims.l_void,
+                        window[0], window[1]))
+        self._log_ui("  eps_q: " + "  ".join("%s=%.4g" % kv
+                                              for kv in sorted(thr.items())))
+        self._log_ui("  safeguards: R_K < %.4g, R_HG < %.4g, outputs, filter "
+                     "check, reverberation check"
+                     % (guards.rk_max, guards.rhg_max))
+        self._log_ui("=" * 68)
+        self._ms_worker = MsIndependenceWorker(
+            run_bundle=run_bundle, base_cfg=base_cfg, zoi=zoi,
+            domain_dims=dims, grid_step=self.grid_step(), elem_size=elem,
+            thresholds=thr, ms_values=ms_values, window=window,
+            evf_threshold=0.5, guard_fn=guard_fn, cost_fn=cost_fn)
+        self._ms_worker.progress.connect(self._on_ms_progress)
+        self._ms_worker.finished_ok.connect(self._on_ms_done)
+        self._ms_worker.failed.connect(self._on_fail)
+        self._start_progress()
+        self._ms_worker.start()
+
+    def _on_ms_progress(self, ev):
+        phase = ev.get("phase")
+        if phase == "run":
+            r = ev["record"]
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
+                          for k, (v, ok) in sorted(r.guards.items()))
+            cpu = self._fmt(getattr(r.cost, "c_cpu_s", None), "%.0f s") \
+                if r.cost is not None else "n/a"
+            self._log_ui("[run %d] ms=%g | %s | %s | C_CPU=%s"
+                         % (r.index, ev.get("ms", float("nan")),
+                            "job ok" if r.job_ok
+                            else "JOB FAILED: %s" % r.error,
+                            g or "no safeguard", cpu))
+        elif phase == "comparison":
+            c = ev["comparison"]
+            errs = "  ".join("%s=%s" % (q, self._fmt(v))
+                             for q, v in c.errors.items())
+            self._log_ui("  ms %g->%g | %s | E_max=%s (%s) | %s%s"
+                         % (c.ms_from, c.ms_to, errs,
+                            self._fmt(c.e_max, "%.3g"), c.q_crit or "-",
+                            "success" if c.success else "not independent",
+                            "" if c.guards_ok else " (safeguards)"))
+        elif phase == "warning":
+            self._log_ui("  [WARNING] %s" % ev.get("message", ""))
+
+    def _on_ms_done(self, res):
+        self._stop_progress()
+        folder = getattr(self, "_pending_ms_dir", None)
+        self._last_ms = (res, folder)
+        self._busy(False)
+        why = {
+            "converged": "largest independent ms = %s (next value failed)",
+            "upper_end": "every comparison passed: ms = %s is the LARGEST "
+                         "TESTED value",
+            "below_range": "the first comparison failed (%s): start the "
+                           "sequence lower",
+            "cancelled": "cancelled (ms reached: %s)",
+        }.get(res.status, res.status + " (%s)")
+        why = why % ("n/a" if res.retained is None else "%g" % res.retained)
+        self._log_ui("=" * 68)
+        self._log_ui("MASS-SCALING RESULT: %s | %d runs" % (why, res.n_runs))
+        for w in res.warnings:
+            self._log_ui("  [WARNING] %s" % w)
+        if folder is not None:
+            from gui.sensitivity.study_export import write_ms_exports
+            try:
+                paths = write_ms_exports(folder, res)
+                self._log_ui("[EXPORT] %s -> %s"
+                             % (", ".join(p.name for p in paths), folder))
+            except Exception as e:
+                self._log_ui("[EXPORT] failed: %s: %s"
+                             % (type(e).__name__, e))
+        if res.retained is not None:
+            self._log_ui("  next: set ms = %g in the Step tab" % res.retained)
+        self._refresh_convergence_view()
+        ok = res.status == "converged"
+        self.lbl_status.setStyleSheet(
+            "color: %s;" % ("#15803d" if ok else "#b45309"))
+        self.lbl_status.setText("Mass-scaling study \u2014 %s" % why)
 
     # ===================================================================
     # 4 - Eulerian domain sizing: sequential independence study (paper §4)
@@ -1193,6 +1411,22 @@ class OptimizationTab(QWidget):
     def _refresh_convergence_view(self):
         """Rebuild the table and the three plots from the last results."""
         self.table.setRowCount(0)
+        if self._last_ms is not None:
+            mres = self._last_ms[0]
+            mruns = {r.index: r for r in mres.runs}
+            for c in mres.comparisons:
+                rt = mruns.get(c.run_to)
+                cost = getattr(getattr(rt, "cost", None), "c_cpu_s", None)
+                self._add_table_row([
+                    "ms", "ms", "%g" % c.ms_from, "%g" % c.ms_to,
+                    self._fmt(c.e_max, "%.3g"), c.q_crit,
+                    "ok" if c.guards_ok else "FAIL",
+                    "independent" if c.success else "not independent",
+                    "", self._fmt(cost, "%.0f")])
+            self._add_table_row([
+                "ms", "ms", "", "n/a" if mres.retained is None
+                else "%g" % mres.retained, "", "", "", "RETAINED",
+                mres.status, ""])
         res = self._last_domain_result
         runs = {r.index: r for r in res.runs} if res is not None else {}
         if res is not None:
@@ -1228,9 +1462,30 @@ class OptimizationTab(QWidget):
         self._plot_convergence()
 
     def _plot_convergence(self):
+        axm = self._ax_ms
         axd, axg, axc = self._ax_domain, self._ax_gci, self._ax_cost
-        for ax in (axd, axg, axc):
+        for ax in (axm, axd, axg, axc):
             ax.clear()
+        if self._last_ms is not None:
+            mres = self._last_ms[0]
+            xs = [c.ms_to for c in mres.comparisons]
+            ys = [c.e_max if math.isfinite(c.e_max) else float("nan")
+                  for c in mres.comparisons]
+            if xs:
+                axm.plot(xs, ys, marker="o", lw=1.2, color="#1d4ed8")
+                for c in mres.comparisons:
+                    if not c.success:
+                        axm.plot([c.ms_to], [c.e_max if math.isfinite(
+                            c.e_max) else float("nan")], marker="x", ms=8,
+                            color="#b91c1c", ls="none")
+                if mres.retained is not None:
+                    axm.axvline(mres.retained, ls=":", lw=1.0,
+                                color="#15803d")
+            axm.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
+            axm.set_xscale("log")
+            axm.set_yscale("log")
+            axm.set_xlabel("ms_k", fontsize=7)
+            axm.set_ylabel("E_max(ms_k, ms_k-1)", fontsize=7)
         res = self._last_domain_result
         if res is not None:
             runs = {r.index: r for r in res.runs}
@@ -1292,7 +1547,8 @@ class OptimizationTab(QWidget):
             axg.set_ylabel("|f_q(h)/f_ref - 1|", fontsize=7)
             if axg.get_legend_handles_labels()[0]:
                 axg.legend(fontsize=6)
-        for ax, title in ((axd, "Domain study"), (axg, "Mesh GCI"),
+        for ax, title in ((axm, "Mass scaling"), (axd, "Domain study"),
+                          (axg, "Mesh GCI"),
                           (axc, "Cost \u2013 E_max")):
             ax.set_title(title, fontsize=8)
             ax.tick_params(labelsize=6)
@@ -1577,7 +1833,8 @@ class OptimizationTab(QWidget):
         None on a set cancel flag, which the studies already treat as "no
         usable result" -- so a half-written bundle is never read as data.
         """
-        for attr in ("_di_worker", "_mesh_worker", "_checks_worker"):
+        for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
+                     "_ms_worker"):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
                 w.cancel()

@@ -490,6 +490,10 @@ class OptimizationCfg:
     # NOT validated for the domain study: to be confirmed.
     rk_max:         str  = "0.01"
     rhg_max:        str  = "0.05"
+    # Mass-scaling independence study (step 0, decision of 2026-10-07): the
+    # tested factors, increasing, and its element size ("" = the Mesh tab's).
+    ms_values:      str  = "250, 500, 1000, 2000, 4000"
+    ms_elem_size:   str  = ""
 
 
 @dataclass
