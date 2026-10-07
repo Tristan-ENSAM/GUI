@@ -18,7 +18,7 @@ separately), so four interactions are checked once the domain study is done
    again on D* with the same plan (D8-a), and the element size h* used by the
    domain study must satisfy the GCI selection rule on D*:
    |f_q(h*) - f_q^ref| <= eps_q for every quantity, eps_q the ABSOLUTE
-   step-2 tolerances (decision of 2026-10-07: one tolerance set for ms, h, D),
+   common tolerances (decision of 2026-10-07: one tolerance set for ms, h, D),
    f_q^ref = Richardson extrapolate when reliable, else the finest mesh value
    (same rule as mesh_gci.run_mesh_gci). h* must belong to the plan.
    Recovery rule (decision of 2026-10-07): on failure, adopt the size the
@@ -206,7 +206,7 @@ def mesh_domain_check(gci_result, h_star: float,
                           % (h_star, sizes))
         return res
     h = match[0]
-    # |f_q(h*) - f_q^ref| / eps_q with the absolute step-2 tolerances (same
+    # |f_q(h*) - f_q^ref| / eps_q with the absolute common tolerances (same
     # criterion as the GCI's recommended size, see mesh_gci).
     worst, crit, ratio = 0.0, None, {}
     for q, g in gci_result.per_quantity.items():

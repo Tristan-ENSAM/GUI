@@ -324,7 +324,7 @@ def run_mesh_gci(
     the observed order p, the extrapolated value and the GCI per quantity from
     the three FINEST meshes. `recommended_size` is the coarsest mesh whose every
     quantity is within its ABSOLUTE tolerance eps_q (`tolerances`, physical
-    units, the step-2 values) of the reference -- the cheapest mesh with a
+    units, the common values) of the reference -- the cheapest mesh with a
     bounded discretization error. Without tolerances no size is recommended.
 
     The domain must be large enough that the ZOI is boundary-independent (run
