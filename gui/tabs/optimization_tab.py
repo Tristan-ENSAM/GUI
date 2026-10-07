@@ -106,7 +106,10 @@ class OptimizationTab(QWidget):
     # Emitted when a persisted optimization parameter changes, so the
     # main window can mark the profile dirty.
     changed = Signal()
-
+    # Carries log text to the GUI thread. run_bundle runs in the study
+    # workers' threads; touching the QPlainTextEdit from there is a data race
+    # with the GUI thread's painting that can end in an access violation.
+    _log_requested = Signal(str)
 
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
                  profile_name_getter=None):
@@ -440,6 +443,7 @@ class OptimizationTab(QWidget):
         # ---- Output tabs -----------------------------------------------
         self.tabs = QTabWidget()
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self._log_requested.connect(self._append_log)
         self.tabs.addTab(self.log, "Log")
         conv = QWidget(); cv = QVBoxLayout(conv)
         cv.setContentsMargins(0, 0, 0, 0)
@@ -894,9 +898,15 @@ class OptimizationTab(QWidget):
         self._current_sta = None
 
     def _log_ui(self, text):
-        # Safe to call from the worker thread for QPlainTextEdit append via
-        # signals would be cleaner; appendPlainText is used read-mostly here.
-        self.log.appendPlainText(text.rstrip("\n"))
+        """Append to the log from any thread.
+
+        The emit is queued when it comes from a worker thread, so the widget
+        is only ever touched by the GUI thread.
+        """
+        self._log_requested.emit(text.rstrip("\n"))
+
+    def _append_log(self, text):
+        self.log.appendPlainText(text)
 
     # ===================================================================
     # ZOI (measurement zone) — distinct from the ROI
