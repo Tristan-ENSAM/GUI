@@ -76,6 +76,12 @@ class Preferences:
     #      preserved when reopened.) ----
     temp_unit_default: str = "C"     # "C" | "K"
 
+    # ---- Execution: on this PC, or on the compute PC through the queue
+    #      folder on a shared drive (gui.core.remote_exec). In "remote" mode
+    #      the working directory must be on that same shared drive. ----
+    execution_mode: str = "local"    # "local" | "remote"
+    remote_queue_dir: str = ""
+
 
 # ----------------------------------------------------------------------------
 # Load / save

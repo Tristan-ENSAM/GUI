@@ -16,7 +16,8 @@ A future iteration will:
 """
 from __future__ import annotations
 from pathlib import Path
-from PySide6.QtCore import Signal, Qt, QProcess, QTimer
+from PySide6.QtCore import (Signal, Qt, QProcess, QProcessEnvironment,
+                            QTimer)
 from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QSpinBox,
@@ -28,6 +29,8 @@ from gui.core.async_call import run_async
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
+from gui.core.remote_exec import (is_remote, launch_problems,
+                                  request_cancel_by_job, submit_command)
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
                                         build_abaqus_args,
                                         kill_process_tree_by_pid,
@@ -461,11 +464,8 @@ class JobTab(QWidget):
 
         # Sanity checks before launching — we want the user to see the
         # error as a dialog, not as a cryptic QProcess errorOccurred signal.
-        problems = []
-        if not Path(prefs.abaqus_cmd).exists():
-            problems.append(f"Abaqus command not found: {prefs.abaqus_cmd}")
-        if not Path(prefs.abaqus_script).exists():
-            problems.append(f"Script not found: {prefs.abaqus_script}")
+        remote = is_remote(prefs)
+        problems = launch_problems(prefs, workdir)
         wd = Path(workdir)
         try:
             wd.mkdir(parents=True, exist_ok=True)
@@ -492,6 +492,15 @@ class JobTab(QWidget):
                             "\n\n• " + "\n• ".join(str(f.name) for f in failed))
                         return
                 else:
+                    if remote:
+                        # The restart files live on the compute PC, and
+                        # `abaqus job= continue` bypasses run_simul.py: not
+                        # offered through the remote agent.
+                        QMessageBox.information(
+                            self, "Resume not available",
+                            "Resuming a job is only possible in local mode.\n"
+                            "Overwrite it, or change the job name.")
+                        return
                     resume = True
 
         if problems:
@@ -553,6 +562,8 @@ class JobTab(QWidget):
             f"CPUs:               {cpus}",
             f"Abaqus command:     {prefs.abaqus_cmd}",
             f"Script:             {prefs.abaqus_script}",
+        ] + ([f"Execution:          remote agent, queue "
+              f"{prefs.remote_queue_dir}"] if remote else []) + [
             "-" * 72,
             body,
             "-" * 72,
@@ -607,6 +618,19 @@ class JobTab(QWidget):
             self._sta_timer.start()
 
         # Launch
+        self._pipeline["remote"] = remote
+        if remote:
+            # A small client process submits the run to the agent of the
+            # compute PC and waits for it; the agent mirrors .sta, .gui.log and
+            # the results into `wd` (on the shared drive), so the polling
+            # above works unchanged.
+            program, rargs, root = submit_command(prefs, wd, model_params,
+                                                  run_params)
+            env = QProcessEnvironment.systemEnvironment()
+            env.insert("PYTHONPATH", root)
+            self._proc.setProcessEnvironment(env)
+            self._proc.start(program, rargs)
+            return
         self._proc.start(prefs.abaqus_cmd, args)
 
     def _finish_pipeline(self, success: bool):
@@ -798,6 +822,16 @@ class JobTab(QWidget):
         ctx = self._pipeline or {}
         job_name = ctx.get("job_name")
         workdir = ctx.get("workdir")
+        if ctx.get("remote"):
+            # The agent runs `abaqus terminate` (then the tree kill) on the
+            # compute PC; the client process exits once it has reported.
+            queue = self._get_prefs().remote_queue_dir
+            self._append_output(
+                "\n[CANCEL] asking the remote agent to stop job %s\n"
+                % job_name)
+            run_async(lambda: request_cancel_by_job(queue, job_name),
+                      self._after_remote_cancel, self)
+            return
         try:
             abq = self._get_prefs().abaqus_cmd
         except Exception:
@@ -831,6 +865,14 @@ class JobTab(QWidget):
                 "\n[CANCEL] no %s.cid yet: the solver is not running, "
                 "killing the process tree\n" % (job_name or "job"))
             self._force_kill()
+
+    def _after_remote_cancel(self, found):
+        """No request in the queue yet: the client is still checking that the
+        agent is alive, so stopping it before it submits is enough."""
+        if not found and self._proc is not None \
+                and self._proc.state() != QProcess.NotRunning:
+            self._proc.kill()
+            self._append_output("\n[CANCELLED by user] (not submitted)\n")
 
     def _after_terminate(self, accepted):
         """Back on the GUI thread once Abaqus has answered (or not)."""
