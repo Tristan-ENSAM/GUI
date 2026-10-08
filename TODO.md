@@ -75,6 +75,17 @@ chantiers à venir. Conventions clés rappelées en fin de fichier.
     (moyenne signée, RMS), plus `mesh.npz` (nœuds, faces, centroïdes, temps
     des frames) et `maps_index.csv` (index texte). Lecture :
     `np.load(fichier)`, sans `allow_pickle`.
+  - **ZOI proposée à partir des cartes** (2026-10-08,
+    `gui/sensitivity/zoi_proposal.py`) : S*(e) = max sur (champ, paramètre)
+    de moyenne_T |dq/dp·δ| / ε_q, avec ε_q et T de l'onglet Model ; Vx, Vy, T
+    masqués par EVF ≥ 0,5 du run de base, EVF non masqué ; ZOI = plus petit
+    rectangle contenant les éléments où S* ≥ 1. Bouton « Copy ZOI to the
+    Model tab ». Fichiers `zoi_proposal.json`, `zoi_sstar.npz`,
+    `zoi_sstar.png` dans `sensitivity_maps/`. Avertit si la ZOI touche le
+    bord de la zone extraite. Champs Vx (V1), Vy (V2) ajoutés ; QoI Fc, Ff en
+    N/mm (moyenne signée sur [warmup, 1] / w), comme l'onglet Model. Option
+    « Whole Eulerian domain » : `run_cfg["extract_full_domain"]`, l'extraction
+    garde toute l'instance eulérienne (la ROI du modèle est inchangée).
   - **Suite de l'audit Sensitivity (2026-09-30)** — tests dans
     `tests/test_sensitivity_followups.py` :
     - Élasticité toujours calculée (clé `elasticity`, colonne CSV), SAUF

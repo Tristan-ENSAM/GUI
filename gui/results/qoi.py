@@ -137,6 +137,36 @@ def qoi_Fy_mean(bundle, instance=None, warmup_frac=0.0) -> float:
     return float("nan") if sig is None else float(np.nanmean(sig))
 
 
+def _force_per_width(bundle: ResultsBundle, var: str,
+                     warmup_frac: float) -> float:
+    """Signed mean of history `var` over t >= warmup_frac * t_end, divided by
+    the simulated width w = mesh.elem_size (N/mm). Same reduction as the
+    Model tab studies (zoi_sampling.history_window_mean, window [warmup, 1])
+    so the sensitivity and the sizing judge the same Fc / Ff."""
+    if var not in bundle.history_info.variables:
+        return float("nan")
+    try:
+        y = np.asarray(bundle.history(var), dtype=np.float64)
+        t = np.asarray(bundle.history_time, dtype=np.float64)
+        w = float(bundle.model_config["mesh"]["elem_size"])
+    except (KeyError, TypeError, ValueError):
+        return float("nan")
+    if y.size == 0 or t.size != y.size or not w > 0:
+        return float("nan")
+    m = t >= float(warmup_frac or 0.0) * t[-1]
+    if not m.any():
+        return float("nan")
+    return float(np.nanmean(y[m])) / w
+
+
+def qoi_Fc(bundle, instance=None, warmup_frac=0.0) -> float:
+    return _force_per_width(bundle, "RF1_RP", warmup_frac)
+
+
+def qoi_Ff(bundle, instance=None, warmup_frac=0.0) -> float:
+    return _force_per_width(bundle, "RF2_RP", warmup_frac)
+
+
 def qoi_T_max(bundle, instance=None, warmup_frac=0.0) -> float:
     return _field_global_max(bundle, "TEMP", instance)
 
@@ -153,6 +183,10 @@ REGISTRY: list[QoISpec] = [
     QoISpec("Fx_mean",  "Force de coupe moyenne (|RF1| moy)", "N",  qoi_Fx_mean),
     QoISpec("Fy_max",   "Force d'avance max  (|RF2| max)",   "N",  qoi_Fy_max),
     QoISpec("Fy_mean",  "Force d'avance moyenne (|RF2| moy)", "N",  qoi_Fy_mean),
+    # Fc / Ff as the Model tab judges them (eps_q in N/mm): signed mean over
+    # the window, per unit width.
+    QoISpec("Fc",       "Fc = RF1/w moyenne (comme l'onglet Model)", "N/mm", qoi_Fc),
+    QoISpec("Ff",       "Ff = RF2/w moyenne (comme l'onglet Model)", "N/mm", qoi_Ff),
     QoISpec("T_max",    "Température max",                    "°C", qoi_T_max),
     QoISpec("PEEQ_max", "PEEQ max",                          "—",  qoi_PEEQ_max),
 ]

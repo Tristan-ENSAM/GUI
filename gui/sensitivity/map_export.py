@@ -46,7 +46,8 @@ MAPS_SUBDIR = "sensitivity_maps"
 # Unit of each exported field as stored in the results bundle. The model runs
 # in the Abaqus consistent system mm / s / °C (gui.core.units), V is the
 # magnitude of the nodal velocity and EVF a volume fraction.
-FIELD_UNITS = {"EVF": "—", "V": "mm/s", "TEMP": "°C"}
+FIELD_UNITS = {"EVF": "—", "V": "mm/s", "V1": "mm/s", "V2": "mm/s",
+               "TEMP": "°C"}
 
 
 def element_faces(nodes, elems):

@@ -137,7 +137,9 @@ def main():
         job = create_job(model, params)
 
         if run_job(job, params):
-            extract_results(params["job_name"], model_cfg)
+            extract_results(params["job_name"], model_cfg,
+                            full_domain=bool(run_cfg.get("extract_full_domain",
+                                                         False)))
             # Only after a successful run AND after extraction: the extractor
             # needs the .odb, and on a failure the scratch files are what you
             # diagnose with. run_job() raises on failure, and write_inp_only

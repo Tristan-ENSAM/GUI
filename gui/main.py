@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
             profile_name_getter=self._profile_name)
         # Editing an optimization parameter dirties the profile.
         self.optimization_tab.changed.connect(self._mark_dirty)
+        # The Sensitivity tab proposes a ZOI from its maps with the eps_q and
+        # window T of the Model tab, and can copy it there.
+        self.sensitivity_tab.set_model_settings_getter(
+            self.optimization_tab.model_settings)
+        self.sensitivity_tab.zoiProposed.connect(self.optimization_tab.set_zoi)
 
         # Two-level tabs: a top row of theme categories, each holding its
         # own row of sub-tabs (so the window shows several tab rows).

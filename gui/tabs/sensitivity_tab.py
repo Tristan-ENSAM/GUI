@@ -41,6 +41,7 @@ from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
 from gui.sensitivity import map_export as mx
+from gui.sensitivity import zoi_proposal as zp
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
@@ -66,6 +67,9 @@ class SensitivityTab(QWidget):
     # Emitted from the map-export thread: (output folder, files written,
     # error message or "").
     _mapsExported = Signal(str, int, str)
+    # ZOI proposed from the maps, (xmin, xmax, ymin, ymax) [mm]: the main
+    # window copies it into the Model tab.
+    zoiProposed = Signal(tuple)
 
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
                  profile_name_getter=None):
@@ -101,10 +105,21 @@ class SensitivityTab(QWidget):
         self._table_units = None         # UnitSystem the table is shown in
         self._run_field_vars = None      # ROI fields of the active/last run
         self._run_plan = None            # plan of the active/last run
+        self._run_full_domain = False    # whole-domain extraction of that run
         self._map_mesh = None            # (nodes_xy, face_idx) of the maps
         self._map_extra = {}             # centroids / frame times for export
         self._map_schemes = {}           # {var: {path: FD scheme used}}
         self._maps_thread = None         # background map export
+        # Base-run EVF / frame times / extracted zone of the maps, for the
+        # ZOI proposal (material mask, window T, edge check).
+        self._map_base_evf = None
+        self._map_times = None
+        self._map_extent = None
+        self._map_full_domain = False
+        self._zoi_proposal = None        # last zoi_proposal.ZoiProposal
+        # Callable -> {"eps": {Vx, Vy, T, EVF, ...}, "window": (a, b)} from
+        # the Model tab (set by the main window); None in standalone use.
+        self._model_settings_getter = None
         self._mapsExported.connect(self._on_maps_exported)
 
         root = QVBoxLayout(self)
@@ -222,16 +237,26 @@ class SensitivityTab(QWidget):
         bl.addWidget(qoi_box)
 
         # Field QoI: screen how much each parameter moves whole Eulerian
-        # fields in the ROI (SSD vs the base run). Jacobian only.
-        field_box = QGroupBox("Field QoI in the ROI (SSD, same FD scheme)")
+        # fields in the ROI (SSD vs the base run). Jacobian only. Vx, Vy,
+        # TEMP and EVF are the fields the Model tab sizes the model on; V is
+        # the velocity magnitude.
+        field_box = QGroupBox("Field QoI (SSD, same FD scheme)")
         fg = QHBoxLayout(field_box)
         self._field_checks = {}
-        for var, label in (("EVF", "EVF (chip)"), ("V", "V (flow)"),
-                           ("TEMP", "TEMP")):
+        for var, label in (("V1", "Vx"), ("V2", "Vy"), ("TEMP", "TEMP"),
+                           ("EVF", "EVF (chip)"), ("V", "|V|")):
             cb = QCheckBox(label)
             self._field_checks[var] = cb
             cb.toggled.connect(self._mark_plan_stale)
             fg.addWidget(cb)
+        fg.addSpacing(16)
+        self.chk_full_domain = QCheckBox("Whole Eulerian domain")
+        self.chk_full_domain.setToolTip(
+            "Extract the fields on the whole Eulerian instance instead of the "
+            "ROI box (Geometry tab). The ROI of the model is not changed; the "
+            "result files are larger.")
+        self.chk_full_domain.toggled.connect(self._mark_plan_stale)
+        fg.addWidget(self.chk_full_domain)
         fg.addStretch(1)
         bl.addWidget(field_box)
 
@@ -361,6 +386,28 @@ class SensitivityTab(QWidget):
             "per-element sensitivity maps.")
         self.lbl_map_hint.setStyleSheet("color: #6b7280;")
         mvl.addWidget(self.lbl_map_hint)
+        # ZOI proposed from the maps: S*(e) = max over (field, parameter) of
+        # mean_T |dq/dp * delta| / eps_q (eps_q and T from the Model tab);
+        # ZOI = smallest rectangle containing every element with S* >= 1.
+        zrow = QHBoxLayout()
+        self.btn_zoi_propose = QPushButton("Propose ZOI (S* \u2265 1)")
+        self.btn_zoi_propose.setToolTip(
+            "S* = max over (field, parameter) of mean over T of "
+            "|dq/dp \u00b7 \u03b4| / \u03b5_q, with \u03b5_q and the window T "
+            "of the Model tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
+            "run. ZOI = smallest rectangle containing every element with "
+            "S* \u2265 1.")
+        self.btn_zoi_propose.setEnabled(False)
+        self.btn_zoi_propose.clicked.connect(self._on_propose_zoi)
+        zrow.addWidget(self.btn_zoi_propose)
+        self.btn_zoi_apply = QPushButton("Copy ZOI to the Model tab")
+        self.btn_zoi_apply.setEnabled(False)
+        self.btn_zoi_apply.clicked.connect(self._on_apply_zoi)
+        zrow.addWidget(self.btn_zoi_apply)
+        self.lbl_zoi = QLabel("")
+        self.lbl_zoi.setWordWrap(True)
+        zrow.addWidget(self.lbl_zoi, 1)
+        mvl.addLayout(zrow)
         self.tabs_out.addTab(maps_w, "Maps")
         # Wire map controls (no-op until maps are computed).
         self.cb_map_param.currentIndexChanged.connect(self._refresh_map)
@@ -963,6 +1010,8 @@ class SensitivityTab(QWidget):
 
         self._run_field_vars = list(field_vars)
         self._run_plan = self.plan
+        self._run_full_domain = (bool(field_vars)
+                                 and self.chk_full_domain.isChecked())
         # The worker gets its own copy of the model: it expands the plan in
         # its thread, while the user may keep editing the live cfg here.
         self._worker = SensitivityRunWorker(
@@ -972,7 +1021,8 @@ class SensitivityTab(QWidget):
             workdir=str(wd), cpus=cpus,
             warmup_frac=float(self.spin_warmup.value()),
             job_prefix="sensitivity", field_vars=field_vars,
-            remote_prefs=prefs if is_remote(prefs) else None)
+            remote_prefs=prefs if is_remote(prefs) else None,
+            extract_full_domain=self._run_full_domain)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -1007,6 +1057,8 @@ class SensitivityTab(QWidget):
                "n_runs": int(plan.n_runs),
                "qois": [q.id for q in self.selected_qois],
                "field_vars": list(field_vars),
+               "extract_full_domain": bool(field_vars)
+                                      and self.chk_full_domain.isChecked(),
                "cpus": int(cpus),
                "warmup_frac": float(self.spin_warmup.value()),
                "temp_unit": tu,
@@ -1253,6 +1305,13 @@ class SensitivityTab(QWidget):
         self._map_param_paths = []
         self._map_field_vars = []
         self._map_n_frames = 0
+        self._map_base_evf = None
+        self._map_times = None
+        self._map_extent = None
+        self._zoi_proposal = None
+        self.btn_zoi_propose.setEnabled(False)
+        self.btn_zoi_apply.setEnabled(False)
+        self.lbl_zoi.setText("")
         # The fields of THIS run (captured at launch), not the checkboxes as
         # they may have been edited since; tests without a launch fall back.
         field_vars = (list(self._run_field_vars)
@@ -1288,6 +1347,7 @@ class SensitivityTab(QWidget):
         self._field_maps = maps
         self._map_field_vars = list(field_vars)
         self._map_param_paths = list(plan.param_paths)
+        self._store_zoi_inputs(ref, inst)
         for per in maps.values():
             for S in per.values():
                 arr = np.asarray(S)
@@ -1323,6 +1383,119 @@ class SensitivityTab(QWidget):
             % (len(self._map_param_paths), len(self._map_field_vars),
                self._map_n_frames, getattr(plan, "scheme", "central")))
         self._refresh_map()
+
+    def _store_zoi_inputs(self, ref, inst):
+        """Keep what the ZOI proposal needs from the base run: EVF (material
+        mask), frame times (window T) and the extracted zone (edge check)."""
+        try:
+            self._map_base_evf = np.asarray(ref.field(inst, "EVF"), float)
+        except Exception:
+            log_swallowed("reading the base-run EVF for the ZOI proposal",
+                          level=logging.DEBUG)
+            self._map_base_evf = None
+        try:
+            self._map_times = np.asarray(ref.times, float)
+        except Exception:
+            self._map_times = None
+        crop = getattr(ref, "roi", None)
+        self._map_extent = ((crop["xmin"], crop["xmax"], crop["ymin"],
+                             crop["ymax"]) if isinstance(crop, dict) else None)
+        self._map_full_domain = crop is None
+        has_eps_field = any(v in zp.FIELD_TO_EPS for v in self._field_maps)
+        self.btn_zoi_propose.setEnabled(
+            has_eps_field and self._map_times is not None)
+
+    def set_model_settings_getter(self, fn):
+        """fn() -> {"eps": {Vx, Vy, T, EVF: eps_q}, "window": (a, b)}, read
+        from the Model tab when a ZOI is proposed."""
+        self._model_settings_getter = fn
+
+    def _model_settings(self):
+        if self._model_settings_getter is None:
+            raise ValueError("the Model tab settings are not available")
+        st = self._model_settings_getter()
+        return dict(st.get("eps") or {}), tuple(st["window"])
+
+    def _on_propose_zoi(self):
+        if not self._field_maps or self._map_mesh is None:
+            return
+        try:
+            eps, window = self._model_settings()
+        except Exception as e:
+            self.lbl_zoi.setText("Set \u03b5_q and the window T in the Model "
+                                 "tab first (%s)." % e)
+            return
+        need = sorted({zp.FIELD_TO_EPS[v] for v in self._field_maps
+                       if v in zp.FIELD_TO_EPS} - {k for k, v in eps.items()
+                                                    if v and v > 0})
+        if need:
+            self.lbl_zoi.setText("Missing \u03b5_q in the Model tab: %s."
+                                 % ", ".join(need))
+            return
+        plan = self._run_plan or self.plan
+        deltas = {sp.path: float(d) for sp, d in zip(plan.specs, plan.deltas)}
+        nodes_xy, face_idx = self._map_mesh
+        verts = np.asarray(nodes_xy, float)[np.asarray(face_idx)]
+        try:
+            prop = zp.propose_zoi(self._field_maps, deltas, eps, verts,
+                                  self._map_times, window=window,
+                                  evf_base=self._map_base_evf,
+                                  extent=self._map_extent)
+        except Exception as e:
+            log_swallowed("proposing a ZOI", level=logging.WARNING)
+            self.lbl_zoi.setText("Could not propose a ZOI: %s" % e)
+            return
+        self._zoi_proposal = prop
+        self._show_s_star(prop)
+        self.lbl_zoi.setText(self._zoi_summary(prop))
+        self.btn_zoi_apply.setEnabled(prop.bbox is not None)
+        if self._run_workdir is not None:
+            self._export_zoi(Path(self._run_workdir) / mx.MAPS_SUBDIR, prop,
+                             eps, window, deltas, verts)
+
+    def _zoi_summary(self, prop) -> str:
+        if prop.bbox is None:
+            return ("No element with S* \u2265 1: no parameter variation of the "
+                    "plan changes a field by more than \u03b5_q.")
+        txt = ("ZOI x [%.4g, %.4g] y [%.4g, %.4g] mm, %d element(s) with "
+               "S* \u2265 1." % (prop.bbox + (prop.n_selected,)))
+        if prop.sides_at_extent:
+            zone = ("whole Eulerian domain" if self._map_full_domain
+                    else "ROI box")
+            txt += (" Reaches the edge of the extracted zone (%s) on %s: "
+                    "the extraction, not the sensitivity, bounds it there%s."
+                    % (zone, ", ".join(prop.sides_at_extent),
+                       "" if self._map_full_domain else
+                       "; rerun with \u2018Whole Eulerian domain\u2019"))
+        if prop.skipped_fields:
+            txt += " Not used (no \u03b5_q): %s." % ", ".join(
+                prop.skipped_fields)
+        return txt
+
+    def _show_s_star(self, prop):
+        vals = np.asarray(prop.s_star, float)
+        finite = vals[np.isfinite(vals)]
+        vmax = max(1.0, float(finite.max())) if finite.size else 1.0
+        self.fv_map.set_values(
+            vals, vmin=0.0, vmax=vmax, cmap="inferno",
+            title="S* = max mean_T |dq/dp \u00b7 \u03b4| / \u03b5_q "
+                  "(ZOI: S* \u2265 1)")
+
+    def _export_zoi(self, out_dir, prop, eps, window, deltas, verts):
+        try:
+            files = zp.write_proposal(
+                out_dir, prop, verts, eps=eps, window=window, deltas=deltas,
+                extent_kind=("whole Eulerian domain" if self._map_full_domain
+                             else "ROI box"))
+            self.log.appendPlainText("[zoi] %d file(s) written to %s"
+                                     % (len(files), out_dir))
+        except Exception as e:
+            log_swallowed("writing the ZOI proposal", level=logging.WARNING)
+            self.log.appendPlainText("[zoi] export FAILED: %s" % e)
+
+    def _on_apply_zoi(self):
+        if self._zoi_proposal is not None and self._zoi_proposal.bbox:
+            self.zoiProposed.emit(tuple(self._zoi_proposal.bbox))
 
     @staticmethod
     def _signed_tooltip(scheme) -> str:
