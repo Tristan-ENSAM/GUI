@@ -930,6 +930,18 @@ class OptimizationTab(QWidget):
             out.append(self._float_or(self.le_zoi[k], d))
         return tuple(out)
 
+    def set_zoi(self, bbox):
+        """Fill the ZOI fields with (xmin, xmax, ymin, ymax) [mm], e.g. the
+        ZOI proposed from the sensitivity maps."""
+        for k, v in zip(("xmin", "xmax", "ymin", "ymax"), bbox):
+            self.le_zoi[k].setText("%.6g" % float(v))
+        self._draw_preview()
+
+    def model_settings(self) -> dict:
+        """eps_q and the window T, for the ZOI proposal of the Sensitivity
+        tab (same values as the studies of this tab)."""
+        return {"eps": self.thresholds(), "window": self.window()}
+
     def _zoi_from_roi(self):
         for k, v in zip(("xmin", "xmax", "ymin", "ymax"),
                         self.config_inputs()["roi"]):

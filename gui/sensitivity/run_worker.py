@@ -237,8 +237,12 @@ class SensitivityRunWorker(QObject):
                  cpus: int = 1, warmup_frac: float = 0.0,
                  job_prefix: str = "sens", keep_bundles: bool = False,
                  field_vars=None, field_metric: str = "ssd",
-                 solve_fn=None, remote_prefs=None, parent=None):
+                 solve_fn=None, remote_prefs=None,
+                 extract_full_domain: bool = False, parent=None):
         super().__init__(parent)
+        # True: the extraction keeps the whole Eulerian instance instead of
+        # the ROI crop (sensitivity maps over the whole domain).
+        self._full_domain = bool(extract_full_domain)
         # Preferences in remote mode (gui.core.remote_exec), else None: the
         # runs then go to the agent of the compute PC instead of a Popen.
         self._remote_prefs = remote_prefs
@@ -368,6 +372,8 @@ class SensitivityRunWorker(QObject):
 
         model_params = cfg.to_params_dict()
         run_params = {"cpus": self._cpus, "job_name": job_name}
+        if self._full_domain:
+            run_params["extract_full_domain"] = True
         args = build_abaqus_args(self._abaqus_cmd, self._abaqus_script,
                                  model_params, run_params)
 

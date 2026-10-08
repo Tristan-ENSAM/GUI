@@ -505,8 +505,13 @@ def _extract_history_artificial(step):
     return None, None
 
 
-def extract_results(job_name, model_cfg):
-    """Extract the completed ``job_name.odb`` into the GUI result bundle."""
+def extract_results(job_name, model_cfg, full_domain=False):
+    """Extract the completed ``job_name.odb`` into the GUI result bundle.
+
+    full_domain=True keeps every element of the Eulerian instance instead of
+    cropping it to the ROI bbox (sensitivity maps over the whole domain). The
+    field outputs cover the whole model either way; only this crop changes.
+    The ROI sets of the model (ROI_node / ROI_elem) are not touched."""
     print("\n" + "=" * 72)
     print("[STAGE] EXTRACT_START")
     print("EXTRACTING results from %s.odb" % job_name)
@@ -514,7 +519,10 @@ def extract_results(job_name, model_cfg):
     sys.stdout.flush()
 
     _roi = _resolve_roi(model_cfg)
-    if _roi is None:
+    if full_domain:
+        _roi = None
+        _vprint("ROI crop: off (whole Eulerian domain requested)")
+    elif _roi is None:
         _vprint("ROI: none (keeping all elements)")
     else:
         _vprint("ROI: x[%g,%g] y[%g,%g] z[%g,%g]" % (
@@ -740,6 +748,7 @@ def extract_results(job_name, model_cfg):
             "job_name":       job_name,
             "step_name":      "Cut",
             "times":          _times.tolist(),
+            "full_domain": bool(full_domain),
             "roi": {
                 "applied": _roi is not None,
                 "xmin": (_roi["xmin"] if _roi else 0.0),

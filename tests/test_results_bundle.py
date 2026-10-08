@@ -256,11 +256,14 @@ class TestQoI:
     def test_registry_ids(self):
         ids = qoi_mod.available_qoi_ids()
         assert set(ids) == {"Fx_max", "Fx_mean", "Fy_max", "Fy_mean",
-                            "T_max", "PEEQ_max"}
+                            "Fc", "Ff", "T_max", "PEEQ_max"}
 
     def test_all_qois_finite(self, bundle):
         out = qoi_mod.compute_qois(bundle)
         assert set(out) == set(qoi_mod.available_qoi_ids())
+        # Fc / Ff need the simulated width (mesh.elem_size); the fake
+        # bundle's model_config has none, so they are NaN, not a guess.
+        assert np.isnan(out.pop("Fc")) and np.isnan(out.pop("Ff"))
         assert all(np.isfinite(v) for v in out.values())
 
     def test_force_qois_match_recomputation(self, bundle):
