@@ -80,6 +80,8 @@ class TestRestructuredTab:
         spins = [tab.sp_margin, tab.sp_gci_n, *tab._dom_spins.values()]
         for sp in spins:
             sp.setStyleSheet("font-size: 40px;")
+        for sec, _f in tab._advanced.values():    # spins live in them
+            sec.set_expanded(True)
         tab.resize(2400, 1400)
         tab.show()
         qapp.processEvents()
@@ -165,7 +167,7 @@ class TestDomainIndependenceWiring:
                                          "dom_n_hold": 1, "dom_m_ratios": 2}
         assert tab.window() == (0.3, 1.0)
         g = tab.guard_settings()
-        assert (g.rk_max, g.rhg_max) == (0.01, 0.05)
+        assert (g.rk_max, g.rhg_max) == (0.05, 0.05)
 
     def test_window_validation(self, tab):
         tab._dom_texts["window_start"].setText("0.8")
@@ -400,7 +402,7 @@ def test_checks_and_exports_through_the_tab(qapp, monkeypatch, tmp_path):
     # combined domain: exactly one extra run (D* reused from the study)
     assert res.n_runs == n_runs_before + 1
     assert chk.checks[2].passed is True          # f constant in h -> exact
-    assert len(chk.gci_calls) == 3
+    assert len(chk.gci_calls) == tab.sp_gci_n.value()   # step-1 plan
     rows = list(csv.DictReader(open(folder / "checks.csv")))
     assert [r["check"] for r in rows] == ["ms_x_mesh", "domain_combined",
                                           "ms_at_point", "mesh_x_domain"]
@@ -466,7 +468,9 @@ class TestTabConfigLogic:
 
     def test_thresholds_required_for_all_fields(self, qapp):
         tab = self._tab()
-        assert tab.thresholds_complete() is False        # none set yet
+        for le in tab._q_eps.values():
+            le.setText("")
+        assert tab.thresholds_complete() is False        # none set
         for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
             tab._q_eps[q].setText("1")
         tab._q_eps["Vx"].setText("2.5")
@@ -503,6 +507,8 @@ class TestMsStudyWiring:
         assert tab.btn_ms.isEnabled()
 
     def test_requires_the_tolerances(self, ms_launch, warnings):
+        for le in ms_launch._q_eps.values():
+            le.setText("")
         ms_launch._on_run_ms_independence()
         assert warnings and "tolerances" in warnings[0].lower()
         assert _CaptureWorker.last is None
