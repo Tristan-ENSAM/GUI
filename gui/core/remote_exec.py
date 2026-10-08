@@ -21,7 +21,8 @@ Two sides:
   stands in for the `subprocess.Popen` of a local run (poll/wait/returncode/
   stdout), so the existing run loops -- which already tail <job>.gui.log,
   poll <job>.sta and load <job>.results.npz from the run folder -- work
-  unchanged as long as that run folder is on the shared drive.
+  unchanged. The run folder stays on the GUI PC: the shared drive is only a
+  transit area (runs/<id>/), emptied as soon as a run's results are back.
 
 The model generator (abaqus_scripts/*.py) also comes from the GUI PC: each
 submission copies it to scripts/<hash>/ in the queue folder (once per
@@ -35,6 +36,7 @@ Queue layout (all under the queue folder)::
     cancel/<id>         cancel request, written by the client
     done/<id>.json      outcome, written by the agent, read and removed by the client
     agent.json          agent heartbeat (a counter that changes every ~2 s)
+    runs/<id>/          transit folder of one run (deleted once brought back)
     scripts/<hash>/     model generator copied from the GUI PC
     remote_agent.py, start_agent.bat   the agent, written by the GUI
 
@@ -43,7 +45,7 @@ reader never sees half a request or half an outcome. The claim is a rename of
 pending/<id>.json, and a cancel before the claim is a removal of the same
 file: whichever happens first wins, the other gets FileNotFoundError.
 
-What comes back to the shared run folder (see RESULT_SUFFIXES in remote_agent.py): the results
+What comes back (RESULT_SUFFIXES, the same list as in remote_agent.py): the results
 bundle, its metadata, the .sta, the script log, and the small Abaqus text
 files. The .odb and the restart/scratch files stay on the compute PC, in the
 local folder named in the outcome and in the run log.
@@ -54,7 +56,6 @@ import ast
 import hashlib
 import json
 import logging
-import ntpath
 import os
 import shutil
 import socket
@@ -73,6 +74,11 @@ ALIVE_TIMEOUT = 15.0            # s, client wait for a heartbeat change. Kept
                                 # well above the period: Windows caches file
                                 # metadata on network drives for up to ~10 s.
 AGENT_SOURCE = Path(__file__).with_name("remote_agent.py")
+LIVE_PERIOD = 2.0               # s, live copy transit -> local run folder
+# Same lists as remote_agent.py: copied live, then brought back at the end.
+LIVE_SUFFIXES = (".sta", ".gui.log")
+RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
+                   ".msg", ".dat", ".log", ".inp")
 
 
 class RemoteError(RuntimeError):
@@ -127,14 +133,6 @@ def check_remote_setup(queue_dir: str, workdir: str, scripts_dir) -> list:
         problems.append("Remote execution is on but no queue folder is set "
                         "(Preferences > Execution).")
         return problems
-    # ntpath, not Path: the check is about Windows drives whatever the OS.
-    q_drive = ntpath.splitdrive(queue_dir)[0]
-    wd_drive = ntpath.splitdrive(str(workdir))[0]
-    if q_drive and q_drive.upper() != wd_drive.upper():
-        problems.append(
-            "In remote mode the working directory must be on the shared drive "
-            "%s (it is %s), otherwise the results cannot come back."
-            % (q_drive, workdir))
     if " " in queue_dir:
         problems.append("The queue folder path must not contain spaces "
                         "(Abaqus noGUI= does not accept them): %s" % queue_dir)
@@ -292,10 +290,18 @@ class RemoteProcess:
         self.launcher_output = b""
         self.stdout = _RemoteStdout(self)
         self._lock = threading.Lock()
+        # The shared drive is only a TRANSIT area (it may be small): the agent
+        # writes into runs/<id>/, this side copies .sta/.gui.log on to the
+        # local run folder while the job runs, then moves the results there
+        # and deletes the transit folder.
+        self.run_dir = Path(run_dir)
+        self.transit = self.queue / "runs" / self.id
+        self._seen = {}
+        self._last_live = 0.0
         request = {
             "id": self.id,
             "job_name": self.job_name,
-            "run_dir": str(run_dir),
+            "run_dir": str(self.transit),
             "model_params": repr(model_params),
             "run_params": repr(run_params),
             "scripts_dir": staged,
@@ -305,6 +311,27 @@ class RemoteProcess:
         _write_json_atomic(self.dirs["pending"] / (self.id + ".json"), request)
 
     # -- Popen-like API ----------------------------------------------------
+    def _bring_back(self, suffixes, only_changed: bool) -> None:
+        name = self.job_name
+        for suf in suffixes:
+            src = self.transit / (name + suf)
+            try:
+                st = src.stat()
+            except OSError:
+                continue
+            key = (st.st_size, st.st_mtime)
+            if only_changed and self._seen.get(suf) == key:
+                continue
+            try:
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                dst = self.run_dir / src.name
+                tmp = dst.with_name(dst.name + ".tmp-%s" % uuid.uuid4().hex[:8])
+                shutil.copyfile(str(src), str(tmp))
+                os.replace(str(tmp), str(dst))
+                self._seen[suf] = key
+            except OSError:
+                pass            # busy or not readable yet: next poll
+
     def poll(self):
         with self._lock:
             if self.returncode is not None:
@@ -312,7 +339,13 @@ class RemoteProcess:
             done = self.dirs["done"] / (self.id + ".json")
             out = _read_json(done) if done.exists() else None
             if out is None:
+                now = time.monotonic()
+                if now - self._last_live >= LIVE_PERIOD:
+                    self._last_live = now
+                    self._bring_back(LIVE_SUFFIXES, only_changed=True)
                 return None
+            self._bring_back(RESULT_SUFFIXES, only_changed=False)
+            shutil.rmtree(str(self.transit), ignore_errors=True)
             self.cancelled = bool(out.get("cancelled"))
             self.error = out.get("error") or ""
             self.local_run_dir = out.get("local_run_dir") or ""

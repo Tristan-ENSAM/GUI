@@ -37,19 +37,20 @@ with the Python bundled with Abaqus (`gui/core/remote_agent.py`).
 
 1. On your PC: Preferences > Execution > tick "Run Abaqus on the compute PC",
    set the Queue folder (e.g. `Z:\ABQ_remote\queue`, no spaces) and the path
-   of `abaqus.bat` on the compute PC, and put the default working directory
-   on `Z:` too. On OK the GUI writes `remote_agent.py` and `start_agent.bat`
+   of `abaqus.bat` on the compute PC. On OK the GUI writes `remote_agent.py` and `start_agent.bat`
    into the queue folder.
 2. On the compute PC (Remote Desktop): double-click
    `Z:\ABQ_remote\queue\start_agent.bat` and leave the window open. Close
    Remote Desktop with the cross (disconnect), not "Sign out".
 
 Runs execute one at a time in submission order in a local folder of the
-compute PC (`C:\TEMP\ABQ_remote\<same path as on Z:>`), with the model
-generator (`abaqus_scripts/*.py`) copied from your PC for each version. The
-`.sta` and the script log are copied to `Z:` every 2 s; at the end the
-results bundle, `.meta.json`, `.msg`, `.dat`, `.log` and `.inp` are copied
-back. The `.odb` stays on the compute PC. Cancel works as usual (the agent
+compute PC (`C:\TEMP\ABQ_remote\...`, one folder per run), with the model
+generator (`abaqus_scripts/*.py`) copied from your PC for each version. `Z:`
+is only a transit area: the `.sta` and the script log reach your working
+directory every 2 s, and at the end the results bundle, `.meta.json`, `.msg`,
+`.dat`, `.log` and `.inp` are moved to it and the run's transit folder on
+`Z:` is deleted. The `.odb` stays on the compute PC, in that local folder
+(clean it there when its disk fills up). Cancel works as usual (the agent
 runs `abaqus terminate`). Resume (`continue`) is local-only.
 
 ## Layout
