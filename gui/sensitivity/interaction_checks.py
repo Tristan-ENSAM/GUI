@@ -68,9 +68,9 @@ from gui.sensitivity.ms_independence import align_samples, with_mass_scaling
 
 # Action attached to a failed combined-domain check (decision D11-a).
 REDO_DOMAIN_ACTION = (
-    "redo the domain study (decision D11-a, eps_q kept per dimension); an "
-    "identical rerun returns the same D*, so change the start domain, the "
-    "step, n_hold or eps_q")
+    "redo the domain study (step 2) with other settings (the same eps_q "
+    "apply): an identical rerun returns the same D*, so change the margin, "
+    "the growth step or 'passes in a row' (Advanced parameters)")
 
 CHECK_PURPOSES = {
     "ms_x_mesh": "Mass-scaling factor against its analytic filter-ratio "
@@ -195,7 +195,11 @@ def mesh_domain_check(gci_result, h_star: float,
         res.conclusion = "not evaluable: no GCI result on D*"
         return res
     sizes = list(gci_result.sizes)
-    match = [h for h in sizes if math.isclose(h, h_star, rel_tol=1e-6)]
+    # 1e-5: h* comes back from the model, whose tabs keep 6 significant
+    # digits (an irrational plan size such as 0.001*sqrt(2) is rounded).
+    match = sorted((h for h in sizes
+                    if math.isclose(h, h_star, rel_tol=1e-5)),
+                   key=lambda h: abs(h - h_star))
     res.details = {"h_star": h_star, "sizes": sizes,
                    "recommended_on_D_star": gci_result.recommended_size,
                    "in_asymptotic_range": gci_result.in_asymptotic_range}

@@ -12,11 +12,22 @@ from gui.core.model_config import ModelConfig
 from gui.tabs.optimization_tab import OptimizationTab
 
 
+@pytest.fixture(autouse=True)
+def _answer_first_choice(monkeypatch):
+    """Questions of the tab (steps out of order, resume) answer with their
+    first choice ("Run anyway", "Resume") instead of a modal box."""
+    monkeypatch.setattr(OptimizationTab, "_ask",
+                        lambda self, title, text, choices, default=None:
+                        choices[0][0])
+    monkeypatch.setattr(OptimizationTab, "_inform",
+                        lambda self, title, text: None)
+
+
 @pytest.fixture
 def tab(qapp, monkeypatch):
     t = OptimizationTab(ModelConfig())
     # Neutralise the Preferences/Abaqus path check; the input guards run first.
-    monkeypatch.setattr(t, "_validate_launch", lambda: ("prefs", "wd", 1))
+    monkeypatch.setattr(t, "_validate_launch", lambda *a: ("prefs", "wd", 1))
     return t
 
 
@@ -66,7 +77,7 @@ class TestRestructuredTab:
     def test_gci_requires_the_six_absolute_tolerances(self, tab, warnings,
                                                       monkeypatch):
         monkeypatch.setattr(tab, "_validate_launch",
-                            lambda: ({}, "wd", 1))
+                            lambda *a: ({}, "wd", 1))
         for le in tab._q_eps.values():
             le.setText("")
         tab._on_run_mesh_gci()
@@ -80,6 +91,8 @@ class TestRestructuredTab:
         spins = [tab.sp_margin, tab.sp_gci_n, *tab._dom_spins.values()]
         for sp in spins:
             sp.setStyleSheet("font-size: 40px;")
+        for sec, _f in tab._advanced.values():    # spins live in them
+            sec.set_expanded(True)
         tab.resize(2400, 1400)
         tab.show()
         qapp.processEvents()
@@ -151,7 +164,7 @@ def launch(tab, monkeypatch, tmp_path):
     monkeypatch.setattr(ot, "DomainIndependenceWorker", _CaptureWorker)
     monkeypatch.setattr(ot, "MeshGciWorker", _CaptureWorker)
     monkeypatch.setattr(tab, "_validate_launch",
-                        lambda: (type("P", (), {"abaqus_cmd": "a",
+                        lambda *a: (type("P", (), {"abaqus_cmd": "a",
                                                 "abaqus_script": "s"})(),
                                  tmp_path, 4))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
@@ -165,7 +178,7 @@ class TestDomainIndependenceWiring:
                                          "dom_n_hold": 1, "dom_m_ratios": 2}
         assert tab.window() == (0.3, 1.0)
         g = tab.guard_settings()
-        assert (g.rk_max, g.rhg_max) == (0.01, 0.05)
+        assert (g.rk_max, g.rhg_max) == (0.05, 0.05)
 
     def test_window_validation(self, tab):
         tab._dom_texts["window_start"].setText("0.8")
@@ -315,7 +328,7 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
     tab._dom_spins["dom_step_elems"].setValue(4)
-    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
 
     def fake_make(prefs, run_dir, cpus, prefix):
@@ -352,7 +365,7 @@ def _analytic_tab(qapp, monkeypatch, tmp_path):
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
     tab._dom_spins["dom_step_elems"].setValue(4)
-    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
 
     def fake_make(prefs, run_dir, cpus, prefix):
@@ -400,7 +413,7 @@ def test_checks_and_exports_through_the_tab(qapp, monkeypatch, tmp_path):
     # combined domain: exactly one extra run (D* reused from the study)
     assert res.n_runs == n_runs_before + 1
     assert chk.checks[2].passed is True          # f constant in h -> exact
-    assert len(chk.gci_calls) == 3
+    assert len(chk.gci_calls) == tab.sp_gci_n.value()   # step-1 plan
     rows = list(csv.DictReader(open(folder / "checks.csv")))
     assert [r["check"] for r in rows] == ["ms_x_mesh", "domain_combined",
                                           "ms_at_point", "mesh_x_domain"]
@@ -466,7 +479,9 @@ class TestTabConfigLogic:
 
     def test_thresholds_required_for_all_fields(self, qapp):
         tab = self._tab()
-        assert tab.thresholds_complete() is False        # none set yet
+        for le in tab._q_eps.values():
+            le.setText("")
+        assert tab.thresholds_complete() is False        # none set
         for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
             tab._q_eps[q].setText("1")
         tab._q_eps["Vx"].setText("2.5")
@@ -494,7 +509,8 @@ class TestMsStudyWiring:
     def test_defaults(self, tab):
         values, elem = tab.ms_settings()
         assert values == (250.0, 500.0, 1000.0, 2000.0, 4000.0)
-        assert elem == tab.cfg.elem_size
+        # blank: the coarsest mesh of the step-1 plan (4 meshes, ratio 2)
+        assert elem == pytest.approx(tab.cfg.elem_size * 2 ** 3)
 
     def test_busy_includes_the_ms_button(self, tab):
         tab._busy(True, "running")
@@ -503,6 +519,8 @@ class TestMsStudyWiring:
         assert tab.btn_ms.isEnabled()
 
     def test_requires_the_tolerances(self, ms_launch, warnings):
+        for le in ms_launch._q_eps.values():
+            le.setText("")
         ms_launch._on_run_ms_independence()
         assert warnings and "tolerances" in warnings[0].lower()
         assert _CaptureWorker.last is None

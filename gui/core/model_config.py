@@ -464,13 +464,19 @@ class OptimizationCfg:
     defaults, so older .acpf files load unchanged."""
     zoi:            dict = field(default_factory=lambda: {
         "xmin": "", "xmax": "", "ymin": "", "ymax": ""})
-    criterion_rmse: dict = field(default_factory=dict)
+    # Absolute tolerances eps_q (the admitted deviation, not a reference
+    # value times a tolerance): values of the paper's reference case,
+    # project decision of 2026-10-07 (the ms study ran with them).
+    criterion_rmse: dict = field(default_factory=lambda: {
+        "Vx": "10", "Vy": "10", "T": "10", "EVF": "0.1",
+        "Fc": "10", "Ff": "10"})
     sizing_tol:     dict = field(default_factory=lambda: {
         q: "0.02" for q in ("EVF", "TEMP", "V1", "V2", "force")})
     gci_finest:     str  = ""
     gci_ratio:      str  = "2"
     gci_min:        str  = ""
-    gci_n_meshes:   int  = 3
+    # 4 meshes: the paper's GCI plan 0.5 / 1 / 2 / 4 um (project decision).
+    gci_n_meshes:   int  = 4
     caps:           dict = field(default_factory=dict)
     margin_elems:   int  = 0
     centroid_step:  str  = ""
@@ -485,15 +491,21 @@ class OptimizationCfg:
     # studies). 0.3-1.0 is the value previously hard-coded in the workers.
     window_start:   str  = "0.3"
     window_end:     str  = "1.0"
-    # Run safeguards. G_HG,max = 5 % (author, 2026-10-02). G_K,max = 0.01 is
-    # the mass-scaling guard default (ModelConfig.mass_scaling_bounds) and is
-    # NOT validated for the domain study: to be confirmed.
-    rk_max:         str  = "0.01"
+    # Run safeguards. G_HG,max = 5 % (author, 2026-10-02). G_K,max = 5 %
+    # (project decision of 2026-10-07: the guard of the paper's ms study and
+    # the value of the completion plan; it replaces 0.01, the old
+    # mass-scaling guard default).
+    rk_max:         str  = "0.05"
     rhg_max:        str  = "0.05"
     # Mass-scaling independence study (step 0, decision of 2026-10-07): the
     # tested factors, increasing, and its element size ("" = the Mesh tab's).
     ms_values:      str  = "250, 500, 1000, 2000, 4000"
     ms_elem_size:   str  = ""
+    # What each sizing step found for this model (ms, mesh, domain,
+    # checks): one record per step, written when a study ends, so the tab
+    # can tell which steps are done for the current model and in which
+    # order. Format: gui.sensitivity.study_state.
+    steps:          dict = field(default_factory=dict)
 
 
 @dataclass

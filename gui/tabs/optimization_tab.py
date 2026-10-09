@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Optimization tab: size the CEL model for the paper's methodology.
+Optimization > Model tab: size the CEL model in four steps.
 
 Three studies, all measured in the ZOI (the Optimization measurement zone,
-distinct from the output ROI of the Geometry tab):
+distinct from the output ROI of the Geometry tab), then the final checks:
 
   * the mass-scaling factor by an independence study on a fixed mesh and
     domain (gui.sensitivity.ms_independence): increasing ms compared
@@ -22,8 +22,11 @@ distinct from the output ROI of the Geometry tab):
 
 All studies share the time window T. Each candidate is one Abaqus run
 (run_simul) launched here, replicating the Sensitivity tab's run mechanism;
-the studies receive a deep copy of the current config, which is never
-modified. The study cores are unit-tested elsewhere.
+the studies receive a deep copy of the current config, which they never
+modify. Finished runs are reused by parameter content (resume, load), each
+study leaves a record of its result for the current model, and the whole
+chain can run in one go: see gui/tabs/model_steps.py. The study cores are
+unit-tested elsewhere.
 """
 from __future__ import annotations
 
@@ -67,6 +70,12 @@ from gui.sensitivity.run_worker import (
 from gui.core.remote_exec import (
     RemoteProcess, is_remote, launch_problems, submit_remote)
 from gui.results.reader import ResultsBundle
+from gui.sensitivity.study_specs import (
+    CHECKS_CONFIG, DIM_KEYS, ZOI_KEYS, grid_set_of_spec, ms_of,
+    write_checks_config, zoi_tuple)
+from gui.sensitivity.study_state import STEPS, in_model
+from gui.tabs.model_steps import ModelStepsMixin
+from gui.widgets.collapsible import CollapsibleSection
 from gui.widgets.geometry_preview import GeometryPreview
 
 
@@ -75,7 +84,7 @@ from gui.widgets.geometry_preview import GeometryPreview
 _QUANTITIES = [
     ("Vx", "V1", "mm/s"),
     ("Vy", "V2", "mm/s"),
-    ("T",  "TEMP", "K or °C"),
+    ("T",  "TEMP", "K"),
     ("EVF", "EVF", "-"),
     ("Fc", None, "N/mm"),
     ("Ff", None, "N/mm"),
@@ -87,20 +96,65 @@ _TABLE_COLUMNS = ("study", "item", "from", "to", "E_max / ratio", "q_crit",
 # Default values of the persisted Optimization settings (one instance, read
 # only, so the widget defaults cannot drift from the dataclass).
 OptimizationCfgDefaults = _OptimizationCfg()
-# Domain-study settings: (attribute of cfg.optimization, label, min, max).
+# Domain-study settings: (attribute of cfg.optimization, label, min, max,
+# tooltip). Defaults: OptimizationCfg (decided by the author on 2026-10-02).
 _DOM_SPINS = [
-    ("dom_step_elems", "step \u0394 (elems)", 1, 1000),
-    ("dom_n_max", "n_max", 2, 50),
-    ("dom_n_hold", "n_hold", 1, 10),
-    ("dom_m_ratios", "m (ratios)", 1, 10),
+    ("dom_step_elems", "growth step \u0394 [elements]", 1, 1000,
+     "Each side of the domain grows by this many elements between two\n"
+     "runs. Default 10. A larger step needs fewer runs but gives a\n"
+     "coarser final size."),
+    ("dom_n_max", "max comparisons per side", 2, 50,
+     "The growth of one side stops after this many comparisons, converged\n"
+     "or not. Default 8 (with the default step: up to 80 elements of\n"
+     "growth per side)."),
+    ("dom_n_hold", "passes in a row (fallback rule)", 1, 10,
+     "When the decay test cannot conclude, a side is converged after this\n"
+     "many successive passes (E_max < 1). Default 1."),
+    ("dom_m_ratios", "ratios in the decay test (m)", 1, 10,
+     "Number of successive E_max ratios used to bound the residual\n"
+     "influence by a geometric tail. Must be at most the max comparisons\n"
+     "minus 1. Default 2."),
 ]
-# Domain-study text settings: (attribute, label, unit/tooltip).
+# Shared text settings: (attribute, label, tooltip).
 _DOM_TEXTS = [
-    ("window_start", "T start", "fraction of the simulated time"),
-    ("window_end", "T end", "fraction of the simulated time"),
-    ("rk_max", "G_K,max", "max of R_K = \u03a3ALLKE/\u03a3ALLIE over T"),
-    ("rhg_max", "G_HG,max", "max of R_HG = \u03a3ALLAE/\u03a3ALLIE over T"),
+    ("window_start", "start", "Start of the time window T, as a fraction "
+                              "of the simulated time (default 0.3)"),
+    ("window_end", "end", "End of the time window T, as a fraction of the "
+                          "simulated time (default 1.0)"),
+    ("rk_max", "max kinetic / internal energy G_K",
+     "A run is rejected if R_K = \u03a3ALLKE/\u03a3ALLIE over T exceeds this\n"
+     "value (too much kinetic energy, typically from mass scaling).\n"
+     "Default 0.05 (5 %), the value used on the reference case."),
+    ("rhg_max", "max artificial / internal energy G_HG",
+     "A run is rejected if R_HG = \u03a3ALLAE/\u03a3ALLIE over T exceeds this\n"
+     "value (too much hourglass energy). Default 0.05 (5 %)."),
 ]
+# Domain dimensions: short label and definition (Eulerian part rectangle
+# (-l_wp, -h_wp) -> (l_void, h_void), cel_model.py create_parts).
+_DIM_LABELS = {"l_wp": "l_wp (\u2212x)", "l_void": "l_void (+x)",
+               "h_wp": "h_wp (\u2212y)", "h_void": "h_void (+y)"}
+_DIM_TIPS = {
+    "l_wp": "Extent of the Eulerian domain towards \u2212x from its origin "
+            "[mm] (Geometry tab, workpiece l_wp)",
+    "l_void": "Extent of the Eulerian domain towards +x from its origin "
+              "[mm] (Geometry tab, void l_void)",
+    "h_wp": "Extent of the Eulerian domain towards \u2212y from its origin "
+            "[mm] (Geometry tab, workpiece h_wp)",
+    "h_void": "Extent of the Eulerian domain towards +y from its origin "
+              "[mm] (Geometry tab, void h_void)",
+}
+# Source of each default eps_q (OptimizationCfg.criterion_rmse).
+_EPS_HELP = {
+    "Vx": "Default 10 mm/s",
+    "Vy": "Default 10 mm/s",
+    "T": "Default 10 K",
+    "EVF": "Default 0.1 (volume fraction, no unit)",
+    "Fc": "Default 10 N/mm",
+    "Ff": "Default 10 N/mm",
+}
+for _q in _EPS_HELP:
+    _EPS_HELP[_q] += (" (value used on the reference case, Ti6Al4V "
+                      "orthogonal cutting).")
 # Force quantities -> the tool-RP reaction-force history channel.
 _FORCE_CHANNELS = {"Fc": "RF1_RP", "Ff": "RF2_RP"}
 # GCI quantity name -> common tolerance label (the GCI selects with eps_q).
@@ -109,7 +163,18 @@ _GCI_NAMES = {"EVF": "EVF", "TEMP": "T", "V1": "Vx", "V2": "Vy",
 _DIM_ORDER = ("l_wp", "h_wp", "h_void", "l_void")
 
 
-class OptimizationTab(QWidget):
+# Preview colours: the Geometry tab draws the domain (blue), the workpiece
+# (green), the tool (orange) and the ROI (red dashed); the overlays of this
+# tab take colours none of those use.
+_C_ZOI = "#7c3aed"          # ZOI and its sampling points (purple)
+_C_START = "#0f766e"        # step-2 starting domain (teal, dashed)
+_C_CAP = "#374151"          # largest size allowed (dark grey, dash-dot)
+_C_DSTAR = "#1e3a8a"        # D* found by step 2, not in the model (navy)
+_MAX_PREVIEW_POINTS = 2000  # sampling points drawn (subsampled beyond)
+_MAX_GRID_POINTS = 5000000  # beyond this the points are not even counted
+
+
+class OptimizationTab(ModelStepsMixin, QWidget):
     # Emitted when a persisted optimization parameter changes, so the
     # main window can mark the profile dirty.
     changed = Signal()
@@ -126,7 +191,6 @@ class OptimizationTab(QWidget):
         self._profile_name_getter = profile_name_getter
         self._loading = False   # guard: True while populating from cfg
         self._cpus_getter = cpus_getter
-        self._initial = None            # DomainDims = ZOI + margin (D2-a)
         self._cancel_evt = threading.Event()
         # Published by run_bundle so _on_cancel can name the job to
         # `abaqus terminate` and reach the solver behind the launcher.
@@ -140,6 +204,15 @@ class OptimizationTab(QWidget):
         self._last_checks = None         # ChecksResult
         self._last_ms = None             # (MsStudyResult, folder)
         self._current_sta = None        # current job's .sta path (for progress)
+        # Steps, resume/load, pipeline (gui/tabs/model_steps.py)
+        self._active = None             # context of the running study
+        self._pipeline = False          # True while "Run all steps" runs
+        self._is_busy = False
+        self._model_refresher = None    # main window: reload model tabs
+        self._study_cache = None        # RunCache of the running study
+        self._study_offline = False     # loading: never launch Abaqus
+        self._step_status = {}          # step -> status QLabel
+        self._btn_apply = {}            # step -> "Use in model" button
         self._sim_timer = QTimer(self)
         self._sim_timer.setInterval(500)
         self._sim_timer.timeout.connect(self._poll_sta)
@@ -177,10 +250,16 @@ class OptimizationTab(QWidget):
             sp.setMinimumWidth(_NUM_W)
             return sp
 
+        # Grey help texts: hidden by default, shown by the "Show help"
+        # check box at the top of the inputs (the tooltips are always there).
+        self._hints = []
+
         def hint(text):
             lab = QLabel(text)
             lab.setWordWrap(True)
             lab.setStyleSheet("color:#6b7280;")
+            lab.setVisible(False)
+            self._hints.append(lab)
             return lab
 
         def grid(group):
@@ -189,111 +268,246 @@ class OptimizationTab(QWidget):
             g.setVerticalSpacing(4)
             return g
 
-        # ---- Common settings: ZOI, sampling, window T, safeguards ------
+        # Each panel shows its essential inputs; the rest sits in a
+        # collapsed "Advanced parameters" section whose header counts the
+        # fields that differ from their default (_refresh_advanced_counts).
+        # Every default states its source in its tooltip.
+        self._advanced = {}     # panel key -> (CollapsibleSection, fields)
+
+        def advanced(key, fields_fn):
+            sec = CollapsibleSection("Advanced parameters")
+            self._advanced[key] = (sec, fields_fn)
+            return sec
+
+        def sub_grid(widget):
+            g = QGridLayout(widget)
+            g.setContentsMargins(14, 0, 0, 4)
+            g.setHorizontalSpacing(8)
+            g.setVerticalSpacing(4)
+            return g
+
+        _APPLY_TIPS = {
+            "ms": "Write ms* in the Step tab (mass scaling on, factor ms*).",
+            "mesh": "Write h* as the element size of the Mesh tab.",
+            "domain": "Write D* as the Eulerian domain of the Geometry tab.",
+        }
+
+        def status_row(step):
+            """Status of the step for the current model (+ 'Use in model')."""
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lab = QLabel("")
+            lab.setWordWrap(True)
+            self._step_status[step] = lab
+            row.addWidget(lab, 1)
+            if step in _APPLY_TIPS:
+                b = QPushButton("Use in model")
+                b.setToolTip(_APPLY_TIPS[step])
+                b.setVisible(False)
+                b.clicked.connect(
+                    lambda _=False, s=step: self._on_apply_step(s))
+                self._btn_apply[step] = b
+                row.addWidget(b, 0, Qt.AlignTop)
+            return row
+
+        # ---- How to use (grey help, shown with "Show help") --------------
+        intro = hint(
+            "Makes the simulation results independent of three numerical "
+            "choices (mass scaling, element size, Eulerian domain). Check "
+            "the comparison settings, then click 'Run all steps', or run "
+            "steps 0 to 3 one by one and click 'Use in model' after each. "
+            "Each step says whether it is done for the current model. "
+            "Hover over a field for its definition and the source of its "
+            "default.")
+
+        # ---- Comparison settings: ZOI, eps_q (+ advanced: grid, T, guards)
         # The ZOI is DISTINCT from the ROI (Geometry tab, model output set
         # for DIC/IRT); empty fields default to the ROI. T, the
         # safeguards and the tolerances eps_q are shared by every study.
-        gcom = QGroupBox("Common settings \u2014 ZOI, window T, safeguards, \u03b5_q")
-        cg0 = grid(gcom)
+        gcom = QGroupBox("Comparison settings (used by every step)")
+        cv0 = QVBoxLayout(gcom)
+        cv0.setSpacing(4)
+        cg0 = QGridLayout()
+        cg0.setHorizontalSpacing(8)
+        cg0.setVerticalSpacing(4)
+        cv0.addLayout(cg0)
+        lab = QLabel("Comparison zone ZOI [mm]")
+        lab.setToolTip(
+            "Zone where two runs are compared (measurement zone of this tab).\n"
+            "It is NOT the ROI: the ROI is the output zone of the Geometry\n"
+            "tab, matched to the DIC/IRT fields. An empty bound takes the\n"
+            "ROI bound. The Sensitivity tab can propose a ZOI from its maps\n"
+            "('Copy ZOI to the Model tab').")
+        cg0.addWidget(lab, 0, 0)
         self.le_zoi = {}
-        for c, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax"),
-                                        ("y min", "ymin"), ("y max", "ymax")]):
-            cg0.addWidget(QLabel(lbl), 0, 2 * c)
+        zoi_row = QHBoxLayout()
+        zoi_row.setSpacing(4)
+        for lbl, key in [("x min", "xmin"), ("x max", "xmax"),
+                         ("y min", "ymin"), ("y max", "ymax")]:
+            zoi_row.addWidget(QLabel(lbl))
             le = num_edit(placeholder="= ROI",
                           tip="ZOI bound [mm]; empty = ROI bound")
             self.le_zoi[key] = le
-            cg0.addWidget(le, 0, 2 * c + 1)
-            le.textChanged.connect(self._draw_preview)
+            zoi_row.addWidget(le)
+            zoi_row.addSpacing(6)
+            le.textChanged.connect(self._schedule_preview)
         self.btn_zoi_from_roi = QPushButton("ZOI = ROI")
+        self.btn_zoi_from_roi.setToolTip("Copy the ROI of the Geometry tab "
+                                         "into the ZOI fields.")
         self.btn_zoi_from_roi.clicked.connect(self._zoi_from_roi)
-        cg0.addWidget(self.btn_zoi_from_roi, 0, 8)
-        cg0.addWidget(QLabel("grid step"), 1, 0)
-        self.le_grid_step = num_edit(placeholder="= elem",
-                                     tip="ZOI sampling step [mm]; empty = "
-                                         "element size")
-        cg0.addWidget(self.le_grid_step, 1, 1)
-        self._dom_texts = {}
-        for i, (attr, label, tip) in enumerate(_DOM_TEXTS):
-            lab = QLabel(label); lab.setToolTip(tip)
-            cg0.addWidget(lab, 1, 2 + 2 * i)
-            le = num_edit(str(getattr(OptimizationCfgDefaults, attr)), tip=tip)
-            self._dom_texts[attr] = le
-            cg0.addWidget(le, 1, 3 + 2 * i)
+        zoi_row.addWidget(self.btn_zoi_from_roi)
+        zoi_row.addStretch(1)
+        cg0.addLayout(zoi_row, 0, 1)
         # Absolute tolerances eps_q: ONE set for every study (decision of
         # 2026-10-07): the ms and domain E_max and the GCI mesh selection.
-        cg0.addWidget(QLabel("\u03b5_q (absolute)"), 2, 0)
+        lab = QLabel("Admitted deviation ε_q")
+        lab.setToolTip(
+            "Largest difference between two runs that you treat as\n"
+            "negligible, one value per quantity, in its own unit (absolute,\n"
+            "not a percentage). A run pair passes when every quantity\n"
+            "differs by less than its ε_q in the ZOI (E_max < 1).\n"
+            "Defaults: values used on the reference case (Ti6Al4V\n"
+            "orthogonal cutting).")
+        cg0.addWidget(lab, 1, 0)
         self._q_eps = {}
         _unit = {q: u for (q, _f, u) in _QUANTITIES}
         eps_row = QHBoxLayout()
         eps_row.setSpacing(4)
         for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
             lbl = QLabel(q)
-            tip = "%s tolerance [%s]" % (q, _unit[q])
+            tip = "%s: admitted deviation [%s]. %s" % (
+                q, _unit[q], _EPS_HELP[q])
             if q in ("Fc", "Ff"):
-                tip += (" \u2014 %s on the tool RP divided by the element "
-                        "size" % ("RF1" if q == "Fc" else "RF2"))
+                tip += ("\n%s on the tool RP divided by the element size."
+                        % ("RF1" if q == "Fc" else "RF2"))
             lbl.setToolTip(tip)
             eps_row.addWidget(lbl)
             le = num_edit(placeholder=_unit[q], tip=tip)
             le.setFixedWidth(64)
             self._q_eps[q] = le
             eps_row.addWidget(le)
-            eps_row.addSpacing(12)
+            eps_row.addSpacing(10)
         eps_row.addStretch(1)
-        cg0.addLayout(eps_row, 2, 1, 1, 9)
-        cg0.setColumnStretch(10, 1)
+        cg0.addLayout(eps_row, 1, 1)
+        cg0.setColumnStretch(1, 1)
+        cv0.addWidget(hint(
+            "ε_q: defaults are those of the reference case (Ti6Al4V). "
+            "For another "
+            "material or cutting condition, set each one to the smallest "
+            "difference that matters for your comparison with the "
+            "experiment, e.g. not larger than the measurement uncertainty "
+            "of that quantity."))
+        sec = advanced("common", lambda: [
+            (self.le_grid_step, ""),
+            *[(self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
+              for a, _l, _t in _DOM_TEXTS]])
+        ag = sub_grid(sec.body)
+        ag.addWidget(QLabel("ZOI sampling step [mm]"), 0, 0)
+        self.le_grid_step = num_edit(
+            placeholder="= elem",
+            tip="Spacing of the points where the ZOI is sampled [mm].\n"
+                "Default (empty): the element size of the Mesh tab (the\n"
+                "coarser meshes of steps 0 and 1 then have several points\n"
+                "per element).")
+        ag.addWidget(self.le_grid_step, 0, 1)
+        lab = QLabel("Time window T (fraction of the simulated time)")
+        lab.setToolTip(
+            "Part of the simulated time over which the runs are compared\n"
+            "(0 = start, 1 = end). It should cover the steady cutting regime\n"
+            "only: check the cutting force of a run in the Results tab and\n"
+            "start T after the force has stabilised.\n"
+            "Default 0.3 to 1.0: the value hard-coded in the studies before\n"
+            "it became a setting. Also used by the Sensitivity tab.")
+        ag.addWidget(lab, 1, 0)
+        self._dom_texts = {}
+        win_row = QHBoxLayout()
+        win_row.setSpacing(4)
+        for i, (attr, label, tip) in enumerate(_DOM_TEXTS):
+            lab = QLabel(label)
+            lab.setToolTip(tip)
+            le = num_edit(str(getattr(OptimizationCfgDefaults, attr)),
+                          tip=tip)
+            self._dom_texts[attr] = le
+            if attr.startswith("window_"):      # start, end on one row
+                win_row.addWidget(lab)
+                win_row.addWidget(le)
+                win_row.addSpacing(6)
+            else:                               # one safeguard per row
+                ag.addWidget(lab, i, 0)
+                ag.addWidget(le, i, 1)
+        win_row.addStretch(1)
+        ag.addLayout(win_row, 1, 1, 1, 2)
+        ag.setColumnStretch(3, 1)
+        cv0.addWidget(sec)
 
         # ---- Step 0 · mass-scaling factor by an independence study -------
-        gms = QGroupBox("0 \u00b7 Mass scaling \u2014 independence study")
-        sg = grid(gms)
-        sg.addWidget(QLabel("ms values"), 0, 0)
+        gms = QGroupBox("Step 0 · Mass scaling factor ms")
+        sv = QVBoxLayout(gms)
+        sv.setSpacing(4)
+        sg = QGridLayout()
+        sg.setHorizontalSpacing(8)
+        sv.addLayout(sg)
+        sg.addWidget(QLabel("ms values to test"), 0, 0)
         self.le_ms_values = QLineEdit(OptimizationCfgDefaults.ms_values)
         self.le_ms_values.setToolTip(
             "Mass-scaling factors to test, strictly increasing, separated by\n"
-            "commas or spaces.")
-        sg.addWidget(self.le_ms_values, 0, 1, 1, 4)
-        sg.addWidget(QLabel("mesh [mm]"), 0, 5)
-        self.le_ms_elem = num_edit(placeholder="= elem",
-                                   tip="Element size of the ms runs [mm]; "
-                                       "empty = Mesh tab element size")
-        sg.addWidget(self.le_ms_elem, 0, 6)
+            "commas or spaces. Default 250 to 4000, factor 2 between values.\n"
+            "If every comparison passes, the study adds values by doubling\n"
+            "the last one (up to 5 more) until a comparison fails.")
+        sg.addWidget(self.le_ms_values, 0, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
             "compares each run with the previous one (E_max with the absolute\n"
             "eps_q of the common settings). Safeguards: outputs, R_K, R_HG, filter check and\n"
             "reverberation check. Keeps the largest ms reached by an unbroken\n"
-            "chain of successes; stops at the first failure.")
+            "chain of successes; stops at the first failure. Finished runs of\n"
+            "an interrupted study are reused when it is resumed.")
         self.btn_ms.clicked.connect(self._on_run_ms_independence)
-        sg.addWidget(self.btn_ms, 1, 0, 1, 2)
-        sg.addWidget(hint("Uses the common \u03b5_q and the current "
-                          "domain. Needs the output filter with verification "
-                          "(Step tab)."), 1, 2, 1, 6)
-        sg.setColumnStretch(7, 1)
+        sg.addWidget(self.btn_ms, 0, 2)
+        sg.setColumnStretch(1, 1)
+        sv.addLayout(status_row("ms"))
+        sv.addWidget(hint(
+            "Finds ms*, the largest factor that does not change the results "
+            "beyond ε_q (larger ms = faster runs). Runs on the coarsest mesh "
+            "of step 1 and the Eulerian domain of the Geometry tab. Before: "
+            "enable the output filter (Step tab). Result: ms*, for the Step "
+            "tab."))
+        sec = advanced("ms", lambda: [(self.le_ms_elem, "")])
+        ag = sub_grid(sec.body)
+        ag.addWidget(QLabel("element size of these runs [mm]"), 0, 0)
+        self.le_ms_elem = num_edit(
+            placeholder="= coarsest",
+            tip="Element size of the ms runs [mm]. Default (empty): the\n"
+                "coarsest mesh of the step-1 plan (finest × ratio^(n−1)),\n"
+                "the cheapest runs of the plan.")
+        ag.addWidget(self.le_ms_elem, 0, 1)
+        ag.setColumnStretch(2, 1)
+        sv.addWidget(sec)
 
         # ---- Step 1 · mesh size by Richardson / GCI ---------------------
-        gmesh = QGroupBox("1 \u00b7 Mesh size \u2014 Richardson / GCI on a "
-                          "fixed domain")
-        mg = grid(gmesh)
-        mg.addWidget(QLabel("finest [mm]"), 0, 0)
-        self.le_gci_finest = num_edit(placeholder="= elem")
+        gmesh = QGroupBox("Step 1 · Element size h (mesh convergence)")
+        mv = QVBoxLayout(gmesh)
+        mv.setSpacing(4)
+        mg = QGridLayout()
+        mg.setHorizontalSpacing(8)
+        mv.addLayout(mg)
+        mg.addWidget(QLabel("finest element size [mm]"), 0, 0)
+        self.le_gci_finest = num_edit(
+            placeholder="= elem",
+            tip="Size of the finest mesh of the plan [mm]. Default (empty):\n"
+                "the element size of the Mesh tab. The other meshes are\n"
+                "finest × ratio, finest × ratio², ...")
         mg.addWidget(self.le_gci_finest, 0, 1)
-        mg.addWidget(QLabel("ratio"), 0, 2)
-        self.le_gci_ratio = num_edit("2")
-        mg.addWidget(self.le_gci_ratio, 0, 3)
-        mg.addWidget(QLabel("floor [mm]"), 0, 4)
-        self.le_gci_min = num_edit(placeholder="none")
-        mg.addWidget(self.le_gci_min, 0, 5)
-        mg.addWidget(QLabel("n meshes"), 0, 6)
-        self.sp_gci_n = spin_box(3, 6, 3)
-        mg.addWidget(self.sp_gci_n, 0, 7)
+        mg.addWidget(QLabel("number of meshes"), 0, 2)
+        self.sp_gci_n = spin_box(3, 6, OptimizationCfgDefaults.gci_n_meshes)
+        self.sp_gci_n.setToolTip(
+            "Meshes in the plan (at least 3 for Richardson / GCI). Default 4\n"
+            "(reference case: 0.5 / 1 / 2 / 4 µm).")
+        mg.addWidget(self.sp_gci_n, 0, 3)
         # One tolerance set for the three axes (decision of 2026-10-07): the
         # mesh is selected with the common absolute eps_q. The old relative
         # GCI tolerances (persisted key sizing_tol) are no longer read.
-        mg.addWidget(hint("Selection: coarsest mesh with |f_q(h) \u2212 "
-                          "f_q^ref| \u2264 \u03b5_q (common settings) for "
-                          "every quantity; the GCI in % is reported only."),
-                     1, 0, 1, 9)
         self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
         self.btn_mesh.setToolTip(
             "GCI/Richardson mesh convergence on the current (fixed) domain:\n"
@@ -301,56 +515,55 @@ class OptimizationTab(QWidget):
             "value and GCI per quantity. Recommends the coarsest mesh within\n"
             "the absolute tolerances eps_q (common settings) of the reference.")
         self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
-        mg.addWidget(self.btn_mesh, 2, 0, 1, 4)
-        mg.addWidget(hint("Uses the current domain: keep it conservative "
-                          "(paper P9)."), 2, 4, 1, 5)
-        mg.setColumnStretch(8, 1)
+        mg.addWidget(self.btn_mesh, 0, 4)
+        mg.setColumnStretch(5, 1)
+        mv.addLayout(status_row("mesh"))
+        mv.addWidget(hint(
+            "Finds h*, the coarsest mesh whose results stay within ε_q "
+            "of the reference value (the GCI in % is only reported). Runs "
+            "at ms* on the Eulerian domain of the Geometry tab: keep it "
+            "generous. Result: h*, for the Mesh tab."))
+        sec = advanced("mesh", lambda: [
+            (self.le_gci_ratio, str(OptimizationCfgDefaults.gci_ratio)),
+            (self.le_gci_min, "")])
+        ag = sub_grid(sec.body)
+        ag.addWidget(QLabel("refinement ratio"), 0, 0)
+        self.le_gci_ratio = num_edit(
+            OptimizationCfgDefaults.gci_ratio,
+            tip="Size ratio between two successive meshes. Default 2.\n"
+                "Celik et al. (2008, J. Fluids Eng. 130, 078001) recommend a\n"
+                "ratio above 1.3 for the GCI.")
+        ag.addWidget(self.le_gci_ratio, 0, 1)
+        ag.addWidget(QLabel("smallest allowed finest size [mm]"), 1, 0)
+        self.le_gci_min = num_edit(
+            placeholder="none",
+            tip="If the finest size is below this floor, the plan starts at\n"
+                "the floor instead [mm]. Default (empty): no floor.")
+        ag.addWidget(self.le_gci_min, 1, 1)
+        ag.setColumnStretch(2, 1)
+        mv.addWidget(sec)
 
         # ---- Step 2 · Eulerian domain -----------------------------------
-        gdom = QGroupBox("2 \u00b7 Eulerian domain \u2014 sequential "
-                         "independence study")
-        dg = grid(gdom)
-        # initial domain + caps, one row per dimension pair
-        self._max = {}
+        gdom = QGroupBox("Step 2 · Eulerian domain size")
+        dv = QVBoxLayout(gdom)
+        dv.setSpacing(4)
+        dg = QGridLayout()
+        dg.setHorizontalSpacing(8)
+        dg.setVerticalSpacing(4)
+        dv.addLayout(dg)
+        # initial domain (read-only), one row per dimension pair
         self._init_lbl = {}
-        dg.addWidget(QLabel("dimension"), 1, 0)
-        dg.addWidget(QLabel("initial [mm]"), 1, 1)
-        dg.addWidget(QLabel("max cap [mm]"), 1, 2)
-        dg.addWidget(QLabel("dimension"), 1, 4)
-        dg.addWidget(QLabel("initial [mm]"), 1, 5)
-        dg.addWidget(QLabel("max cap [mm]"), 1, 6)
-        for r, (d_left, d_right) in enumerate(
-                [("l_wp", "h_void"), ("h_wp", "l_void")], start=2):
-            for d, c0 in ((d_left, 0), (d_right, 4)):
-                dg.addWidget(QLabel(d), r, c0)
-                il = QLabel("\u2014"); il.setStyleSheet("color:#374151;")
+        dg.addWidget(QLabel("starting domain [mm]"), 0, 0)
+        for r, pair in enumerate([("l_wp", "l_void"), ("h_wp", "h_void")]):
+            for c, d in enumerate(pair):
+                lab = QLabel(_DIM_LABELS[d])
+                lab.setToolTip(_DIM_TIPS[d])
+                dg.addWidget(lab, r, 1 + 2 * c)
+                il = QLabel("—"); il.setStyleSheet("color:#374151;")
                 self._init_lbl[d] = il
-                dg.addWidget(il, r, c0 + 1)
-                mx = num_edit(placeholder="no cap")
-                self._max[d] = mx
-                dg.addWidget(mx, r, c0 + 2)
-        # study settings
-        set_row = QHBoxLayout()
-        set_row.setSpacing(4)
-        set_row.addWidget(QLabel("margin (elems)"))
-        self.sp_margin = spin_box(0, 50, 0)
-        set_row.addWidget(self.sp_margin)
-        self._dom_spins = {}
-        for attr, label, lo, hi in _DOM_SPINS:
-            set_row.addSpacing(10)
-            set_row.addWidget(QLabel(label))
-            sp = spin_box(lo, hi,
-                          int(getattr(OptimizationCfgDefaults, attr)))
-            self._dom_spins[attr] = sp
-            set_row.addWidget(sp)
-        set_row.addStretch(1)
-        dg.addLayout(set_row, 4, 0, 1, 10)
-        self.btn_init = QPushButton("Compute initial domain")
-        self.btn_init.clicked.connect(self.compute_initial)
-        dg.addWidget(self.btn_init, 5, 0, 1, 2)
-        self.lbl_init = QLabel("\u2014")
-        self.lbl_init.setStyleSheet("font-weight: bold;")
-        dg.addWidget(self.lbl_init, 5, 2, 1, 8)
+                dg.addWidget(il, r, 2 + 2 * c)
+        dg.setColumnStretch(5, 1)
+        btn_row = QHBoxLayout()
         self.btn_domain = QPushButton("Run domain sizing (independence)")
         self.btn_domain.setToolTip(
             "Sequential independence study: each dimension grown by a constant\n"
@@ -359,36 +572,106 @@ class OptimizationTab(QWidget):
             "absolute eps_q, residual influence bounded by a geometric tail.\n"
             "The domain diagonal only raises a warning.")
         self.btn_domain.clicked.connect(self._on_run_domain_independence)
-        dg.addWidget(self.btn_domain, 6, 0, 1, 2)
-        dg.addWidget(hint("Initial domain = ZOI + margin. Tail bound on the "
-                          "last m ratios, fallback on the successive rule."),
-                     6, 2, 1, 8)
-        dg.setColumnStretch(9, 1)
+        btn_row.addWidget(self.btn_domain)
+        btn_row.addStretch(1)
+        dv.addLayout(btn_row)
+        dv.addLayout(status_row("domain"))
+        dv.addWidget(hint(
+            "Starts from the ZOI plus the margin (teal box of the preview) "
+            "and grows each side until the results in the ZOI stop changing "
+            "beyond ε_q. Runs at ms* and h* (the element size of the Mesh "
+            "tab). Result: D*, for the Geometry tab (Eulerian part)."))
+        sec = advanced("domain", lambda: [
+            (self.sp_margin, 0),
+            *[(le, "") for le in self._max.values()],
+            *[(sp, int(getattr(OptimizationCfgDefaults, a)))
+              for a, sp in self._dom_spins.items()]])
+        ag = sub_grid(sec.body)
+        lab = QLabel("margin around the ZOI [elements]")
+        lab.setToolTip("Elements added on each side of the ZOI to build the "
+                       "starting domain. Default 0.")
+        ag.addWidget(lab, 0, 0)
+        self.sp_margin = spin_box(0, 50, 0)
+        self.sp_margin.setToolTip(lab.toolTip())
+        ag.addWidget(self.sp_margin, 0, 1)
+        self._dom_spins = {}
+        for r, (attr, label, lo, hi, tip) in enumerate(_DOM_SPINS, start=1):
+            lab = QLabel(label)
+            lab.setToolTip(tip)
+            ag.addWidget(lab, r, 0)
+            sp = spin_box(lo, hi,
+                          int(getattr(OptimizationCfgDefaults, attr)))
+            sp.setToolTip(tip)
+            self._dom_spins[attr] = sp
+            ag.addWidget(sp, r, 1)
+        lab = QLabel("largest size allowed [mm]")
+        lab.setToolTip("Upper bound of each dimension during the study\n"
+                       "(grey dash-dot lines in the preview). Empty = no cap.")
+        ag.addWidget(lab, 0, 2, 1, 2)
+        self._max = {}
+        for r, d in enumerate(_DIM_ORDER, start=1):
+            lab = QLabel(_DIM_LABELS[d])
+            lab.setToolTip(_DIM_TIPS[d])
+            ag.addWidget(lab, r, 2)
+            mx = num_edit(placeholder="no cap",
+                          tip="Cap of %s [mm]; empty = no cap" % d)
+            self._max[d] = mx
+            ag.addWidget(mx, r, 3)
+        ag.setColumnStretch(4, 1)
+        dv.addWidget(sec)
 
         # ---- Step 3 · interaction checks --------------------------------
-        gchk = QGroupBox("3 \u00b7 Interaction checks (paper \u00a75.7)")
-        kg = grid(gchk)
+        gchk = QGroupBox("Step 3 · Final checks at (ms*, h*, D*)")
+        kv = QVBoxLayout(gchk)
         self.btn_checks = QPushButton("Run interaction checks")
         self.btn_checks.setToolTip(
-            "A-posteriori checks of the sized model (paper \u00a75.7):\n"
+            "A-posteriori checks of the sized model:\n"
             "mass-scaling factor inside its window at (h*, D*), the four\n"
             "dimensions grown together (1 run), ms* against the previous ms\n"
             "at (h*, D*) (1 run), and the GCI plan of step 1 run again on D*\n"
             "(h* must stay within tolerance). Available once a domain study\n"
-            "has finished.")
+            "has finished; it is read back from its folder when needed.")
         self.btn_checks.setEnabled(False)
         self.btn_checks.clicked.connect(self._on_run_interaction_checks)
-        kg.addWidget(self.btn_checks, 0, 0)
-        kg.addWidget(hint("f in its window at (h*, D*); D* grown in the four "
-                          "directions (1 run); ms* vs the previous ms at "
-                          "(h*, D*) (1 run); GCI of step 1 re-run on D*."),
-                     0, 1)
-        kg.setColumnStretch(1, 1)
+        kv.addWidget(self.btn_checks, 0, Qt.AlignLeft)
+        kv.addLayout(status_row("checks"))
+        kv.addWidget(hint(
+            "Checks that the three values still hold together: D* grown on "
+            "all sides (1 run), ms* against the previous ms (1 run), and the "
+            "mesh plan of step 1 run again on D*. Available after step 2."))
+
+        # ---- Top row: the whole pipeline, reading a study back, help -----
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.btn_all = QPushButton("Run all steps")
+        self.btn_all.setToolTip(
+            "Runs steps 0 to 3 in order. A step already done for this model\n"
+            "is skipped, an interrupted one is resumed. Each result is\n"
+            "written into the model (Step, Mesh and Geometry tabs) before\n"
+            "the next step starts. Stops at the first step that does not\n"
+            "succeed.")
+        self.btn_all.clicked.connect(self._on_run_all)
+        top.addWidget(self.btn_all)
+        self.btn_open = QPushButton("Open a study\u2026")
+        self.btn_open.setToolTip(
+            "Reads back a study from its folder, without any Abaqus run:\n"
+            "its settings are put back in this tab, its result is shown and\n"
+            "recorded for this model. A step-2 folder also brings back its\n"
+            "final checks. An unfinished study can then be resumed.")
+        self.btn_open.clicked.connect(self._on_open_study)
+        top.addWidget(self.btn_open)
+        top.addStretch(1)
+        self.cb_help = QCheckBox("Show help")
+        self.cb_help.setToolTip("Show the grey explanations under each step.")
+        self.cb_help.toggled.connect(self._show_help)
+        top.addWidget(self.cb_help)
 
         # ---- Inputs column (scrolls instead of squeezing) ---------------
         inputs = QWidget()
         il_ = QVBoxLayout(inputs)
         il_.setContentsMargins(0, 0, 4, 0)
+        il_.addLayout(top)
+        il_.addWidget(intro)
         for gbox in (gcom, gms, gmesh, gdom, gchk):
             il_.addWidget(gbox)
         il_.addStretch(1)
@@ -397,15 +680,22 @@ class OptimizationTab(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(inputs)
         # Never narrower than its content: the preview shrinks instead, and
-        # only a vertical scrollbar can appear.
+        # only a vertical scrollbar can appear. Measured with the advanced
+        # sections open, so opening one never needs a horizontal scrollbar.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        for sec, _f in self._advanced.values():
+            sec.body.setVisible(True)
         scroll.setMinimumWidth(inputs.sizeHint().width()
                                + scroll.verticalScrollBar().sizeHint().width())
+        for sec, _f in self._advanced.values():
+            sec.body.setVisible(False)
 
         # ---- Preview (reuses the Geometry tab's preview widget) --------
         gprev = QGroupBox("Preview")
         pv = QVBoxLayout(gprev)
         self.preview = GeometryPreview()
+        # Home re-fits the view to the model AND this tab's overlays.
+        self.preview.fit_override = self._draw_preview
         pv.addWidget(self.preview, 1)
         btn_prev = QPushButton("Refresh preview")
         btn_prev.clicked.connect(self._draw_preview)
@@ -480,15 +770,19 @@ class OptimizationTab(QWidget):
         self._splitter.setChildrenCollapsible(False)
         outer.addWidget(self._splitter)
 
-        # Auto-refresh the preview when the inputs that affect it change.
+        # Auto-refresh the preview when the inputs that affect it change
+        # (debounced: a "ZOI = ROI" click changes four fields at once).
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(60)
+        self._preview_timer.timeout.connect(self._draw_preview)
         for _d in _DIM_ORDER:
-            self._max[_d].textChanged.connect(self._draw_preview)
-        self.le_grid_step.textChanged.connect(self._draw_preview)
-        self.sp_margin.valueChanged.connect(self._draw_preview)
+            self._max[_d].textChanged.connect(self._schedule_preview)
+        self.le_grid_step.textChanged.connect(self._schedule_preview)
+        self.sp_margin.valueChanged.connect(self._schedule_preview)
 
         self._wire_opt_persistence()
         self.refresh_inputs()
-        self._draw_preview()
 
     # =====================================================================
     # Config-derived inputs (pure; unit-testable)
@@ -508,14 +802,14 @@ class OptimizationTab(QWidget):
     def grid_step(self) -> float:
         """Spacing of the fixed ROI comparison grid (the evaluation points).
         Defaults to the element size when left blank."""
-        txt = self.le_grid_step.text().strip().replace(",", ".")
-        try:
-            v = float(txt)
-            if v > 0:
-                return v
-        except (ValueError, TypeError):
-            pass
-        return float(self.cfg.elem_size)
+        v = self._grid_step_set()
+        return float(self.cfg.elem_size) if v is None else v
+
+    def _grid_step_set(self):
+        """The sampling step typed in the tab, or None (blank or not a
+        positive number: the element size is used)."""
+        v = self._float_or(self.le_grid_step, None)
+        return v if v is not None and v > 0 else None
 
 
     def euler_offset(self):
@@ -559,6 +853,30 @@ class OptimizationTab(QWidget):
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
         for sp in self._dom_spins.values():
             sp.valueChanged.connect(self._sync_opt_to_cfg)
+        for _sec, fields in self._advanced.values():
+            for w, _default in fields():
+                sig = (w.textChanged if isinstance(w, QLineEdit)
+                       else w.valueChanged)
+                sig.connect(self._refresh_advanced_counts)
+        self._refresh_advanced_counts()
+
+    def _refresh_advanced_counts(self, *_):
+        """Show, on each collapsed 'Advanced parameters' header, how many of
+        its fields differ from their default, so a hidden change is seen."""
+        for sec, fields in self._advanced.values():
+            n = 0
+            for w, default in fields():
+                if isinstance(w, QLineEdit):
+                    cur = w.text().strip().replace(",", ".")
+                    ref = str(default).strip()
+                    try:
+                        same = float(cur) == float(ref)
+                    except ValueError:
+                        same = cur == ref
+                else:
+                    same = int(w.value()) == int(default)
+                n += 0 if same else 1
+            sec.set_changed_count(n)
 
     def _sync_opt_to_cfg(self, *_):
         """Write the current widget values into cfg.optimization. No-op while
@@ -583,6 +901,7 @@ class OptimizationTab(QWidget):
         o.ms_values = self.le_ms_values.text()
         o.ms_elem_size = self.le_ms_elem.text()
         self.changed.emit()
+        self._refresh_step_status()
 
     def _load_opt_from_cfg(self):
         """Populate the widgets from cfg.optimization (called on construction
@@ -599,7 +918,8 @@ class OptimizationTab(QWidget):
             self.le_gci_finest.setText(str(o.gci_finest))
             self.le_gci_ratio.setText(str(o.gci_ratio or "2"))
             self.le_gci_min.setText(str(o.gci_min))
-            self.sp_gci_n.setValue(int(o.gci_n_meshes or 3))
+            self.sp_gci_n.setValue(int(
+                o.gci_n_meshes or OptimizationCfgDefaults.gci_n_meshes))
             for d, le in self._max.items():
                 le.setText(str(o.caps.get(d, "")))
             self.sp_margin.setValue(int(o.margin_elems or 0))
@@ -617,84 +937,338 @@ class OptimizationTab(QWidget):
             self._loading = False
 
     def refresh_inputs(self):
-        # The Inputs-from-model panel was removed; refreshing now just redraws
-        # the preview from the current config (kept for _rebind_cfg callers).
+        """Reload the panel from cfg.optimization and redraw (called after
+        a profile is opened, via MainWindow._rebind_cfg)."""
         self._load_opt_from_cfg()
         self._draw_preview()
+        self._refresh_step_status()
 
-    def compute_initial(self):
-        self.refresh_inputs()
-        try:
-            self._initial = self.compute_initial_dims()
-        except Exception as e:
-            QMessageBox.warning(self, "Initial domain",
-                                "Cannot compute: %s" % e)
+    def forget_results(self):
+        """Drop the study results held in memory (another profile was
+        opened: they belong to the previous one). No-op while a study
+        runs."""
+        if self._is_busy:
             return
-        d = self._initial
-        self.lbl_init.setText(
-            "h_wp=%.4g  h_void=%.4g  l_wp=%.4g  l_void=%.4g"
-            % (d.h_wp, d.h_void, d.l_wp, d.l_void))
+        self._last_ms = self._last_gci = self._last_checks = None
+        self._last_domain_result = self._last_domain_dir = None
+        self._last_domain_ms = self._last_domain_spec = None
+        self._refresh_convergence_view()
+        self._refresh_step_status()
+
+    def showEvent(self, event):
+        # Other tabs may have changed the model meanwhile.
+        super().showEvent(event)
         self._draw_preview()
+        self._refresh_step_status()
+
+    def _show_help(self, on):
+        for lab in self._hints:
+            lab.setVisible(bool(on))
+
+    def _schedule_preview(self, *_):
+        self._preview_timer.start()
+
+    def _sync_run_buttons(self):
+        """The run and open buttons are off while a study runs and for the
+        whole of 'Run all steps' (also between two steps: a study started
+        there would replace the one the pipeline starts next)."""
+        running = bool(self._is_busy or self._pipeline)
+        for b in (self.btn_ms, self.btn_mesh, self.btn_domain, self.btn_all,
+                  self.btn_open):
+            b.setEnabled(not running)
+        self.btn_cancel.setEnabled(running)
+        # The checks button and the "Use in model" buttons.
+        self._refresh_step_status()
+
+    def _retire_worker(self, attr):
+        """Before a new study replaces the worker in `attr`: wait for the
+        previous one to return from run() (its result is already handled
+        when no study is busy). A QThread destroyed while it runs aborts
+        the program."""
+        w = getattr(self, attr, None)
+        if w is not None and w.isRunning():
+            w.wait(10000)
+
+    def _cannot_start(self, what) -> bool:
+        """True (with a log line) when a study is busy: nothing new starts
+        until it ends."""
+        if not self._is_busy:
+            return False
+        self._log_ui("%s not started: another study is running." % what)
+        return True
+
+    def is_running(self) -> bool:
+        """True while a study or 'Run all steps' runs (also between two
+        steps of the pipeline): its results belong to this profile."""
+        return bool(self._is_busy or self._pipeline or self._active)
+
+    def shutdown(self, timeout_ms: int = 60000) -> bool:
+        """Stop a running study synchronously: the window is closing.
+
+        The study's result is dropped (the workers' signals are
+        disconnected first, so nothing lands on a closing window, and the
+        step keeps the record it had). The Abaqus job in flight is stopped
+        like a Cancel does (``abaqus terminate``, then the process tree; the
+        remote agent is asked to stop it). The finished runs stay in the
+        study folder, where 'Open a study' finds them. Returns True if every
+        study thread ended within `timeout_ms`."""
+        import warnings
+        self._pipeline = False
+        self._active = None
+        self._cancel_evt.set()
+        workers = []
+        for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
+                     "_ms_worker"):
+            w = getattr(self, attr, None)
+            if w is None or not w.isRunning():
+                continue
+            with warnings.catch_warnings():
+                # PySide warns (instead of raising) on a signal with no slot.
+                warnings.simplefilter("ignore", RuntimeWarning)
+                for sig in (w.progress, w.finished_ok, w.failed):
+                    try:
+                        sig.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+            w.cancel()
+            workers.append(w)
+        job, proc = self._current_job, self._current_proc
+        cmd, run_dir = self._current_abaqus_cmd, self._current_run_dir
+        if isinstance(proc, RemoteProcess):
+            try:
+                proc.cancel()
+            except Exception:
+                log_swallowed("stopping the remote job on close")
+        elif proc is not None:
+            asked = False
+            if job and cmd:
+                try:
+                    asked = bool(abaqus_terminate_job(cmd, job, run_dir))
+                except Exception:
+                    log_swallowed("abaqus terminate on close")
+            if asked:
+                # The study thread returns once the solver has unwound.
+                for w in workers:
+                    w.wait(10000)
+            # `returncode`, not poll(): the study thread reaps this Popen.
+            if proc.returncode is None:
+                try:
+                    if not kill_process_tree_by_pid(proc.pid):
+                        proc.kill()
+                except Exception:
+                    log_swallowed("killing the Abaqus job on close")
+        ended = all(bool(w.wait(int(timeout_ms))) for w in workers)
+        if not ended:
+            logging.getLogger(__name__).warning(
+                "a Model tab study thread is still running after %d ms",
+                timeout_ms)
+        self._sim_timer.stop()
+        self._is_busy = False
+        return ended
 
     def _draw_preview(self, *_):
-        """Reuse the Geometry tab's preview (tool + workpiece), then overlay the
-        optimization elements: the measurement ROI (= initial Eulerian domain)
-        with its evaluation points, and the max (cap) domain."""
-        from matplotlib.patches import Rectangle
+        """The model as the Geometry tab draws it (Eulerian domain,
+        workpiece, tool, ROI), plus what this tab compares and grows: the
+        ZOI and its sampling points, the step-2 starting domain, the largest
+        size allowed, and D* when step 2 found one the model does not use
+        yet. Every element has a legend entry and the view fits them all.
+        Never raises: a drawing problem must not stop a study's
+        bookkeeping (it is called when a study ends)."""
+        if hasattr(self, "_preview_timer"):
+            self._preview_timer.stop()
         try:
             self.preview.update_from_config(self.cfg)
         except Exception:
             log_swallowed("geometry preview update", level=logging.DEBUG)
             return
-        ax = self.preview._ax
         try:
-            inp = self.config_inputs()
+            self._draw_overlays(self.preview._ax)
         except Exception:
-            self.preview._canvas.draw_idle()
-            return
-        ex0 = float(self.cfg.euler_position.x0)
-        ey0 = float(self.cfg.euler_position.y0)
-        tip_x, tip_y = inp["tip"]
-        # refresh the read-only initial-dimension display
+            log_swallowed("drawing the Model tab overlays",
+                          level=logging.DEBUG)
+        self.preview._canvas.draw_idle()
+
+    def _draw_overlays(self, ax):
+        from matplotlib.patches import Rectangle
+        # The base drawing, named for this tab; the tool reference point
+        # (where the BCs apply) is not needed here.
+        names = {"Eulerian domain": "Eulerian domain (Geometry tab)",
+                 "Workpiece (reference)": "Workpiece",
+                 "ROI / bbox": "ROI (results written here)"}
+        for art in list(ax.patches) + list(ax.lines):
+            lab = str(art.get_label())
+            if lab in names:
+                art.set_label(names[lab])
+            elif lab.startswith("Tool RP"):
+                art.remove()
+        inp = self.config_inputs()
+        ex0, ey0 = self.euler_offset()
+        boxes = [inp["roi"]]          # (x0, x1, y0, y1) the view must hold
+        xs_extra, ys_extra = [], []
+
+        def rect(b, **kw):
+            ax.add_patch(Rectangle((b[0], b[2]), b[1] - b[0], b[3] - b[2],
+                                   fill=False, **kw))
+            boxes.append(tuple(b))
+
+        def euler_box(h_wp, h_void, l_wp, l_void):
+            return (-l_wp + ex0, l_void + ex0, -h_wp + ey0, h_void + ey0)
+
+        def same_box(a, b):
+            return all(math.isclose(u, v, rel_tol=1e-9, abs_tol=1e-12)
+                       for u, v in zip(a, b))
+
+        # Step-2 starting domain = ZOI + margin (also shown as numbers).
+        di = None
         try:
             di = self.compute_initial_dims()
             for d in _DIM_ORDER:
                 self._init_lbl[d].setText("%.4g" % getattr(di, d))
         except Exception:
-            pass
-
-        def rect(x0, x1, y0, y1, **kw):
-            ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, **kw))
-
-        # max (cap) domain, in the Eulerian frame (drawn if all caps are set)
+            for d in _DIM_ORDER:
+                self._init_lbl[d].setText("\u2014")
+        zoi = self.zoi()
+        zoi_ok = zoi[1] > zoi[0] and zoi[3] > zoi[2]
+        if zoi_ok:
+            rect(zoi, edgecolor=_C_ZOI, lw=1.8, zorder=7,
+                 label="ZOI (comparison zone)")
+            self._draw_sampling_points(ax, zoi)
+        if di is not None:
+            start = euler_box(di.h_wp, di.h_void, di.l_wp, di.l_void)
+            # With no margin it lies on the ZOI: drawn on top, named so.
+            on_zoi = zoi_ok and same_box(start, zoi)
+            rect(start, edgecolor=_C_START, lw=1.3, ls="--",
+                 zorder=8 if on_zoi else 6,
+                 label="Step 2 starting domain (= ZOI)" if on_zoi
+                 else "Step 2 starting domain (ZOI + margin)")
+        # Largest size allowed: a box when the four caps are set, else one
+        # line per cap that is set.
         cp = self.caps()
-        if set(cp.keys()) >= set(_DIM_ORDER):
-            rect(-cp["l_wp"] + ex0, cp["l_void"] + ex0, -cp["h_wp"] + ey0,
-                 cp["h_void"] + ey0, fill=False, edgecolor="#7c3aed", lw=1.6,
-                 ls="--", zorder=5)                          # max cap (purple)
-        # ROI (Geometry tab, model output set for DIC/IRT) -- dotted green,
-        # no points; the studies do NOT sample it.
-        xmin, xmax, ymin, ymax = inp["roi"]
-        rect(xmin, xmax, ymin, ymax, fill=False, edgecolor="#15803d",
-             lw=1.3, ls=":", zorder=6)
-        # ZOI (Optimization measurement zone) + measurement points at the
-        # centroid step -- distinct colour; this is what the studies sample.
-        zx0, zx1, zy0, zy1 = self.zoi()
-        rect(zx0, zx1, zy0, zy1, fill=False, edgecolor="#c2410c",
-             lw=1.6, zorder=7)
+        if set(cp) >= set(_DIM_ORDER):
+            rect(euler_box(cp["h_wp"], cp["h_void"], cp["l_wp"],
+                           cp["l_void"]),
+                 edgecolor=_C_CAP, lw=1.3, ls="-.", zorder=5,
+                 label="Largest size allowed (step 2)")
+        elif cp:
+            first = True
+            for d, v in cp.items():
+                kw = dict(color=_C_CAP, lw=1.2, ls="-.", zorder=5,
+                          label="Largest size allowed (step 2)"
+                          if first else "_nolegend_")
+                if d in ("l_wp", "l_void"):
+                    x = -v + ex0 if d == "l_wp" else v + ex0
+                    ax.axvline(x, **kw)
+                    xs_extra.append(x)
+                else:
+                    y = -v + ey0 if d == "h_wp" else v + ey0
+                    ax.axhline(y, **kw)
+                    ys_extra.append(y)
+                first = False
+        # D* found by step 2 but not (yet) in the model.
+        st, rec = self._step_state("domain")
+        if st == "done" and not in_model(
+                "domain", self._model_values()["dims"], rec.get("value")):
+            v = rec["value"]
+            rect(euler_box(v[0], v[1], v[2], v[3]), edgecolor=_C_DSTAR,
+                 lw=1.8, ls=":", zorder=6,
+                 label="D* found by step 2 (not in the model yet)")
+        # What would make a study fail or sample nothing.
+        warn = []
+        roi = inp["roi"]
+        h_wp, h_void, l_wp, l_void = self.cfg.effective_euler_dims()
+        eul = euler_box(h_wp, h_void, l_wp, l_void)
+
+        def inside(a, b):
+            tol = 1e-9 * max(1.0, *[abs(v) for v in b])
+            return (a[0] >= b[0] - tol and a[1] <= b[1] + tol
+                    and a[2] >= b[2] - tol and a[3] <= b[3] + tol)
+        if not zoi_ok:
+            warn.append("The ZOI is empty (min \u2265 max).")
+        else:
+            if not inside(zoi, roi):
+                warn.append("The ZOI goes beyond the ROI: no results are "
+                            "written there.")
+            if not inside(zoi, eul):
+                warn.append("The ZOI goes beyond the Eulerian domain of the "
+                            "Geometry tab (steps 0 and 1 run on it).")
+        if warn:
+            ax.text(0.02, 0.98, "\n".join("\u26a0 " + w for w in warn),
+                    transform=ax.transAxes, ha="left", va="top", fontsize=7,
+                    color="#8a1f11", zorder=20,
+                    bbox=dict(boxstyle="round", facecolor="#fff3cd",
+                              edgecolor="#8a1f11", alpha=0.95))
+        self._fit_view(ax, boxes, xs_extra, ys_extra)
+        ax.set_title("")
+        ax.legend(loc="best", fontsize=7, framealpha=0.9)
+
+    def _fit_view(self, ax, boxes, xs_extra, ys_extra):
+        """Limits that hold the drawing and every overlay, centred on them
+        and already shaped like the axes box: the equal-aspect adjustment
+        of matplotlib then has nothing to shrink (it shrinks one direction
+        around the view centre and cut off what lay at its edge)."""
+        bx = list(xs_extra) + [v for b in boxes for v in b[:2]]
+        by = list(ys_extra) + [v for b in boxes for v in b[2:]]
+        try:
+            ax.relim(visible_only=True)       # the model's own shapes
+            dl = ax.dataLim
+            if all(math.isfinite(v) for v in (dl.x0, dl.x1)):
+                bx += [dl.x0, dl.x1]
+            if all(math.isfinite(v) for v in (dl.y0, dl.y1)):
+                by += [dl.y0, dl.y1]
+        except Exception:
+            (x0, x1), (y0, y1) = self.preview._compute_fit_limits(self.cfg)
+            bx += [x0, x1]
+            by += [y0, y1]
+        bx = [v for v in bx if math.isfinite(v)]
+        by = [v for v in by if math.isfinite(v)]
+        if not bx or not by:
+            return
+        w = max(max(bx) - min(bx), 1e-6)
+        h = max(max(by) - min(by), 1e-6)
+        cx, cy = 0.5 * (max(bx) + min(bx)), 0.5 * (max(by) + min(by))
+        pad = 0.06 * max(w, h)
+        w, h = w + 2.0 * pad, h + 2.0 * pad
+        try:
+            pos = ax.get_position()
+            fw, fh = ax.figure.get_size_inches()
+            ratio = (pos.height * fh) / (pos.width * fw)
+        except Exception:
+            ratio = None
+        if ratio and math.isfinite(ratio) and ratio > 0:
+            if h / w < ratio:
+                h = w * ratio
+            else:
+                w = h / ratio
+        ax.set_xlim(cx - 0.5 * w, cx + 0.5 * w)
+        ax.set_ylim(cy - 0.5 * h, cy + 0.5 * h)
+
+    def _draw_sampling_points(self, ax, zoi):
+        """The points where the studies sample the ZOI (the grid of
+        gui.sensitivity.zoi_sampling.roi_grid), thinned out for drawing."""
         step = self.grid_step()
-        if step > 0:
-            gx = np.arange(zx0, zx1 + 1e-9, step)
-            gy = np.arange(zy0, zy1 + 1e-9, step)
-            if gx.size and gy.size:
-                XX, YY = np.meshgrid(gx, gy)
-                ax.scatter(XX.ravel(), YY.ravel(), s=4, c="#c2410c",
-                           alpha=0.6, zorder=7)
-        ax.plot([tip_x], [tip_y], marker="v", color="k", markersize=7,
-                zorder=8)
-        ax.set_title("ROI (green dotted) \u2014 ZOI + points (orange) \u2014 "
-                     "max cap (purple dashed)", fontsize=7)
-        self.preview._canvas.draw_idle()
+        if not step or step <= 0:
+            return
+        fx = (zoi[1] - zoi[0]) / step
+        fy = (zoi[3] - zoi[2]) / step
+        if not (math.isfinite(fx) and math.isfinite(fy)):
+            return
+        n_est = (fx + 1.0) * (fy + 1.0)
+        if n_est > _MAX_GRID_POINTS:
+            ax.plot([], [], ls="none", marker=".", color=_C_ZOI,
+                    label="ZOI sampling points: %.3g (not drawn)" % n_est)
+            return
+        nx = int(math.floor(fx + 1e-9)) + 1
+        ny = int(math.floor(fy + 1e-9)) + 1
+        n = nx * ny
+        k = max(1, int(math.ceil(math.sqrt(n / float(_MAX_PREVIEW_POINTS)))))
+        xs = zoi[0] + step * np.arange(0, nx, k)
+        ys = zoi[2] + step * np.arange(0, ny, k)
+        XX, YY = np.meshgrid(xs, ys)
+        label = ("ZOI sampling points (%d)" % n if k == 1 else
+                 "ZOI sampling points (%d, 1 in %d per direction shown)"
+                 % (n, k))
+        ax.scatter(XX.ravel(), YY.ravel(), s=3, c=_C_ZOI, alpha=0.5,
+                   linewidths=0, zorder=7, label=label)
 
     def thresholds(self) -> dict:
         out = {}
@@ -702,9 +1276,11 @@ class OptimizationTab(QWidget):
             txt = le.text().strip().replace(",", ".")
             if txt:
                 try:
-                    out[q] = float(txt)
+                    v = float(txt)
                 except ValueError:
-                    pass
+                    continue
+                if math.isfinite(v):
+                    out[q] = v
         return out
 
     def thresholds_complete(self) -> bool:
@@ -726,9 +1302,11 @@ class OptimizationTab(QWidget):
             txt = ce.text().strip().replace(",", ".")
             if txt:
                 try:
-                    out[d] = float(txt)
+                    v = float(txt)
                 except ValueError:
-                    pass
+                    continue
+                if math.isfinite(v):
+                    out[d] = v
         return out
 
     def _profile_name(self):
@@ -768,28 +1346,139 @@ class OptimizationTab(QWidget):
         return offset
 
     def _make_run_bundle(self, prefs, run_dir, cpus, prefix):
-        import subprocess
+        """The run launcher of one study: run_bundle(cfg) -> bundle | None.
 
-        counter = {"i": 0}
+        Finished runs are reused: when the study cache (self._study_cache,
+        a RunCache set by the launcher) holds a run with exactly the
+        parameters of `cfg`, its saved bundle is returned and Abaqus is not
+        launched; a run taken from another study folder is copied into
+        `run_dir`, so every folder holds the runs its replay needs. A run of
+        `run_dir` whose analysis did not complete gives None again (same
+        replay). With self._study_offline set (loading a study), a missing
+        run is not launched either: the miss is recorded in
+        state["miss"] and the study is stopped. A run that cannot be made
+        (Abaqus not started, results not back) also stops the study, with
+        state["launch_error"]: it is not a result of the model. New jobs are
+        numbered after the runs already in `run_dir`, so a resumed study
+        never overwrites one of its earlier runs."""
+        import subprocess
+        from gui.sensitivity.run_cache import (
+            copy_run, next_job_index, remove_job_files, same_folder,
+            sta_outcome, write_failed_marker)
+
+        cache = getattr(self, "_study_cache", None)
+        offline = bool(getattr(self, "_study_offline", False))
+        counter = {"i": next_job_index(run_dir, prefix)}
         # Path of the LAST launched job's .sta and its name, readable by the
         # study's cost hook right after run_bundle returns (same thread).
-        state = {"sta": None, "job": None, "filter_check": None}
+        state = {"sta": None, "job": None, "filter_check": None,
+                 "miss": None, "launch_error": None, "analysis_failed": [],
+                 "n_reused": 0, "n_launched": 0}
+
+        def stop_study():
+            self._cancel_evt.set()
+            for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
+                         "_ms_worker"):
+                w = getattr(self, attr, None)
+                if w is not None and hasattr(w, "cancel"):
+                    w.cancel()
+
+        def cannot_run(why):
+            """A run could not be made or its results did not come back:
+            stop the study (it stays resumable) instead of counting the run
+            as a failed one."""
+            if state["launch_error"] is None:
+                state["launch_error"] = why
+            self._log_ui("[STOP] %s" % why)
+            stop_study()
+            return None
+
+        def reuse(hit, cfg):
+            """Return the saved bundle of a finished run (cache hit)."""
+            self._current_sta = hit.sta
+            state["sta"], state["job"] = hit.sta, hit.job
+            state["filter_check"] = None
+            try:
+                from gui.core.filter_check import check_bundle, window_from_cfg
+                state["filter_check"] = check_bundle(
+                    hit.npz, write_meta=False, window=window_from_cfg(cfg))
+            except Exception as e:
+                self._log_ui("[%s] filter check failed: %s\n" % (hit.job, e))
+            try:
+                bundle = ResultsBundle.load(hit.npz)
+            except Exception as e:
+                self._log_ui("[%s] saved run unreadable (%s): launching it "
+                             "again\n" % (hit.job, e))
+                return None
+            state["n_reused"] += 1
+            if same_folder(hit.folder, run_dir):
+                self._log_ui("[%s] already computed: reused" % hit.job)
+                return bundle
+            copied = None
+            if not offline:
+                # A copy in this study's folder: the folder stays complete
+                # when the other one is moved or deleted.
+                i = counter["i"]; counter["i"] += 1
+                job = "%s_run%03d" % (prefix, i)
+                if copy_run(hit.folder, hit.job, run_dir, job):
+                    copied = (cache.add_run(run_dir, job)
+                              if cache is not None else None)
+            if copied is not None:
+                self._current_sta = copied.sta
+                state["sta"], state["job"] = copied.sta, copied.job
+                self._log_ui("[%s] already computed (%s in %s): reused, "
+                             "copied into this study" % (
+                                 copied.job, hit.job, Path(hit.folder).name))
+            else:
+                self._log_ui("[%s] already computed (from %s): reused"
+                             % (hit.job, Path(hit.folder).name))
+            return bundle
 
         def run_bundle(cfg):
+            params = cfg.to_params_dict()
+            hit = (cache.lookup(params, prefer=run_dir) if cache is not None
+                   else None)
+            if hit is not None:
+                bundle = reuse(hit, cfg)
+                if bundle is not None:
+                    return bundle
+            failed = (cache.lookup_failed(params, run_dir)
+                      if cache is not None else None)
+            if failed is not None:
+                # Its analysis did not complete when it ran: the replay
+                # meets the same failure (Abaqus is deterministic).
+                self._current_sta = failed.sta
+                state["sta"], state["job"] = failed.sta, failed.job
+                state["filter_check"] = None
+                state["analysis_failed"].append(failed.job)
+                self._log_ui("[%s] its analysis did not complete when it "
+                             "ran: counted as a failed run again (not "
+                             "relaunched)" % failed.job)
+                return None
+            if offline:
+                # Loading: never launch. Record the first missing run and
+                # stop the study; the tab reports why the folder is short.
+                if state["miss"] is None:
+                    state["miss"] = params
+                stop_study()
+                return None
+            if self._cancel_evt.is_set():
+                return None
             i = counter["i"]; counter["i"] += 1
             job = "%s_run%03d" % (prefix, i)
             out_path = Path(run_dir) / ("%s.results.npz" % job)
             self._current_sta = Path(run_dir) / ("%s.sta" % job)
             state["sta"], state["job"] = self._current_sta, job
             state["filter_check"] = None
-            try:
-                if out_path.exists():
-                    out_path.unlink()
-            except Exception:
-                log_swallowed("removing stale bundle", level=logging.DEBUG)
+            # Files left by an interrupted run of the same name (a stale
+            # .meta.json next to a new .npz would pass for a finished run).
+            for p in remove_job_files(run_dir, job):
+                log_swallowed("removing stale file %s" % p,
+                              level=logging.DEBUG)
+            state["n_launched"] += 1
             args = build_abaqus_args(
                 prefs.abaqus_cmd, prefs.abaqus_script,
-                cfg.to_params_dict(), {"cpus": cpus, "job_name": job})
+                params, {"cpus": cpus, "job_name": job})
             _ms = (float(getattr(cfg.step, "mass_scaling_factor", 1.0))
                    if getattr(cfg.step, "mass_scaling_enabled", False) else 1.0)
             self._log_ui("\n%s\n[%s] ms=%.4g wp=%.4g tool=%.4g | "
@@ -809,7 +1498,7 @@ class OptimizationTab(QWidget):
                     # Same contract as the Popen: poll/stdout/returncode. The
                     # agent mirrors .sta/.gui.log/.results.npz into run_dir.
                     self._log_ui("[%s] submitted to the remote agent\n" % job)
-                    proc = submit_remote(prefs, run_dir, cfg.to_params_dict(),
+                    proc = submit_remote(prefs, run_dir, params,
                                          {"cpus": cpus, "job_name": job})
                 else:
                     proc = subprocess.Popen(
@@ -818,7 +1507,7 @@ class OptimizationTab(QWidget):
             except Exception as e:
                 self._log_ui("failed to start Abaqus: %s\n" % e)
                 self._current_job = None
-                return None
+                return cannot_run("%s could not be started: %s" % (job, e))
             self._current_proc = proc
 
             # Follow the run by TAILING THE SCRIPT'S LOG, not its stdout.
@@ -852,10 +1541,31 @@ class OptimizationTab(QWidget):
             proc.wait()
             self._current_proc = None
             self._current_job = None
-            if self._cancel_evt.is_set() or proc.returncode != 0 \
-                    or not out_path.exists():
-                self._log_ui("[%s] no bundle (rc=%s)\n" % (job, proc.returncode))
+            if self._cancel_evt.is_set():
+                self._log_ui("[%s] no bundle (cancelled)\n" % job)
                 return None
+            if proc.returncode != 0 or not out_path.exists():
+                how = sta_outcome(run_dir, job)
+                if how == "not_completed":
+                    # Abaqus stopped the analysis: a result of the model
+                    # (e.g. too large a mass scaling), kept for the replay.
+                    write_failed_marker(run_dir, job, params,
+                                        "analysis not completed (rc=%s)"
+                                        % proc.returncode)
+                    if cache is not None:
+                        cache.add_failed(run_dir, job)
+                    state["analysis_failed"].append(job)
+                    self._log_ui("[%s] the analysis did not complete (see "
+                                 "%s.msg in the study folder): counted as a "
+                                 "failed run" % (job, job))
+                    return None
+                return cannot_run(
+                    "%s ended without results (rc=%s): %s" % (
+                        job, proc.returncode,
+                        "the analysis completed but its results were not "
+                        "written or did not come back" if how == "success"
+                        else "Abaqus did not start or was stopped (its .sta "
+                        "has no final line)"))
             # Same post-run check as the Sensitivity runs (run_worker): a
             # no-op unless the Step tab requests the filter verification.
             try:
@@ -868,11 +1578,27 @@ class OptimizationTab(QWidget):
                     self._log_ui(report)
             except Exception as e:
                 self._log_ui("[%s] filter check failed: %s\n" % (job, e))
+                # Writing its result into the run's files failed (file
+                # held, share read-only...): the verdict itself, as a
+                # replay of this run computes it.
+                try:
+                    from gui.core.filter_check import (
+                        check_bundle, window_from_cfg)
+                    state["filter_check"] = check_bundle(
+                        out_path, write_meta=False,
+                        window=window_from_cfg(cfg))
+                except Exception:
+                    log_swallowed("filter check without writing",
+                                  level=logging.DEBUG)
             try:
-                return ResultsBundle.load(out_path)
+                bundle = ResultsBundle.load(out_path)
             except Exception as e:
                 self._log_ui("[%s] load failed: %s\n" % (job, e))
-                return None
+                return cannot_run("the results of %s cannot be read: %s"
+                                  % (job, e))
+            if cache is not None:
+                cache.add_run(run_dir, job)
+            return bundle
 
         run_bundle.state = state
         return run_bundle
@@ -960,11 +1686,8 @@ class OptimizationTab(QWidget):
                           l_wp=float(g.l_wp), l_void=float(g.l_void))
 
     def _busy(self, on, msg="", color="#1d4ed8"):
-        self.btn_ms.setEnabled(not on)
-        self.btn_mesh.setEnabled(not on)
-        self.btn_domain.setEnabled(not on)
-        self.btn_checks.setEnabled((not on) and self._checks_available())
-        self.btn_cancel.setEnabled(on)
+        self._is_busy = bool(on)
+        self._sync_run_buttons()
         if msg:
             self.lbl_status.setStyleSheet("color: %s;" % color)
             self.lbl_status.setText(msg)
@@ -990,15 +1713,18 @@ class OptimizationTab(QWidget):
                 return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
-    def _validate_launch(self):
+    def _validate_launch(self, folder=None):
         """Shared pre-flight for a run: returns (prefs, workdir, cpus) or None
-        (after showing a warning)."""
+        (after showing a warning). `folder`: the study folder the runs go
+        to, when it is not a new one in the working directory (a resumed
+        study, the final checks): in remote mode it must be reachable by
+        the compute PC too."""
         prefs = self._prefs_getter() if self._prefs_getter else None
         if prefs is None:
             QMessageBox.warning(self, "Preferences",
                                 "No preferences (Abaqus command/script).")
             return None
-        problems = launch_problems(prefs, prefs.default_workdir)
+        problems = launch_problems(prefs, folder or prefs.default_workdir)
         wd = Path(prefs.default_workdir)
         try:
             wd.mkdir(parents=True, exist_ok=True)
@@ -1012,11 +1738,14 @@ class OptimizationTab(QWidget):
         return prefs, wd, cpus
 
     def _float_or(self, line_edit, default):
+        """The number in a field, or `default` (blank, not a number, or not
+        finite)."""
         txt = line_edit.text().strip().replace(",", ".")
         try:
-            return float(txt)
+            v = float(txt)
         except (ValueError, TypeError):
             return default
+        return v if math.isfinite(v) else default
 
     # ===================================================================
     # Shared settings: time window T, safeguards, domain-study integers
@@ -1064,54 +1793,123 @@ class OptimizationTab(QWidget):
     # ===================================================================
     # 0 - Mass-scaling factor: independence study (paper step 0, §5.3)
     # ===================================================================
+    def _gci_plan_sizes(self):
+        """Element sizes of the step-1 plan, finest first, from the panel
+        (blank finest = the Mesh tab's element size); raises ValueError."""
+        from gui.sensitivity.mesh_gci import _mesh_sizes
+        return _mesh_sizes(
+            self._float_or(self.le_gci_finest, float(self.cfg.elem_size)),
+            self._float_or(self.le_gci_ratio, 2.0),
+            int(self.sp_gci_n.value()),
+            self._float_or(self.le_gci_min, None))
+
+    def _freeze_plan_start(self):
+        """A blank 'finest element size' means the Mesh tab's element size.
+        The first study that uses it writes it into the field: h* is later
+        written into the Mesh tab, and the plan must not follow it (each
+        new run of steps 0 and 1 would test coarser meshes)."""
+        if self._float_or(self.le_gci_finest, None) is not None:
+            return
+        self.le_gci_finest.setText("%g" % float(self.cfg.elem_size))
+
     def ms_settings(self):
-        """(ms values, element size) of step 0; raises ValueError."""
+        """(ms values, element size) of step 0; raises ValueError. A blank
+        element size is the coarsest mesh of the step-1 plan."""
         values = parse_ms_values(self.le_ms_values.text())
-        elem = self._float_or(self.le_ms_elem, float(self.cfg.elem_size))
+        elem = self._float_or(self.le_ms_elem, None)
+        if elem is None:
+            elem = self._gci_plan_sizes()[-1]
         if elem is None or elem <= 0:
             raise ValueError("the element size of the ms study must be > 0")
         return values, float(elem)
 
-    def _on_run_ms_independence(self):
-        val = self._validate_launch()
-        if val is None:
-            return
-        prefs, wd, cpus = val
-        thr = self.thresholds()
+    def _study_base_cfg(self, spec, elem=None):
+        """Config of a study's runs: the current model with what the study
+        was started with (mass scaling, filter verification, window T of
+        the filter check, element size), so a resumed or loaded study asks
+        for exactly the runs it made."""
+        cfg = self._study_cfg_copy()
+        w = spec.get("window")
+        if w:
+            cfg.optimization.window_start = "%.12g" % float(w[0])
+            cfg.optimization.window_end = "%.12g" % float(w[1])
+        bm = spec.get("base_ms")
+        if bm is not None:
+            cfg.step.mass_scaling_enabled = bool(bm[0])
+            cfg.step.mass_scaling_factor = float(bm[1])
+        fv = spec.get("filter_verify")
+        if fv is not None:
+            cfg.step.output_filter_verify = bool(fv)
+        if elem is not None:
+            cfg.elem_size = float(elem)
+        return cfg
+
+    @staticmethod
+    def _zoi_dict(zoi):
+        return {k: float(v) for k, v in zip(ZOI_KEYS, zoi)}
+
+    @staticmethod
+    def _dims_dict(d):
+        return {k: float(getattr(d, k)) for k in DIM_KEYS}
+
+    def _ms_spec(self):
+        """Settings of a new mass-scaling study from the panel, or None
+        after a warning."""
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Mass-scaling criterion",
                 "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): the ms study uses the same E_max.")
-            return
+            return None
         try:
             window = self.window()
             guards = self.guard_settings()
             ms_values, elem = self.ms_settings()
         except ValueError as e:
             QMessageBox.warning(self, "Mass-scaling study settings", str(e))
-            return
+            return None
         if not getattr(self.cfg.step, "output_filter_enabled", False):
             QMessageBox.warning(
                 self, "Mass-scaling study",
                 "Enable the output filter (Step tab): the filter and "
                 "reverberation checks are safeguards of the ms study.")
-            return
-        base_cfg = self._study_cfg_copy()
-        base_cfg.step.output_filter_verify = True
-        zoi = self.zoi()
-        dims = self._dims_from_cfg()
-        study_cfg = {
-            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
-                    "ymin": zoi[2], "ymax": zoi[3]},
+            return None
+        return {
+            "zoi": self._zoi_dict(self.zoi()),
             "elem_size": elem, "ms_values": list(ms_values),
-            "grid_step": self.grid_step(), "thresholds_abs": thr,
+            "grid_step": self.grid_step(),
+            "grid_step_set": self._grid_step_set(),
+            "thresholds_abs": self.thresholds(),
             "window": list(window), "evf_threshold": 0.5,
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
-            "domain_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
-                            "l_wp": dims.l_wp, "l_void": dims.l_void}}
-        run_dir = self._study_run_dir(wd, "massscaling", study_cfg)
-        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "ms")
+            "domain_dims": self._dims_dict(self._dims_from_cfg()),
+            "filter_verify": True, "base_ms": self._base_ms()}
+
+    def _on_run_ms_independence(self):
+        if self.is_running():
+            return
+        if self._offer_resume("ms"):
+            return
+        self._launch_new("ms")
+
+    def _start_ms(self, spec, run_dir, prefs, cpus, mode="new", then=None,
+                  **extra):
+        if self._cannot_start("The mass-scaling study"):
+            return False
+        zoi = zoi_tuple(spec)
+        dims = DomainDims(**{k: float(spec["domain_dims"][k])
+                             for k in DIM_KEYS})
+        elem = float(spec["elem_size"])
+        ms_values = tuple(float(v) for v in spec["ms_values"])
+        thr = {k: float(v) for k, v in spec["thresholds_abs"].items()}
+        window = tuple(float(v) for v in spec["window"])
+        grid = float(spec["grid_step"])
+        guards = GuardSettings(rk_max=float(spec["rk_max"]),
+                               rhg_max=float(spec["rhg_max"]), window=window)
+        base_cfg = self._study_base_cfg(spec)
+        base_cfg.step.output_filter_verify = True
+        run_bundle = self._begin_study("ms", spec, run_dir, prefs, cpus, mode,
+                                       then, **extra)
         self._pending_ms_dir = run_dir
 
         def cost_fn(bundle, d, host_wall_s):
@@ -1134,10 +1932,9 @@ class OptimizationTab(QWidget):
             return out
 
         self._last_ms = None
-        self._cancel_evt.clear()
-        self.log.clear()
-        self.tabs.setCurrentIndex(0)
-        self._busy(True, "Mass-scaling study (independence)\u2026")
+        self._busy(True, "Mass-scaling study (independence)\u2026"
+                   if mode != "load" else "Reading back a mass-scaling "
+                   "study\u2026")
         self._log_ui("=" * 68)
         self._log_ui("MASS-SCALING FACTOR BY INDEPENDENCE (mesh, domain fixed)")
         self._log_ui("  ms: %s | mesh %.4g mm | domain h_wp=%.4g h_void=%.4g "
@@ -1151,16 +1948,19 @@ class OptimizationTab(QWidget):
                      "check, reverberation check"
                      % (guards.rk_max, guards.rhg_max))
         self._log_ui("=" * 68)
+        self._retire_worker("_ms_worker")
         self._ms_worker = MsIndependenceWorker(
             run_bundle=run_bundle, base_cfg=base_cfg, zoi=zoi,
-            domain_dims=dims, grid_step=self.grid_step(), elem_size=elem,
+            domain_dims=dims, grid_step=grid, elem_size=elem,
             thresholds=thr, ms_values=ms_values, window=window,
-            evf_threshold=0.5, guard_fn=guard_fn, cost_fn=cost_fn)
+            evf_threshold=float(spec.get("evf_threshold", 0.5)),
+            guard_fn=guard_fn, cost_fn=cost_fn)
         self._ms_worker.progress.connect(self._on_ms_progress)
         self._ms_worker.finished_ok.connect(self._on_ms_done)
         self._ms_worker.failed.connect(self._on_fail)
         self._start_progress()
         self._ms_worker.start()
+        return True
 
     def _on_ms_progress(self, ev):
         phase = ev.get("phase")
@@ -1209,7 +2009,7 @@ class OptimizationTab(QWidget):
         self._log_ui("MASS-SCALING RESULT: %s | %d runs" % (why, res.n_runs))
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
-        if folder is not None:
+        if folder is not None and self._exports_allowed("ms", res):
             from gui.sensitivity.study_export import write_ms_exports
             try:
                 paths = write_ms_exports(folder, res)
@@ -1218,59 +2018,88 @@ class OptimizationTab(QWidget):
             except Exception as e:
                 self._log_ui("[EXPORT] failed: %s: %s"
                              % (type(e).__name__, e))
-        if res.retained is not None:
-            self._log_ui("  next: set ms = %g in the Step tab" % res.retained)
         self._refresh_convergence_view()
         ok = res.status == "converged"
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if ok else "#b45309"))
         self.lbl_status.setText("Mass-scaling study \u2014 %s" % why)
+        self._after_study("ms", res)
 
     # ===================================================================
     # 4 - Eulerian domain sizing: sequential independence study (paper §4)
     # ===================================================================
-    def _on_run_domain_independence(self):
-        val = self._validate_launch()
-        if val is None:
-            return
-        prefs, wd, cpus = val
-        thr = self.thresholds()
+    def _domain_spec(self):
+        """Settings of a new domain study from the panel, or None after a
+        warning."""
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Domain criterion",
                 "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): they define E_max for the domain "
                 "study.")
-            return
+            return None
         try:
             window = self.window()
             guards = self.guard_settings()
             ds = self.domain_settings()
         except ValueError as e:
             QMessageBox.warning(self, "Domain study settings", str(e))
-            return
-        elem = float(self.cfg.elem_size)
-        zoi = self.zoi()
-        offset = self.euler_offset()
-        margin = int(self.sp_margin.value())
+            return None
         dims0 = self.compute_initial_dims()
-        caps = self.caps()
-        study_cfg = {
-            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
-                    "ymin": zoi[2], "ymax": zoi[3]},
-            "elem_size": elem, "margin_elems": margin,
-            "euler_offset": list(offset),
-            "grid_step": self.grid_step(), "thresholds_abs": thr,
+        return {
+            "zoi": self._zoi_dict(self.zoi()),
+            "elem_size": float(self.cfg.elem_size),
+            "margin_elems": int(self.sp_margin.value()),
+            "euler_offset": list(self.euler_offset()),
+            "grid_step": self.grid_step(),
+            "grid_step_set": self._grid_step_set(),
+            "thresholds_abs": self.thresholds(),
             "window": list(window), "evf_threshold": 0.5,
             "step_elems": ds["dom_step_elems"], "n_max": ds["dom_n_max"],
             "n_hold": ds["dom_n_hold"], "m_ratios": ds["dom_m_ratios"],
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
-            "caps": caps,
-            "initial_dims": {"h_wp": dims0.h_wp, "h_void": dims0.h_void,
-                             "l_wp": dims0.l_wp, "l_void": dims0.l_void}}
-        run_dir = self._study_run_dir(wd, "domainsizing", study_cfg)
-        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "domainsizing")
+            "caps": self.caps(),
+            "initial_dims": self._dims_dict(dims0),
+            "base_ms": self._base_ms(),
+            "filter_verify": bool(getattr(self.cfg.step,
+                                          "output_filter_verify", True))}
+
+    def _on_run_domain_independence(self):
+        if self.is_running():
+            return
+        if self._offer_resume("domain"):
+            return
+        self._launch_new("domain")
+
+    def _start_domain(self, spec, run_dir, prefs, cpus, mode="new",
+                      then=None, **extra):
+        if self._cannot_start("The domain study"):
+            return False
+        zoi = zoi_tuple(spec)
+        elem = float(spec["elem_size"])
+        offset = tuple(float(v) for v in spec["euler_offset"])
+        margin = int(spec["margin_elems"])
+        dims0 = DomainDims(**{k: float(spec["initial_dims"][k])
+                              for k in DIM_KEYS})
+        caps = {k: float(v) for k, v in (spec.get("caps") or {}).items()}
+        thr = {k: float(v) for k, v in spec["thresholds_abs"].items()}
+        window = tuple(float(v) for v in spec["window"])
+        grid = float(spec["grid_step"])
+        guards = GuardSettings(rk_max=float(spec["rk_max"]),
+                               rhg_max=float(spec["rhg_max"]), window=window)
+        ds = {"dom_step_elems": int(spec["step_elems"]),
+              "dom_n_max": int(spec["n_max"]),
+              "dom_n_hold": int(spec["n_hold"]),
+              "dom_m_ratios": int(spec["m_ratios"])}
+        # The runs take the element size from the cfg (the core only uses
+        # its elem_size argument to sample), so both are the study's.
+        base_cfg = self._study_base_cfg(spec, elem=elem)
+        run_bundle = self._begin_study("domain", spec, run_dir, prefs, cpus,
+                                       mode, then, **extra)
         self._pending_domain_dir = run_dir
+        self._pending_domain_spec = spec
+        bm = spec.get("base_ms")
+        self._pending_domain_ms = None if bm is None else ms_of(bm)
 
         def cost_fn(bundle, dims, host_wall_s):
             return cost_record(bundle, run_bundle.state.get("sta"),
@@ -1289,10 +2118,8 @@ class OptimizationTab(QWidget):
 
         self._last_domain_result = None
         self._last_checks = None
-        self._cancel_evt.clear()
-        self.log.clear()
-        self.tabs.setCurrentIndex(0)
-        self._busy(True, "Domain sizing (independence)\u2026")
+        self._busy(True, "Domain sizing (independence)\u2026"
+                   if mode != "load" else "Reading back a domain study\u2026")
         self._log_ui("=" * 68)
         self._log_ui("DOMAIN SIZING BY SEQUENTIAL INDEPENDENCE (ZOI fixed)")
         self._log_ui("  ZOI  x[%.4g,%.4g] y[%.4g,%.4g]" % zoi)
@@ -1310,10 +2137,12 @@ class OptimizationTab(QWidget):
         self._log_ui("  safeguards: R_K < %.4g, R_HG < %.4g, outputs present"
                      % (guards.rk_max, guards.rhg_max))
         self._log_ui("=" * 68)
+        self._retire_worker("_di_worker")
         self._di_worker = DomainIndependenceWorker(
-            run_bundle=run_bundle, base_cfg=self._study_cfg_copy(), zoi=zoi,
-            initial_dims=dims0, grid_step=self.grid_step(), elem_size=elem,
-            thresholds=thr, window=window, evf_threshold=0.5,
+            run_bundle=run_bundle, base_cfg=base_cfg, zoi=zoi,
+            initial_dims=dims0, grid_step=grid, elem_size=elem,
+            thresholds=thr, window=window,
+            evf_threshold=float(spec.get("evf_threshold", 0.5)),
             step_elems=ds["dom_step_elems"], n_max=ds["dom_n_max"],
             n_hold=ds["dom_n_hold"], m_ratios=ds["dom_m_ratios"],
             caps=caps, margin_elems=margin, offset=offset,
@@ -1323,6 +2152,7 @@ class OptimizationTab(QWidget):
         self._di_worker.failed.connect(self._on_fail)
         self._start_progress()
         self._di_worker.start()
+        return True
 
     @staticmethod
     def _fmt(v, fmt="%.4g"):
@@ -1371,6 +2201,8 @@ class OptimizationTab(QWidget):
         self._stop_progress()
         self._last_domain_result = res
         self._last_domain_dir = getattr(self, "_pending_domain_dir", None)
+        self._last_domain_ms = getattr(self, "_pending_domain_ms", None)
+        self._last_domain_spec = getattr(self, "_pending_domain_spec", None)
         self._busy(False)
         why = {
             "converged": "every dimension independent",
@@ -1391,14 +2223,14 @@ class OptimizationTab(QWidget):
                                   res.n_runs))
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
-        self._write_domain_exports()
+        if self._exports_allowed("domain", res):
+            self._write_domain_exports()
         self._refresh_convergence_view()
-        if self._checks_available():
-            self._log_ui("  next: 'Run interaction checks' (paper \u00a75.7)")
         ok = res.status == "converged"
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if ok else "#b45309"))
         self.lbl_status.setText("Domain sizing \u2014 %s" % why)
+        self._after_study("domain", res)
 
     # ===================================================================
     # Convergence view: table, plots, exports (report, Part B, T7, T8, T11)
@@ -1496,8 +2328,11 @@ class OptimizationTab(QWidget):
                     axm.axvline(mres.retained, ls=":", lw=1.0,
                                 color="#15803d")
             axm.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
-            axm.set_xscale("log")
-            axm.set_yscale("log")
+            # Log axes only around finite points: with every E_max NaN
+            # (nothing sampled) the empty log axis fails to draw.
+            if any(math.isfinite(y) and y > 0 for y in ys):
+                axm.set_xscale("log")
+                axm.set_yscale("log")
             axm.set_xlabel("ms_k", fontsize=7)
             axm.set_ylabel("E_max(ms_k, ms_k-1)", fontsize=7)
         res = self._last_domain_result
@@ -1545,6 +2380,7 @@ class OptimizationTab(QWidget):
                 axc.set_ylabel("E_max", fontsize=7)
         if self._last_gci is not None:
             gres, gtol = self._last_gci[0], self._last_gci[2] or {}
+            gci_pts = False
             for q, g in gres.per_quantity.items():
                 ref = g.f_extrapolated if g.reliable else g.f_fine
                 eps = gtol.get(q)
@@ -1557,8 +2393,10 @@ class OptimizationTab(QWidget):
                         else float("nan"))
                 if hs and eps:
                     axg.plot(hs, ys, marker="s", lw=1.0, label=q)
+                    gci_pts = gci_pts or any(math.isfinite(y) for y in ys)
             axg.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
-            axg.set_xscale("log")
+            if gci_pts:
+                axg.set_xscale("log")
             axg.set_xlabel("h [mm]", fontsize=7)
             axg.set_ylabel("|f_q(h) - f_ref| / eps_q", fontsize=7)
             if axg.get_legend_handles_labels()[0]:
@@ -1581,10 +2419,12 @@ class OptimizationTab(QWidget):
         if res is None or folder is None:
             return []
         from gui.sensitivity.study_export import write_domain_exports
+        # The ms the runs were made with (a resumed study keeps its own).
+        ms = getattr(self, "_last_domain_ms", None)
         try:
             paths = write_domain_exports(
                 folder, res, self._t1(), res.settings.get("elem_size"),
-                self._ms_factor(), self._last_checks)
+                self._ms_factor() if ms is None else ms, self._last_checks)
         except Exception as e:
             self._log_ui("[EXPORT] failed: %s: %s" % (type(e).__name__, e))
             return []
@@ -1593,61 +2433,121 @@ class OptimizationTab(QWidget):
         return paths
 
     def ms_lower_for_checks(self):
-        """The ms value before the current ms* in the last ms study, or None
-        (the check then uses ms*/2)."""
-        if self._last_ms is None:
+        """The ms value before the current ms* in the ms study (the one of
+        record when step 0 is done for this model, else the last one run
+        here), or None (the check then uses ms*/2)."""
+        values = None
+        st, rec = self._step_state("ms")
+        if st == "done":
+            values = rec.get("values")
+        if not values and self._last_ms is not None:
+            values = list(self._last_ms[0].ms_values)
+        if not values:
             return None
-        values = list(self._last_ms[0].ms_values)
         ms = self._ms_factor()
         for a, b in zip(values[:-1], values[1:]):
-            if math.isclose(b, ms, rel_tol=1e-9):
+            if math.isclose(float(b), ms, rel_tol=1e-5):
                 return float(a)
         return None
-
-    def _checks_available(self) -> bool:
-        res = self._last_domain_result
-        return bool(res is not None and res.runs and
-                    res.status in ("converged", "partial"))
 
     # ===================================================================
     # 6 - Interaction checks (paper §5.7, report T9)
     # ===================================================================
-    def _on_run_interaction_checks(self):
-        study = self._last_domain_result
-        if not self._checks_available():
-            QMessageBox.warning(self, "Interaction checks",
-                                "Run a domain study first.")
-            return
-        val = self._validate_launch()
-        if val is None:
-            return
-        prefs, wd, cpus = val
+    def _checks_spec(self, study):
+        """Settings of the final checks on `study` (StudyResult of step 2),
+        or None after a warning."""
         try:
             guards = self.guard_settings()
-            window = tuple(study.settings["window"])
+            window = [float(v) for v in study.settings["window"]]
         except ValueError as e:
             QMessageBox.warning(self, "Interaction checks", str(e))
-            return
+            return None
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Interaction checks",
                 "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
-            return
+            return None
         h_star = float(study.settings["elem_size"])
-        finest = self._float_or(self.le_gci_finest, h_star)
+        zoi = [float(v) for v in study.settings["zoi"]]
+        plan = self._gci_plan_for_checks(h_star)
+        gci_plan = dict(plan, zoi=zoi,
+                        grid_step=float(study.settings["grid_step"]),
+                        field_vars=["EVF", "TEMP", "V1", "V2"],
+                        window=window, evf_threshold=0.5)
+        d = study.final
+        dspec = getattr(self, "_last_domain_spec", None)
+        filter_on = bool(getattr(self.cfg.step, "output_filter_enabled",
+                                 False))
+        return {
+            "h_star": h_star,
+            "d_star": [float(d.h_wp), float(d.h_void), float(d.l_wp),
+                       float(d.l_void)],
+            "gci_plan": gci_plan, "gci_tolerances": self._gci_tolerances(),
+            "zoi": zoi,
+            "thresholds_abs": {k: float(v) for k, v in
+                               study.settings["thresholds"].items()},
+            "window": window, "rk_max": guards.rk_max,
+            "rhg_max": guards.rhg_max, "ms_lower": self.ms_lower_for_checks(),
+            # As the step-2 study had it: the checks sample like it did.
+            "grid_step_set": (self._grid_step_set() if dspec is None
+                              else grid_set_of_spec(dspec)),
+            "base_ms": self._base_ms(),
+            # The ms_at_point check reads the filter and reverberation
+            # checks, which need the verification output.
+            "filter_verify": True if filter_on else bool(getattr(
+                self.cfg.step, "output_filter_verify", True))}
+
+    def _on_run_interaction_checks(self):
+        if self.is_running():
+            return
+        if self._offer_resume("checks"):
+            return
+        if not self._checks_available():
+            QMessageBox.warning(self, "Interaction checks",
+                                "Run a domain study first.")
+            return
+        if not self._confirm_prerequisites("checks"):
+            return
+        self._run_checks("new")
+
+    def _start_checks(self, spec, study, folder, prefs, cpus, mode="new",
+                      then=None, **extra):
+        if self._cannot_start("The final checks"):
+            return False
+        h_star = float(spec["h_star"])
+        p = dict(spec["gci_plan"])
+        window = tuple(float(v) for v in spec["window"])
         gci_plan = {
-            "zoi": tuple(study.settings["zoi"]),
-            "grid_step": float(study.settings["grid_step"]),
-            "finest_elem_size": finest,
-            "ratio": self._float_or(self.le_gci_ratio, 2.0),
-            "n_meshes": int(self.sp_gci_n.value()),
-            "min_elem_size": self._float_or(self.le_gci_min, None),
-            "field_vars": ("EVF", "TEMP", "V1", "V2"), "window": window,
-            "evf_threshold": 0.5}
-        gci_tol = self._gci_tolerances()
-        folder = self._last_domain_dir or wd
-        run_bundle = self._make_run_bundle(prefs, folder, cpus, "checks")
+            "zoi": tuple(float(v) for v in p["zoi"]),
+            "grid_step": float(p["grid_step"]),
+            "finest_elem_size": float(p["finest_elem_size"]),
+            "ratio": float(p["ratio"]), "n_meshes": int(p["n_meshes"]),
+            "min_elem_size": (None if p.get("min_elem_size") is None
+                              else float(p["min_elem_size"])),
+            "field_vars": tuple(p.get("field_vars")
+                                or ("EVF", "TEMP", "V1", "V2")),
+            "window": tuple(float(v) for v in p.get("window") or window),
+            "evf_threshold": float(p.get("evf_threshold", 0.5))}
+        gci_tol = {k: float(v) for k, v in spec["gci_tolerances"].items()}
+        guards = GuardSettings(rk_max=float(spec["rk_max"]),
+                               rhg_max=float(spec["rhg_max"]), window=window)
+        ms_lower = spec.get("ms_lower")
+        ms_lower = None if ms_lower is None else float(ms_lower)
+        # c1 and c4 take the element size and the mass scaling from this
+        # cfg: those of the checked point (h*, ms*), whatever the panel.
+        base_cfg = self._study_base_cfg(spec, elem=h_star)
+        if mode != "load":
+            # The folder may hold the settings of a valid result of the
+            # checks: kept, to be put back if this run gives no result.
+            try:
+                extra["checks_config_before"] = (
+                    Path(folder) / CHECKS_CONFIG).read_text(encoding="utf-8")
+            except OSError:
+                pass
+            write_checks_config(folder, spec)
+        run_bundle = self._begin_study("checks", spec, folder, prefs, cpus,
+                                       mode, then, **extra)
 
         def cost_fn(bundle, dims, host_wall_s):
             return cost_record(bundle, run_bundle.state.get("sta"),
@@ -1657,26 +2557,23 @@ class OptimizationTab(QWidget):
         from gui.sensitivity.interaction_checks_worker import (
             InteractionChecksWorker)
         from gui.sensitivity.run_record import RecordingRunner
-        self._cancel_evt.clear()
-        self.tabs.setCurrentIndex(0)
-        self._busy(True, "Interaction checks\u2026")
+        self._busy(True, "Interaction checks\u2026" if mode != "load"
+                   else "Reading back the final checks\u2026")
         self._log_ui("=" * 68)
         self._log_ui("INTERACTION CHECKS on h*=%.4g mm, D*: h_wp=%.4g "
                      "h_void=%.4g l_wp=%.4g l_void=%.4g"
                      % (h_star, study.final.h_wp, study.final.h_void,
                         study.final.l_wp, study.final.l_void))
         self._log_ui("  GCI plan on D*: finest %.4g | ratio %.3g | n %d"
-                     % (finest, gci_plan["ratio"], gci_plan["n_meshes"]))
+                     % (gci_plan["finest_elem_size"], gci_plan["ratio"],
+                        gci_plan["n_meshes"]))
         self._log_ui("=" * 68)
-        # Check ms_at_point: ms* against the value before it in the last ms
+        # Check ms_at_point: ms* against the value before it in the ms
         # study (ms*/2 without one), with the ms study's safeguards (filter
         # and reverberation checks) when the output filter is on.
-        base_cfg = self._study_cfg_copy()
-        ms_lower = self.ms_lower_for_checks()
         guard_core = make_guard_fn(guards)
         ms_guard_fn = None
         if getattr(base_cfg.step, "output_filter_enabled", False):
-            base_cfg.step.output_filter_verify = True
 
             def ms_guard_fn(bundle):
                 out = dict(guard_core(bundle))
@@ -1685,9 +2582,12 @@ class OptimizationTab(QWidget):
         else:
             self._log_ui("  ms_at_point: output filter off, the filter and "
                          "reverberation safeguards are not evaluated")
+        ms_star = (float(base_cfg.step.mass_scaling_factor)
+                   if base_cfg.step.mass_scaling_enabled else 1.0)
         self._log_ui("  ms_at_point: ms* = %g against ms = %s"
-                     % (self._ms_factor(), "%g" % ms_lower
+                     % (ms_star, "%g" % ms_lower
                         if ms_lower is not None else "ms*/2"))
+        self._retire_worker("_checks_worker")
         self._checks_worker = InteractionChecksWorker(
             run_bundle=run_bundle, base_cfg=base_cfg,
             study=study, h_star=h_star, gci_plan=gci_plan,
@@ -1700,6 +2600,7 @@ class OptimizationTab(QWidget):
         self._checks_worker.failed.connect(self._on_fail)
         self._start_progress()
         self._checks_worker.start()
+        return True
 
     def _on_checks_progress(self, ev):
         phase = ev.get("phase")
@@ -1729,66 +2630,99 @@ class OptimizationTab(QWidget):
         for c in res.checks:
             if c.details.get("action"):
                 self._log_ui("  ACTION (%s): %s" % (c.name, c.details["action"]))
-        self._write_domain_exports()
+        if self._exports_allowed("checks", res):
+            self._write_domain_exports()
         self._refresh_convergence_view()
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if res.status == "accepted"
                             else "#b45309"))
         self.lbl_status.setText("Interaction checks \u2014 %s" % why)
+        self._after_study("checks", res)
 
     # ===================================================================
     # 3 - Mesh convergence by GCI / Richardson (fixed domain)
     # ===================================================================
-    def _on_run_mesh_gci(self):
-        val = self._validate_launch()
-        if val is None:
-            return
+    def _gci_spec(self):
+        """Settings of a new mesh-convergence study from the panel, or None
+        after a warning."""
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Mesh convergence criterion",
                 "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
-            return
-        prefs, wd, cpus = val
-        finest = self._float_or(self.le_gci_finest, float(self.cfg.elem_size))
-        ratio = self._float_or(self.le_gci_ratio, 2.0)
-        nmesh = int(self.sp_gci_n.value())
-        minh = self._float_or(self.le_gci_min, None)
-        gci_tol = self._gci_tolerances()
-        dims = self._dims_from_cfg()
-        zoi = self.zoi()
+            return None
         try:
             window = self.window()
         except ValueError as e:
             QMessageBox.warning(self, "Time window", str(e))
-            return
-        study_cfg = {
-            "zoi": {"xmin": zoi[0], "xmax": zoi[1],
-                    "ymin": zoi[2], "ymax": zoi[3]},
-            "window": list(window),
-            "finest_elem_size": finest, "ratio": ratio, "n_meshes": nmesh,
-            "min_elem_size": minh, "grid_step": self.grid_step(),
-            "tolerances": gci_tol, "field_vars": ["EVF", "TEMP", "V1", "V2"],
-            "evf_threshold": 0.5,
-            "domain_dims": {"h_wp": dims.h_wp, "h_void": dims.h_void,
-                            "l_wp": dims.l_wp, "l_void": dims.l_void}}
-        run_dir = self._study_run_dir(wd, "GCI", study_cfg)
-        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "GCI")
-        # T10: every GCI run records its cost and safeguards (mesh_gci has no
-        # hook of its own); the records feed gci_meshes.csv (paper Table 8).
-        from gui.sensitivity.run_record import RecordingRunner
+            return None
         try:
             guards = self.guard_settings()
         except ValueError as e:
             QMessageBox.warning(self, "Safeguards", str(e))
+            return None
+        return {
+            "zoi": self._zoi_dict(self.zoi()),
+            "window": list(window),
+            "finest_elem_size": self._float_or(self.le_gci_finest,
+                                               float(self.cfg.elem_size)),
+            "ratio": self._float_or(self.le_gci_ratio, 2.0),
+            "n_meshes": int(self.sp_gci_n.value()),
+            "min_elem_size": self._float_or(self.le_gci_min, None),
+            "grid_step": self.grid_step(),
+            "grid_step_set": self._grid_step_set(),
+            "tolerances": self._gci_tolerances(),
+            "field_vars": ["EVF", "TEMP", "V1", "V2"],
+            "evf_threshold": 0.5,
+            "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
+            "domain_dims": self._dims_dict(self._dims_from_cfg()),
+            "base_ms": self._base_ms(),
+            "filter_verify": bool(getattr(self.cfg.step,
+                                          "output_filter_verify", True))}
+
+    def _on_run_mesh_gci(self):
+        if self.is_running():
             return
+        if self._offer_resume("mesh"):
+            return
+        self._launch_new("mesh")
+
+    def _start_gci(self, spec, run_dir, prefs, cpus, mode="new", then=None,
+                   **extra):
+        if self._cannot_start("The mesh study"):
+            return False
+        zoi = zoi_tuple(spec)
+        window = tuple(float(v) for v in spec["window"])
+        finest = float(spec["finest_elem_size"])
+        ratio = float(spec["ratio"])
+        nmesh = int(spec["n_meshes"])
+        minh = spec.get("min_elem_size")
+        minh = None if minh is None else float(minh)
+        gci_tol = {k: float(v) for k, v in spec["tolerances"].items()}
+        dims = DomainDims(**{k: float(spec["domain_dims"][k])
+                             for k in DIM_KEYS})
+        grid = float(spec["grid_step"])
+        guards = GuardSettings(rk_max=float(spec["rk_max"]),
+                               rhg_max=float(spec["rhg_max"]), window=window)
+        # A deep copy: run_mesh_gci sets elem_size and the domain on the cfg
+        # it receives (mesh_gci.py:337-341); given self.cfg it used to leave
+        # the user's model at the coarsest element size after the study.
+        base_cfg = self._study_base_cfg(spec)
+        run_bundle = self._begin_study("mesh", spec, run_dir, prefs, cpus,
+                                       mode, then,
+                                       plan={"finest_elem_size": finest,
+                                             "ratio": ratio,
+                                             "n_meshes": nmesh,
+                                             "min_elem_size": minh},
+                                       **extra)
+        # T10: every GCI run records its cost and safeguards (mesh_gci has no
+        # hook of its own); the records feed gci_meshes.csv (paper Table 8).
+        from gui.sensitivity.run_record import RecordingRunner
         recorder = RecordingRunner(run_bundle, n_cpu=cpus,
                                    guard_settings=guards)
         self._pending_gci = (recorder, gci_tol, run_dir)
-        self._cancel_evt.clear()
-        self.log.clear()
-        self.tabs.setCurrentIndex(0)
-        self._busy(True, "Mesh convergence (GCI)\u2026")
+        self._busy(True, "Mesh convergence (GCI)\u2026" if mode != "load"
+                   else "Reading back a mesh convergence study\u2026")
         self._log_ui("=" * 68)
         self._log_ui("MESH CONVERGENCE (GCI / Richardson) on a fixed domain")
         self._log_ui("  finest %.4g mm | ratio %.3g | n %d | floor %s | "
@@ -1797,21 +2731,23 @@ class OptimizationTab(QWidget):
                         "n/a" if minh is None else "%.4g" % minh,
                         window[0], window[1]))
         self._log_ui("=" * 68)
-        # A deep copy: run_mesh_gci sets elem_size and the domain on the cfg
-        # it receives (mesh_gci.py:337-341); given self.cfg it used to leave
-        # the user's model at the coarsest element size after the study.
+        self._retire_worker("_mesh_worker")
         self._mesh_worker = MeshGciWorker(
-            run_bundle=recorder, base_cfg=self._study_cfg_copy(), zoi=zoi,
+            run_bundle=recorder, base_cfg=base_cfg, zoi=zoi,
             domain_dims=dims,
-            grid_step=self.grid_step(), finest_elem_size=finest, ratio=ratio,
+            grid_step=grid, finest_elem_size=finest, ratio=ratio,
             n_meshes=nmesh, tolerances=(gci_tol or None),
-            field_vars=("EVF", "TEMP", "V1", "V2"), window=window,
-            evf_threshold=0.5, min_elem_size=minh)
+            field_vars=tuple(spec.get("field_vars")
+                             or ("EVF", "TEMP", "V1", "V2")),
+            window=window,
+            evf_threshold=float(spec.get("evf_threshold", 0.5)),
+            min_elem_size=minh)
         self._mesh_worker.progress.connect(self._on_mesh_progress)
         self._mesh_worker.finished_ok.connect(self._on_mesh_done)
         self._mesh_worker.failed.connect(self._on_fail)
         self._start_progress()
         self._mesh_worker.start()
+        return True
 
     def _on_mesh_progress(self, ev):
         if ev.get("phase") != "mesh_gci":
@@ -1850,7 +2786,7 @@ class OptimizationTab(QWidget):
                          % (c.elem_size, self._fmt(c.cost.c_cpu_s, "%.0f s"),
                             c.cost.n_elem_euler, g or "no safeguard"))
         self._last_gci = (res, calls, tol, folder)
-        if folder is not None:
+        if folder is not None and self._exports_allowed("mesh", res):
             from gui.sensitivity.study_export import write_gci_exports
             try:
                 paths = write_gci_exports(folder, res, calls, tol)
@@ -1866,6 +2802,7 @@ class OptimizationTab(QWidget):
         self.lbl_status.setText(
             "Mesh GCI \u2014 recommended %s"
             % ("n/a" if rec is None else "%.4g mm" % rec))
+        self._after_study("mesh", res)
 
     # ===================================================================
     # Cancel / failure
@@ -1899,6 +2836,8 @@ class OptimizationTab(QWidget):
             if w is not None and w.isRunning():
                 w.cancel()
         self._cancel_evt.set()
+        if self._pipeline:
+            self._pipeline_stop("cancelled")
         self.lbl_status.setText("Cancelling the current run\u2026")
 
         job, proc = self._current_job, self._current_proc
@@ -1939,6 +2878,13 @@ class OptimizationTab(QWidget):
     def _on_fail(self, msg):
         self._stop_progress()
         self._busy(False)
-        self.lbl_status.setStyleSheet("color: #b91c1c;")
-        self.lbl_status.setText("Study failed: %s" % msg)
-        self._log_ui("ERROR: %s" % msg)
+        act = getattr(self, "_active", None)
+        state = getattr((act or {}).get("run_bundle"), "state", None) or {}
+        if state.get("miss") is None:
+            # (A study read back that stopped on a missing run is no
+            # error: _after_study says what the folder lacks.)
+            self.lbl_status.setStyleSheet("color: #b91c1c;")
+            self.lbl_status.setText("Study failed: %s" % msg)
+            self._log_ui("ERROR: %s" % msg)
+        if act is not None:
+            self._after_study(act["step"], None, error=msg)

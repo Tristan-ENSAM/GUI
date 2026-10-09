@@ -34,8 +34,18 @@ def create_study_dir(workdir, profile_name: Optional[str], prefix: str,
     hiccup never blocks the study.
     """
     when = when or datetime.now()
-    run_dir = Path(workdir) / study_folder_name(profile_name, prefix, when)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    name = study_folder_name(profile_name, prefix, when)
+    Path(workdir).mkdir(parents=True, exist_ok=True)
+    # A new folder every time: two studies started within the same second
+    # must not share one (the second would overwrite the first's files).
+    run_dir, n = Path(workdir) / name, 1
+    while True:
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            n += 1
+            run_dir = Path(workdir) / ("%s_%d" % (name, n))
     payload = {
         "study": prefix,
         "created_at": when.isoformat(timespec="seconds"),
