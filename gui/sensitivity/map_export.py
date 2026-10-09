@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from gui.core.logging_util import log_swallowed
+from gui.core.xlsx_writer import excel_copy
 
 MAPS_SUBDIR = "sensitivity_maps"
 
@@ -236,6 +237,7 @@ def write_maps(out_dir, maps, nodes_xy, face_idx, *, param_info,
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         w.writerows(index_rows)
+    excel_copy(p)
     written.append(p)
     return written
 
