@@ -92,7 +92,7 @@ _QUANTITIES = [
 # Convergence table (report, Part B, T7): one row per comparison of the
 # domain study, per GCI quantity and per interaction check.
 _TABLE_COLUMNS = ("study", "item", "from", "to", "E_max / ratio", "q_crit",
-                  "safeguards", "decision", "mode", "C_CPU [s]")
+                  "safeguards", "decision", "mode", "C_CPU [core-s]")
 # Default values of the persisted Optimization settings (one instance, read
 # only, so the widget defaults cannot drift from the dataclass).
 OptimizationCfgDefaults = _OptimizationCfg()
@@ -1968,8 +1968,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             r = ev["record"]
             g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
                           for k, (v, ok) in sorted(r.guards.items()))
-            cpu = self._fmt(getattr(r.cost, "c_cpu_s", None), "%.0f s") \
-                if r.cost is not None else "n/a"
+            cpu = self._fmt_cost(r.cost)
             self._log_ui("[run %d] ms=%g | %s | %s | C_CPU=%s"
                          % (r.index, ev.get("ms", float("nan")),
                             "job ok" if r.job_ok
@@ -2159,6 +2158,19 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return "n/a" if v is None or (isinstance(v, float) and
                                       not math.isfinite(v)) else fmt % v
 
+    @classmethod
+    def _fmt_cost(cls, c):
+        """C_CPU with what it is made of, so that core-seconds are not read
+        as an elapsed time: '969888 core-s (16 CPU x 60618 s wall)'."""
+        if c is None:
+            return "n/a"
+        cpu = cls._fmt(getattr(c, "c_cpu_s", None), "%.0f core-s")
+        n = getattr(c, "n_cpu", None)
+        wall = getattr(c, "t_wall_solver_s", None)
+        if n is None or wall is None:
+            return cpu
+        return "%s (%d CPU x %s wall)" % (cpu, int(n), cls._fmt(wall, "%.0f s"))
+
     def _on_di_progress(self, ev):
         phase = ev.get("phase")
         if phase == "run":
@@ -2167,8 +2179,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
                           for k, (v, ok) in sorted(r.guards.items()))
             c = r.cost
-            cpu = self._fmt(getattr(c, "c_cpu_s", None), "%.0f s") \
-                if c is not None else "n/a"
+            cpu = self._fmt_cost(c)
             self._log_ui(
                 "[run %d] h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g | %s | "
                 "%s | C_CPU=%s%s"
@@ -2374,7 +2385,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                              ls="none")
                 axc.axhline(1.0, ls="--", lw=1.0, color="#b91c1c")
                 axc.set_yscale("log")
-                axc.set_xlabel("C_CPU of the candidate [s]" if use_cpu else
+                axc.set_xlabel("C_CPU of the candidate [core-s]" if use_cpu else
                                "N_elem of the candidate (C_CPU unavailable)",
                                fontsize=7)
                 axc.set_ylabel("E_max", fontsize=7)
@@ -2783,7 +2794,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
                           for k, (v, ok) in sorted(c.guards.items()))
             self._log_ui("  h=%.4g | C_CPU=%s | N_elem=%s | %s"
-                         % (c.elem_size, self._fmt(c.cost.c_cpu_s, "%.0f s"),
+                         % (c.elem_size, self._fmt_cost(c.cost),
                             c.cost.n_elem_euler, g or "no safeguard"))
         self._last_gci = (res, calls, tol, folder)
         if folder is not None and self._exports_allowed("mesh", res):

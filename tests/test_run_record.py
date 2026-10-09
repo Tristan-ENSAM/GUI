@@ -161,6 +161,28 @@ class TestCost:
         assert c.t_wall_host_s == 180.0
         assert set(c.as_dict()) >= {"c_cpu_s", "n_inc"}
 
+    def test_cost_record_uses_sta_summary_and_processors(self, tmp_path):
+        # Excerpt of a real 16-core GCI run (h = 0.5 um, 2026-10-07): the
+        # last increment row says 16:49:26 (60566 s) but the run ends at
+        # WALLCLOCK 60618 s; the solver used 16 processors.
+        sta = tmp_path / "job.sta"
+        sta.write_text(
+            "The model has been decomposed into 16 domains.\n"
+            "Domain level parallelization will be used with 16 processors.\n"
+            "   116495  6.000E-04 6.000E-04  16:49:26 5.149E-09      309160"
+            "  3.306E-04  3.356E-03\n"
+            "  EXPLICIT EXECUTABLE TIME SUMMARY\n"
+            "       USER TIME (SEC)      =   52290.\n"
+            "       SYSTEM TIME (SEC)    =   3408.6\n"
+            "       WALLCLOCK TIME (SEC) =        60618\n"
+            "              INIT (SEC) =         72\n"
+            "              MAIN (SEC) =      60546\n",
+            encoding="latin-1")
+        c = cost_record(None, sta, n_cpu=4)
+        assert c.t_wall_solver_s == 60618.0          # summary, not last row
+        assert c.n_cpu == 16                         # what the solver used
+        assert c.c_cpu_s == pytest.approx(16 * 60618.0)
+
     def test_cost_record_without_sta(self):
         c = cost_record(None, None, host_wall_s=5.0, n_cpu=2)
         assert isinstance(c, CostRecord)
