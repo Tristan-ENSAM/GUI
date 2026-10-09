@@ -49,6 +49,12 @@ increment (first / minimum / last) and the solver wall time from the .sta,
 the host wall time (launch to bundle, CAE pre-processing and extraction
 included), N_CPU, and C_CPU = N_CPU * t_wall,solver. Eq. (11) uses the
 SOLVER time (D7); the host time is recorded for information.
+
+C_CPU is in core-seconds: the wall time multiplied by the cores held, not
+the elapsed time. t_wall,solver is the WALLCLOCK TIME of the .sta end-of-run
+summary (the last increment row's time when the run has not finished), and
+N_CPU is the processor count the solver printed in the .sta (the requested
+count when the .sta does not give it).
 """
 from __future__ import annotations
 
@@ -222,7 +228,7 @@ class CostRecord:
     t_wall_solver_s: Optional[float] = None
     t_wall_host_s: Optional[float] = None
     n_cpu: Optional[int] = None
-    c_cpu_s: Optional[float] = None          # Eq. (11): N_CPU * t_wall,solver
+    c_cpu_s: Optional[float] = None          # Eq. (11): N_CPU * t_wall,solver [core-s]
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -278,7 +284,9 @@ def cost_record(bundle=None, sta_path=None, host_wall_s: Optional[float] = None,
         rec.dt_stable_first = snap.stable_dt_first
         rec.dt_stable_min = snap.stable_dt_min
         rec.dt_stable_last = snap.stable_dt
-        rec.t_wall_solver_s = snap.wall_time_seconds()
+        rec.t_wall_solver_s = snap.solver_wall_seconds()
+        if snap.n_processors is not None:
+            rec.n_cpu = int(snap.n_processors)
     if rec.n_cpu is not None and rec.t_wall_solver_s is not None:
         rec.c_cpu_s = float(rec.n_cpu) * rec.t_wall_solver_s
     return rec

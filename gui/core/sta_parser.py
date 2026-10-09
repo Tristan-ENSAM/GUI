@@ -56,6 +56,16 @@ _FRAME_ROW = re.compile(
     r"(?P<step_time>[\d.+\-eE]+)"
 )
 
+# End-of-run summary ("EXPLICIT EXECUTABLE TIME SUMMARY") and the number of
+# processors the solver actually used, both printed by Abaqus/Explicit:
+#        WALLCLOCK TIME (SEC) =        60618
+#   Domain level parallelization will be used with 16 processors.
+_WALLCLOCK_ROW = re.compile(
+    r"^\s*WALLCLOCK TIME \(SEC\)\s*=\s*(?P<sec>[\d.+\-eE]+)")
+_PROCESSORS_ROW = re.compile(
+    r"parallelization will be used with\s+(?P<n>\d+)\s+processors",
+    re.IGNORECASE)
+
 
 @dataclass
 class StaProgress:
@@ -81,6 +91,10 @@ class StaProgress:
     # row and the smallest one met so far. `stable_dt` above stays the LAST.
     stable_dt_first: Optional[float] = None
     stable_dt_min:   Optional[float] = None
+    # Total solver wall time from the end-of-run summary (None until the
+    # run has finished) and the processor count printed by the solver.
+    wallclock_total_s: Optional[float] = None
+    n_processors:      Optional[int]   = None
 
     def is_ready(self) -> bool:
         """True if at least one progress signal has been parsed."""
@@ -102,6 +116,15 @@ class StaProgress:
         The .sta prints it as HH:MM:SS (see _INC_ROW); None when no
         increment row has been parsed."""
         return wall_time_to_seconds(self.wall_time)
+
+    def solver_wall_seconds(self) -> Optional[float]:
+        """Total solver wall time: the end-of-run WALLCLOCK TIME when the
+        summary is present (it includes the start-up and the final output
+        written after the last increment row), else the last increment
+        row's wall time."""
+        if self.wallclock_total_s is not None:
+            return self.wallclock_total_s
+        return self.wall_time_seconds()
 
 
 def wall_time_to_seconds(text: Optional[str]) -> Optional[float]:
@@ -174,6 +197,19 @@ def parse_sta(sta_path: str | Path) -> StaProgress:
                     snap.critical_elem  = int(m.group("crit_elem"))
                     snap.kinetic_energy = float(m.group("kinetic_energy"))
                     snap.total_energy   = float(m.group("total_energy"))
+                    continue
+
+                m = _WALLCLOCK_ROW.match(line)
+                if m:
+                    try:
+                        snap.wallclock_total_s = float(m.group("sec"))
+                    except ValueError:
+                        pass
+                    continue
+
+                m = _PROCESSORS_ROW.search(line)
+                if m:
+                    snap.n_processors = int(m.group("n"))
                     continue
     except OSError:
         # File vanished between exists() and open() — return whatever we
