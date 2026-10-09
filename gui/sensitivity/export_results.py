@@ -25,6 +25,8 @@ import io
 import math
 from typing import Callable, Optional
 
+from gui.core.xlsx_writer import excel_copy
+
 _COLUMNS = ["qoi", "parameter", "label", "sensitivity",
             "abs_sensitivity", "dQdx", "elasticity", "normalized",
             "raw_fallback", "scheme_used", "x0", "Q0"]
@@ -136,4 +138,6 @@ def write_csv(result, path, label_for: Optional[Callable[[str], str]] = None
     text = result_to_csv(result, label_for)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         f.write(text)
+    if str(path).lower().endswith(".csv"):
+        excel_copy(path)
     return str(path)

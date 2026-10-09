@@ -51,6 +51,7 @@ import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from gui.core.xlsx_writer import excel_copy
 from gui.sensitivity.domain_independence import ALL_QUANTITIES, DIMENSIONS
 
 COST_FIELDS = ("n_elem_euler", "n_elem_euler_extracted", "n_inc",
@@ -89,7 +90,8 @@ def _guards(guards: Dict[str, tuple]) -> Dict[str, object]:
 
 def write_csv(path, rows: Sequence[Dict[str, object]],
               columns: Optional[Sequence[str]] = None) -> Path:
-    """Write `rows` with a fixed column order (None/NaN -> empty cell)."""
+    """Write `rows` with a fixed column order (None/NaN -> empty cell),
+    plus a sibling .xlsx that opens in Excel whatever the locale."""
     path = Path(path)
     if columns is None:
         columns = []
@@ -105,6 +107,7 @@ def write_csv(path, rows: Sequence[Dict[str, object]],
             w.writerow({k: ("" if r.get(k) is None or (
                 isinstance(r.get(k), float) and not math.isfinite(r[k]))
                 else r.get(k)) for k in columns})
+    excel_copy(path)
     return path
 
 
