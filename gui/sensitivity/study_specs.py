@@ -76,20 +76,22 @@ def eps_of_spec(spec: dict) -> Dict[str, float]:
 
 def grid_set_of_spec(spec: dict):
     """The sampling step as set in the tab when the study started (None:
-    blank). An older spec has only the step used; it is taken as blank
-    when it equals the element size a blank field gave that study (the
-    element size of the study, the finest mesh of a GCI plan, h* of the
-    final checks), as set otherwise. That is an assumption: an older
-    folder does not say whether the field was blank."""
+    blank). An older spec has only the step used. For a domain study or
+    final checks, a blank field gave their own element size (elem_size,
+    h_star): the step is taken as blank when it equals it, as set
+    otherwise. For an older ms or GCI spec the blank-field value (the Mesh
+    tab's size then) is not recorded: None, unless read_study_folder
+    filled it in."""
     if "grid_step_set" in spec:
         return spec["grid_step_set"]
+    if "ms_values" in spec or "finest_elem_size" in spec:
+        return None
     plan = spec.get("gci_plan") if isinstance(spec.get("gci_plan"),
                                                dict) else {}
     used = spec.get("grid_step", plan.get("grid_step"))
     if used is None:
         return None
-    blank = (spec.get("elem_size") or spec.get("finest_elem_size")
-             or spec.get("h_star"))
+    blank = spec.get("elem_size") or spec.get("h_star")
     try:
         if blank is not None and math.isclose(float(used), float(blank),
                                               rel_tol=1e-9, abs_tol=1e-15):
@@ -199,7 +201,7 @@ def read_study_folder(folder, defaults: Optional[dict] = None
                       ) -> Tuple[str, dict]:
     """(step, spec) of a study folder; raises ValueError with a message
     for the user. `defaults` fills what an older config.json lacks
-    (rk_max, rhg_max, base_ms)."""
+    (rk_max, rhg_max, base_ms, grid_step_set)."""
     folder = Path(folder)
     path = folder / "config.json"
     try:
@@ -220,6 +222,11 @@ def read_study_folder(folder, defaults: Optional[dict] = None
     for k in ("rk_max", "rhg_max"):
         if spec.get(k) is None and k in defaults:
             spec[k] = defaults[k]
+    if (step in ("ms", "mesh") and "grid_step_set" not in spec
+            and "grid_step_set" in defaults):
+        # An older ms or GCI folder does not say whether the sampling step
+        # was blank: the tab's current choice is kept.
+        spec["grid_step_set"] = defaults["grid_step_set"]
     if step in ("mesh", "domain") and (spec.get("base_ms") is None
                                        or spec.get("filter_verify") is None):
         # An older folder: what the runs were made with is in their meta.

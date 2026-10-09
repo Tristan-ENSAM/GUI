@@ -130,6 +130,34 @@ def values_match(step: str, a, b) -> bool:
     return _close(a, b)
 
 
+def round6_up(v) -> float:
+    """`v` with 6 significant digits (what the model tabs show), never
+    below `v`: a domain size is a whole number of elements, and a value
+    rounded down loses one where the domain is floored to whole elements
+    (Geometry tab, 'discretize')."""
+    v = float(v)
+    r = float("%g" % v)
+    if r >= v or v <= 0 or not math.isfinite(v):
+        return r
+    up = float("%g" % (r + 10.0 ** (math.floor(math.log10(v)) - 5)))
+    return up if up >= v else v
+
+
+def in_model(step: str, model_value, result) -> bool:
+    """Whether the model holds the result of `step`. A domain size below
+    the result does not count (it may lose an element), even within the
+    display rounding."""
+    if not values_match(step, model_value, result):
+        return False
+    if step == "domain":
+        try:
+            return all(float(m) >= float(r) * (1.0 - 1e-12)
+                       for m, r in zip(model_value, result))
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 # State of a step for the current model:
 #   "none"         never run
 #   "done"         valid result for this model
@@ -218,7 +246,7 @@ def missing_prerequisites(steps: Dict[str, dict], step: str, mkey: str,
             out.append("%s is %s." % (STEP_TITLES[up], state_label(st, rec)))
             continue
         name, where = holds[up]
-        if not values_match(up, model_values.get(name), rec.get("value")):
+        if not in_model(up, model_values.get(name), rec.get("value")):
             out.append("The model does not use the result of %s: %s is %s, "
                        "the step found %s." % (
                            STEP_TITLES[up], where,
@@ -236,8 +264,9 @@ def format_value(step: str, value) -> str:
         return "h = %g mm" % float(value)
     if step == "domain":
         try:
+            # Rounded up, so a value typed from this text keeps D*.
             return ("l_wp %g, h_wp %g, h_void %g, l_void %g mm"
-                    % (value[2], value[0], value[1], value[3]))
+                    % tuple(round6_up(value[i]) for i in (2, 0, 1, 3)))
         except (TypeError, IndexError):
             return str(value)
     return str(value)

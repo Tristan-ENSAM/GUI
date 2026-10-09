@@ -978,6 +978,9 @@ def test_an_older_folder_with_a_blank_sampling_step():
         "grid_step": 0.002}}) is None
     assert ss.grid_set_of_spec({"elem_size": 0.004,
                                 "grid_step": 0.002}) == 0.002
+    # An older ms or GCI folder does not record the blank-field value.
+    assert ss.grid_set_of_spec({"ms_values": [250, 500], "elem_size": 0.08,
+                                "grid_step": 0.01}) is None
     assert ss.grid_set_of_spec({"grid_step_set": None,
                                 "grid_step": 0.002}) is None
 
@@ -1097,10 +1100,9 @@ def test_the_safe_answer_is_the_default_button(tab, monkeypatch):
 
 def test_domain_sizes_written_never_lose_an_element():
     from decimal import Decimal
-    from gui.tabs.model_steps import _r6_up
     for h in (0.000625, 0.00141421, 0.001125):
         for k in range(1, 4000):
-            v = _r6_up(k * h)
+            v = st.round6_up(k * h)
             assert Decimal(str(v)) // Decimal(str(h)) == k, (h, k, v)
             assert v == float("%g" % v)              # what the tab shows
 
@@ -1125,3 +1127,201 @@ def test_h_star_rounded_by_the_tabs_is_found_in_the_plan():
     res = mesh_domain_check(gci, float("%g" % (0.001 * math.sqrt(2))), {})
     assert "not in the GCI plan" not in res.conclusion
     assert res.details["h_star"] == 0.00141421
+
+
+# ---------------------------------------------------------------------------
+# Results kept, folders, quit (third review)
+# ---------------------------------------------------------------------------
+def _cancel_study(tab, attr):
+    """A behaviour that clicks Cancel during the next launched run."""
+    def cancel(params):
+        getattr(tab, attr).cancel()
+        tab._cancel_evt.set()
+        return "ok"
+    return cancel
+
+
+def test_an_extended_resume_of_a_read_back_keeps_the_result(qapp, world,
+                                                            answers):
+    tab = world.tab
+    # An ms folder made with T eps = 2, its ms = 250 run missing.
+    tab._q_eps["T"].setText("2")
+    world.behaviour["fn"] = lambda p: "raise" if _ms_of(p) >= 250 else "ok"
+    tab.le_ms_values.setText("125, 250")
+    tab.le_ms_elem.setText("0.02")
+    tab._on_run_ms_independence()
+    _wait(qapp, tab, _idle(tab))
+    folder = Path(tab.cfg.optimization.steps["ms"]["folder"])
+    # A valid result of step 0 for the panel (T eps = 1).
+    tab._q_eps["T"].setText("1")
+    _record(tab, "ms", 1000.0, {"h": 0.02})
+    rec = dict(tab.cfg.optimization.steps["ms"])
+    # Open the folder, resume it: every comparison passes, the study is
+    # extended, and the extension is cancelled.
+
+    def cancel_in_extension(p):
+        if _ms_of(p) >= 500:
+            tab._ms_worker.cancel()
+            tab._cancel_evt.set()
+        return "ok"
+    world.behaviour["fn"] = cancel_in_extension
+    answers.next = "resume"
+    tab.forget_results()
+    tab.open_study(folder)
+    _wait(qapp, tab, _idle(tab))
+    assert "not bracketed yet" in tab.log.toPlainText()
+    assert tab._q_eps["T"].text() == "1"
+    assert tab.cfg.optimization.steps["ms"] == rec
+
+
+def test_reading_back_the_study_of_record_keeps_the_later_study(
+        qapp, world, answers):
+    tab = world.tab
+    tab._on_run_domain_independence()
+    _wait(qapp, tab, _idle(tab))
+    tab._dom_spins["dom_step_elems"].setValue(3)
+    world.behaviour["fn"] = _cancel_study(tab, "_di_worker")
+    tab._on_run_domain_independence()
+    _wait(qapp, tab, _idle(tab))
+    world.behaviour["fn"] = None
+    now = tab.cfg.optimization.steps["domain"]
+    att = dict(now["attempt"])
+    assert att["status"] == "interrupted" and att["folder"] != now["folder"]
+    tab.forget_results()
+    assert tab.open_study(now["folder"])
+    _wait(qapp, tab, _idle(tab))
+    after = tab.cfg.optimization.steps["domain"]
+    assert after["status"] == "done" and after.get("attempt") == att
+
+
+def test_two_studies_in_the_same_second_get_two_folders(tmp_path,
+                                                        monkeypatch):
+    from datetime import datetime
+    import gui.core.run_output as ro
+    when = datetime(2026, 10, 9, 12, 0, 0)
+    a = ro.create_study_dir(tmp_path, "p", "GCI", {"a": 1}, when)
+    b = ro.create_study_dir(tmp_path, "p", "GCI", {"b": 2}, when)
+    assert a != b and b.name == a.name + "_2"
+    assert json.loads((a / "config.json").read_text())["parameters"] == \
+        {"a": 1}
+
+
+def test_the_checks_use_the_result_the_step_keeps(qapp, world, answers,
+                                                  monkeypatch):
+    tab = world.tab
+    tab._on_run_domain_independence()
+    _wait(qapp, tab, _idle(tab))
+    rec = dict(tab.cfg.optimization.steps["domain"])
+    assert tab._step_state("domain")[0] == "prereq"  # steps 0, 1 not done
+    # Step 2 again with another growth: it does not converge (failed).
+    tab._dom_spins["dom_step_elems"].setValue(1)
+    tab._dom_spins["dom_m_ratios"].setValue(1)
+    tab._dom_spins["dom_n_max"].setValue(2)
+    tab._on_run_domain_independence()
+    _wait(qapp, tab, _idle(tab))
+    now = tab.cfg.optimization.steps["domain"]
+    assert now["folder"] == rec["folder"]
+    assert now["attempt"]["status"] == "failed"
+    started = []
+    monkeypatch.setattr(tab, "_start_checks",
+                        lambda spec, study, folder, *a, **k:
+                        started.append((spec, Path(folder))) or False)
+    tab._on_run_interaction_checks()                 # "Run anyway"
+    _wait(qapp, tab, lambda: not tab._is_busy and tab._active is None
+          and started, timeout=30)
+    spec, folder = started[-1]
+    assert rc.same_folder(folder, rec["folder"])
+    assert spec["d_star"] == rec["value"]
+
+
+def test_a_cancelled_rerun_of_the_checks_keeps_their_files(
+        qapp, world, answers, monkeypatch):
+    monkeypatch.setattr(_ModelBundle, "LAM", 0.005)
+    tab = world.tab
+    tab.le_zoi["ymin"].setText("-0.09")
+    tab.le_zoi["ymax"].setText("-0.01")
+    tab.sp_gci_n.setValue(3)
+    tab._on_run_all()
+    _wait(qapp, tab, lambda: not tab._pipeline and not tab._is_busy
+          and tab._active is None)
+    rec = dict(tab.cfg.optimization.steps["checks"])
+    assert rec["status"] == "done"
+    dom = Path(rec["folder"])
+    files = {p.name: p.read_bytes() for p in dom.iterdir()
+             if p.suffix in (".csv", ".json") and not p.name.startswith(
+                 ("domainsizing_run", "checks_run"))}
+    assert "checks.csv" in files and "checks_config.json" in files
+    # The checks again with another ms (set by hand), cancelled.
+    tab.cfg.step.mass_scaling_factor = 2000.0
+    world.behaviour["fn"] = _cancel_study(tab, "_checks_worker")
+    tab._on_run_interaction_checks()                 # "Run anyway"
+    _wait(qapp, tab, _idle(tab))
+    world.behaviour["fn"] = None
+    now = tab.cfg.optimization.steps["checks"]
+    assert (now["status"], now["value"]) == ("done", "accepted")
+    assert now["attempt"]["status"] == "interrupted"
+    assert "resume" not in tab._step_status["checks"].text()
+    assert {p.name: p.read_bytes() for p in dom.iterdir()
+            if p.name in files} == files
+    # The folder still reads back the accepted checks, with no question.
+    tab.cfg.step.mass_scaling_factor = 1000.0
+    n = len(answers.asked)
+    tab.forget_results()
+    tab.open_study(dom)
+    _wait(qapp, tab, _idle(tab))
+    for _ in range(100):                     # the checks read back next
+        qapp.processEvents()
+    _wait(qapp, tab, _idle(tab))
+    assert len(answers.asked) == n
+    assert tab.cfg.optimization.steps["checks"]["status"] == "done"
+
+
+def test_a_declined_quit_stops_nothing(qapp, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+    from gui.main import MainWindow
+    w = MainWindow()
+    w._dirty = False
+    asked = []
+
+    def question(parent, title, *a, **k):
+        asked.append(title)
+        return (QMessageBox.Yes if title == "Sensitivity campaign running"
+                else QMessageBox.No)
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    stopped = []
+    monkeypatch.setattr(w.sensitivity_tab, "is_running", lambda: True)
+    monkeypatch.setattr(w.sensitivity_tab, "shutdown",
+                        lambda *a: stopped.append("sens") or True)
+    monkeypatch.setattr(w.optimization_tab, "shutdown",
+                        lambda *a: stopped.append("model") or True)
+    w.optimization_tab._pipeline = True
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    w.optimization_tab._pipeline = False
+    assert asked == ["Sensitivity campaign running",
+                     "Model tab study running"]
+    assert not ev.isAccepted() and stopped == []
+
+
+def test_a_declined_start_leaves_the_plan_as_it_was(tab, answers,
+                                                    monkeypatch):
+    monkeypatch.setattr(tab, "_validate_launch", lambda *a: None)
+    answers.next = "cancel"                 # order guard: Cancel
+    tab._on_run_mesh_gci()
+    assert answers.asked[-1][0] == "Order of the steps"
+    assert tab.le_gci_finest.text() == ""
+
+
+def test_dims_shown_rounded_down_are_not_the_result(tab):
+    h = 0.00141421
+    tab.cfg.elem_size = h
+    d_star = [37 * h, 11 * h, 53 * h, 7 * h]
+    _record(tab, "domain", d_star, {"ms": 1.0, "h": h})
+    g = tab.cfg.euler_geometry
+    g.h_wp, g.h_void, g.l_wp, g.l_void = (float("%g" % v) for v in d_star)
+    assert not st.in_model("domain", tab._model_values()["dims"], d_star)
+    tab._apply_step_value("domain", d_star)
+    assert st.in_model("domain", tab._model_values()["dims"], d_star)
+    n = [round(e / h) for e in tab.cfg.effective_euler_dims()]
+    assert n == [37, 11, 53, 7]

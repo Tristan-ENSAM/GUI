@@ -563,64 +563,60 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_changes():
             event.ignore()
             return
-        # If an Abaqus run is in progress, give the user a chance to
-        # confirm — closing the GUI would orphan the child process on
-        # some platforms, or terminate it abruptly on others.
+        from PySide6.QtWidgets import QMessageBox, QApplication
+
+        def confirm(title, text):
+            return QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) == QMessageBox.Yes
+
+        # Every question is asked before anything is stopped: a No to any
+        # of them keeps the window AND everything running.
+        # An Abaqus run of the Job tab: closing the GUI would orphan the
+        # child process on some platforms, or terminate it abruptly on
+        # others.
         proc = getattr(self.job_tab, "_proc", None)
-        if proc is not None:
-            from PySide6.QtCore import QProcess
-            if proc.state() != QProcess.NotRunning:
-                from PySide6.QtWidgets import QMessageBox
-                reply = QMessageBox.question(
-                    self, "Abaqus is running",
-                    "An Abaqus run is still in progress. Quitting now will\n"
-                    "kill it; the .odb may be left incomplete.\n\nQuit anyway?",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
-                    event.ignore()
-                    return
-                proc.kill()
-                proc.waitForFinished(2000)
+        from PySide6.QtCore import QProcess
+        job_running = proc is not None and proc.state() != QProcess.NotRunning
+        if job_running and not confirm(
+                "Abaqus is running",
+                "An Abaqus run is still in progress. Quitting now will\n"
+                "kill it; the .odb may be left incomplete.\n\nQuit anyway?"):
+            event.ignore()
+            return
         # A sensitivity campaign runs its Abaqus jobs from a worker thread in
         # their own process session: closing without stopping it leaves the
         # solver running (licence tokens held) and destroys a live QThread.
-        if self.sensitivity_tab.is_running():
-            from PySide6.QtWidgets import QMessageBox, QApplication
-            reply = QMessageBox.question(
-                self, "Sensitivity campaign running",
+        sens_running = self.sensitivity_tab.is_running()
+        if sens_running and not confirm(
+                "Sensitivity campaign running",
                 "A sensitivity campaign is still running. Quitting now will\n"
                 "terminate the current Abaqus job and discard the campaign\n"
                 "results (runs already finished stay on disk).\n\n"
-                "Quit anyway?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                event.ignore()
-                return
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                self.sensitivity_tab.shutdown()
-            finally:
-                QApplication.restoreOverrideCursor()
+                "Quit anyway?"):
+            event.ignore()
+            return
         # Same for a study of the Model tab (or 'Run all steps').
-        if self.optimization_tab.is_running():
-            from PySide6.QtWidgets import QMessageBox, QApplication
-            reply = QMessageBox.question(
-                self, "Model tab study running",
+        model_running = self.optimization_tab.is_running()
+        if model_running and not confirm(
+                "Model tab study running",
                 "A study of the Model tab is still running. Quitting now\n"
                 "stops it and terminates the current Abaqus job; its result\n"
                 "is not recorded. The finished runs stay in the study\n"
                 "folder: 'Open a study' reads them back or resumes it.\n\n"
-                "Quit anyway?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                event.ignore()
-                return
+                "Quit anyway?"):
+            event.ignore()
+            return
+        if job_running:
+            proc.kill()
+            proc.waitForFinished(2000)
+        if sens_running or model_running:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                self.optimization_tab.shutdown()
+                if sens_running:
+                    self.sensitivity_tab.shutdown()
+                if model_running:
+                    self.optimization_tab.shutdown()
             finally:
                 QApplication.restoreOverrideCursor()
         event.accept()

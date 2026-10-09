@@ -36,7 +36,8 @@ from gui.sensitivity.study_specs import (
 from gui.sensitivity.study_state import (
     AXIS_KEYS, STATE_LABELS, STEPS, STEP_TITLES, first_step_not_done,
     format_value, make_record, missing_prerequisites, model_differences,
-    model_key, settings_key, state_label, step_state, values_match)
+    in_model, model_key, round6_up, settings_key, state_label, step_state,
+    values_match)
 
 # Doublings added to the ms values when every comparison passed (the
 # largest acceptable ms is then not bracketed): 4000 -> up to 128000.
@@ -57,16 +58,6 @@ def _r6(v) -> float:
     return float("%g" % float(v))
 
 
-def _r6_up(v) -> float:
-    """_r6, never below `v`: a domain size is a whole number of elements,
-    and one rounded down loses an element where the domain is floored to
-    whole elements (Geometry tab, 'discretize')."""
-    v = float(v)
-    r = _r6(v)
-    if r >= v or v <= 0 or not math.isfinite(v):
-        return r
-    up = float("%g" % (r + 10.0 ** (math.floor(math.log10(v)) - 5)))
-    return up if up >= v else v
 
 
 def _when(rec) -> str:
@@ -196,12 +187,12 @@ class ModelStepsMixin:
                                                                  "#6b7280"))
             btn = self._btn_apply.get(step)
             if btn is not None:
-                in_model = (st == "done" and values_match(
+                held = (st == "done" and in_model(
                     step, mv[_MODEL_NAME[step]], rec.get("value")))
                 btn.setVisible(st == "done")
-                btn.setEnabled(st == "done" and not in_model
+                btn.setEnabled(st == "done" and not held
                                and not (self._is_busy or self._pipeline))
-                btn.setText("In the model" if in_model else "Use in model")
+                btn.setText("In the model" if held else "Use in model")
         if hasattr(self, "btn_checks"):
             self.btn_checks.setEnabled(
                 not (self._is_busy or self._pipeline)
@@ -219,7 +210,7 @@ class ModelStepsMixin:
                 val = rec.get("value")
                 text = "Done (%s): %s." % (_when(rec), format_value(step, val))
                 name = _MODEL_NAME[step]
-                if values_match(step, mv[name], val):
+                if in_model(step, mv[name], val):
                     text += " The model uses it."
                 else:
                     text += (" The model still has %s: click 'Use in model'."
@@ -251,11 +242,12 @@ class ModelStepsMixin:
                     "run it again." % _when(rec))
         att = (rec or {}).get("attempt")
         if st in ("done", "prereq") and att:
+            msg = att.get("message") or ""
             text += " A later study (%s) %s%s." % (
                 _when(att), STATE_LABELS.get(att.get("status"), "stopped"),
                 ": click the step's button to resume it"
-                if att.get("status") == "interrupted" else
-                (": %s" % att["message"] if att.get("message") else ""))
+                if self._resumable_attempt(step, rec) is not None else
+                (": %s" % msg if msg not in ("", "cancelled") else ""))
             if att.get("folder"):
                 tip = (tip + "\n" if tip else "") + \
                     "Later study: %s" % att["folder"]
@@ -327,7 +319,8 @@ class ModelStepsMixin:
             c.elem_size = _r6(value)
         elif step == "domain":
             g = c.euler_geometry
-            g.h_wp, g.h_void, g.l_wp, g.l_void = (_r6_up(v) for v in value)
+            # Rounded up: D* is a whole number of elements.
+            g.h_wp, g.h_void, g.l_wp, g.l_void = (round6_up(v) for v in value)
         else:
             return
         self._log_ui("[MODEL] %s written in %s" % (format_value(step, value),
@@ -414,7 +407,13 @@ class ModelStepsMixin:
         prefix = {"ms": "massscaling", "mesh": "GCI",
                   "domain": "domainsizing"}[step]
         run_dir = self._study_run_dir(wd, prefix, spec)
-        return self._start_step(step, spec, run_dir, prefs, cpus, "new", then)
+        started = self._start_step(step, spec, run_dir, prefs, cpus, "new",
+                                   then)
+        if started and (step == "mesh" or (
+                step == "ms" and self._float_or(self.le_ms_elem, None)
+                is None)):
+            self._freeze_plan_start()     # the plan this study used
+        return started
 
     def _start_step(self, step, spec, folder, prefs, cpus, mode, then=None,
                     **extra) -> bool:
@@ -493,24 +492,16 @@ class ModelStepsMixin:
         whether to resume it. True when the click was handled here."""
         st, rec = self._step_state(step)
         kept = None
-        if st in ("done", "prereq") and rec.get("attempt"):
-            # A later study of a done step, interrupted: resumable when it
-            # was made for this model and these settings.
-            mkey, skey = self._keys()
-            att = rec["attempt"]
-            if step_state(dict(self._steps(), **{step: att}), step, mkey,
-                          skey)[0] == "interrupted":
-                kept, rec, st = rec, att, "interrupted"
+        if st in ("done", "prereq"):
+            att = self._resumable_attempt(step, rec)
+            if att is None:
+                return False
+            kept, rec, st = rec, att, "interrupted"
         if st != "interrupted" or not rec.get("folder"):
             return False
         folder = Path(rec["folder"])
-        marker = CHECKS_CONFIG if step == "checks" else "config.json"
-        if not (folder / marker).exists():
+        if not self._resumable_folder(step, folder):
             return False
-        if step == "checks":
-            dom = self._domain_record_folder()
-            if dom is None or dom.resolve() != folder.resolve():
-                return False
         choice = self._ask(
             STEP_TITLES[step],
             "The last %s was interrupted (%s, folder %s).%s\n\nResume it? "
@@ -529,6 +520,33 @@ class ModelStepsMixin:
             self._resume_step(step, folder)
             return True
         return choice != "new"
+
+    def _resumable_folder(self, step, folder) -> bool:
+        """The folder still holds the study's settings (and, for the final
+        checks, is the folder of step 2's result)."""
+        folder = Path(folder)
+        marker = CHECKS_CONFIG if step == "checks" else "config.json"
+        if not (folder / marker).exists():
+            return False
+        if step == "checks":
+            dom = self._domain_record_folder()
+            return dom is not None and same_folder(dom, folder)
+        return True
+
+    def _resumable_attempt(self, step, rec):
+        """The later study noted next to a valid result of `step` when it
+        can be resumed: interrupted, made for this model and these settings
+        on the current results of the earlier steps, its folder still
+        there. None otherwise."""
+        att = (rec or {}).get("attempt")
+        if (not att or att.get("status") != "interrupted"
+                or att.get("resumable") is False or not att.get("folder")):
+            return None
+        mkey, skey = self._keys()
+        if step_state(dict(self._steps(), **{step: att}), step, mkey,
+                      skey)[0] != "interrupted":
+            return None
+        return att if self._resumable_folder(step, att["folder"]) else None
 
     def _resume_step(self, step, folder, then=None, **extra) -> bool:
         """Run the study of `folder` again (its finished runs are reused).
@@ -771,8 +789,6 @@ class ModelStepsMixin:
                 return
             else:
                 status = "failed"
-        if step == "domain" and status in ("done", "failed"):
-            self._last_domain_ok = True
         if status == "interrupted" and act["mode"] == "load":
             self._log_ui("Loading stopped (%s): the previous state of %s is "
                          "kept." % (message, STEP_TITLES[step]))
@@ -809,6 +825,19 @@ class ModelStepsMixin:
                                   act["model_key"], act["settings_key"],
                                   act["inputs"], message,
                                   settings=act["settings"], **extra)
+            before = act.get("checks_config_before")
+            if before is not None and same_folder(kept.get("folder") or ".",
+                                                  act["folder"]):
+                # Same folder as the result kept: its settings file goes
+                # back, so the folder still reads back that result. This
+                # run is not resumable (running the checks again reuses
+                # its finished runs).
+                try:
+                    (Path(act["folder"]) / CHECKS_CONFIG).write_text(
+                        before, encoding="utf-8")
+                except OSError:
+                    log_swallowed("putting back %s" % CHECKS_CONFIG)
+                attempt["resumable"] = False
             kept["attempt"] = attempt
             self.changed.emit()
             self._log_ui("[%s] %s%s. The step keeps its result (%s, folder "
@@ -823,6 +852,10 @@ class ModelStepsMixin:
             self._draw_preview()
             self._finish(act, attempt)
             return
+        if step == "domain" and status in ("done", "failed"):
+            # The step-2 study in memory is the one of record: the final
+            # checks may use it.
+            self._last_domain_ok = True
         rec = make_record(status, value, act["folder"], act["model_key"],
                           act["settings_key"], act["inputs"], message,
                           model_params=act["model_params"],
@@ -831,7 +864,10 @@ class ModelStepsMixin:
         if (act["mode"] == "load" and old.get("folder") == rec["folder"]
                 and old.get("status") == status
                 and values_match(step, old.get("value"), value)):
+            # The study of record read back: the same record.
             rec["finished_at"] = old.get("finished_at", rec["finished_at"])
+            if old.get("attempt"):
+                rec["attempt"] = old["attempt"]
         self._steps()[step] = rec
         self.changed.emit()
         self._log_ui("[%s] %s%s" % (
@@ -840,7 +876,7 @@ class ModelStepsMixin:
             and step != "checks" else (": %s" % message if message else "")))
         now = self._step_state(step)[0]
         if (now == "done" and step in _MODEL_NAME and not self._pipeline
-                and not values_match(step, self._model_values()[
+                and not in_model(step, self._model_values()[
                     _MODEL_NAME[step]], value)):
             self._log_ui("  next: 'Use in model' writes it in %s"
                          % _MODEL_WHERE[step])
@@ -877,21 +913,29 @@ class ModelStepsMixin:
             return prev_rec, True
         return None, True
 
-    def _exports_allowed(self) -> bool:
-        """Whether the study that is ending writes its export files: not
-        when it was only read back, nor when a resume of a study with a
-        valid result was stopped (its folder keeps the files of that
-        result)."""
+    def _exports_allowed(self, step=None, res=None) -> bool:
+        """Whether the study that is ending (`res`: its result) writes its
+        export files: not when it was only read back, nor, when its folder
+        holds the files of a valid result of the step, unless it ends with
+        a result itself."""
         act = getattr(self, "_active", None)
         if not act:
             return True
         if act.get("mode") == "load":
             return False
-        if act.get("mode") == "resume" and "prev_state" in act:
-            state = getattr(act.get("run_bundle"), "state", None) or {}
-            return not (self._cancel_evt.is_set()
-                        or state.get("launch_error"))
-        return True
+        kept = act.get("prev_rec") if "prev_state" in act else \
+            act.get("kept_done")
+        if not kept or not same_folder(kept.get("folder") or ".",
+                                       act["folder"]):
+            return True
+        state = getattr(act.get("run_bundle"), "state", None) or {}
+        if self._cancel_evt.is_set() or state.get("launch_error"):
+            return False
+        try:
+            return self._outcome(step or act["step"], res, None, False,
+                                 state.get("analysis_failed"))[0] == "done"
+        except Exception:
+            return False
 
     @staticmethod
     def _outcome(step, res, error, cancelled, analysis_failed=None):
@@ -988,9 +1032,11 @@ class ModelStepsMixin:
             if val is None:
                 return False
             prefs, _wd, cpus = val
+        keep = {k: act[k] for k in ("prev_state", "prev_rec", "panel")
+                if k in act}
         return bool(self._start_ms(spec, act["folder"], prefs, cpus,
                                    mode="resume", then=act.get("then"),
-                                   extended=True))
+                                   extended=True, **keep))
 
     def _on_load_miss(self, act, miss):
         """Loading stopped on a run the folder does not have: either the
@@ -1102,7 +1148,7 @@ class ModelStepsMixin:
     def _domain_record_folder(self):
         """Folder of the step-2 study valid for this model, or None."""
         st, rec = self._step_state("domain")
-        if st != "done" or not rec.get("folder"):
+        if st not in ("done", "prereq") or not rec.get("folder"):
             return None
         f = Path(rec["folder"])
         return f if (f / "config.json").exists() else None
@@ -1232,7 +1278,7 @@ class ModelStepsMixin:
             mkey, skey = self._keys()
             st, rec = step_state(steps, step, mkey, skey)
             if st == "done":
-                if step in _MODEL_NAME and not values_match(
+                if step in _MODEL_NAME and not in_model(
                         step, self._model_values()[_MODEL_NAME[step]],
                         rec.get("value")):
                     self._apply_step_value(step, rec.get("value"))

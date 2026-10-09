@@ -71,9 +71,9 @@ from gui.core.remote_exec import (
     RemoteProcess, is_remote, launch_problems, submit_remote)
 from gui.results.reader import ResultsBundle
 from gui.sensitivity.study_specs import (
-    DIM_KEYS, ZOI_KEYS, grid_set_of_spec, ms_of, write_checks_config,
-    zoi_tuple)
-from gui.sensitivity.study_state import STEPS, values_match
+    CHECKS_CONFIG, DIM_KEYS, ZOI_KEYS, grid_set_of_spec, ms_of,
+    write_checks_config, zoi_tuple)
+from gui.sensitivity.study_state import STEPS, in_model
 from gui.tabs.model_steps import ModelStepsMixin
 from gui.widgets.collapsible import CollapsibleSection
 from gui.widgets.geometry_preview import GeometryPreview
@@ -1166,7 +1166,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 first = False
         # D* found by step 2 but not (yet) in the model.
         st, rec = self._step_state("domain")
-        if st == "done" and not values_match(
+        if st == "done" and not in_model(
                 "domain", self._model_values()["dims"], rec.get("value")):
             v = rec["value"]
             rect(euler_box(v[0], v[1], v[2], v[3]), edgecolor=_C_DSTAR,
@@ -1864,8 +1864,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         try:
             window = self.window()
             guards = self.guard_settings()
-            if self._float_or(self.le_ms_elem, None) is None:
-                self._freeze_plan_start()
             ms_values, elem = self.ms_settings()
         except ValueError as e:
             QMessageBox.warning(self, "Mass-scaling study settings", str(e))
@@ -2011,7 +2009,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("MASS-SCALING RESULT: %s | %d runs" % (why, res.n_runs))
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
-        if folder is not None and self._exports_allowed():
+        if folder is not None and self._exports_allowed("ms", res):
             from gui.sensitivity.study_export import write_ms_exports
             try:
                 paths = write_ms_exports(folder, res)
@@ -2225,7 +2223,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                                   res.n_runs))
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
-        if self._exports_allowed():
+        if self._exports_allowed("domain", res):
             self._write_domain_exports()
         self._refresh_convergence_view()
         ok = res.status == "converged"
@@ -2540,6 +2538,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # cfg: those of the checked point (h*, ms*), whatever the panel.
         base_cfg = self._study_base_cfg(spec, elem=h_star)
         if mode != "load":
+            # The folder may hold the settings of a valid result of the
+            # checks: kept, to be put back if this run gives no result.
+            try:
+                extra["checks_config_before"] = (
+                    Path(folder) / CHECKS_CONFIG).read_text(encoding="utf-8")
+            except OSError:
+                pass
             write_checks_config(folder, spec)
         run_bundle = self._begin_study("checks", spec, folder, prefs, cpus,
                                        mode, then, **extra)
@@ -2625,7 +2630,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         for c in res.checks:
             if c.details.get("action"):
                 self._log_ui("  ACTION (%s): %s" % (c.name, c.details["action"]))
-        if self._exports_allowed():
+        if self._exports_allowed("checks", res):
             self._write_domain_exports()
         self._refresh_convergence_view()
         self.lbl_status.setStyleSheet(
@@ -2656,7 +2661,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "Safeguards", str(e))
             return None
-        self._freeze_plan_start()
         return {
             "zoi": self._zoi_dict(self.zoi()),
             "window": list(window),
@@ -2782,7 +2786,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                          % (c.elem_size, self._fmt(c.cost.c_cpu_s, "%.0f s"),
                             c.cost.n_elem_euler, g or "no safeguard"))
         self._last_gci = (res, calls, tol, folder)
-        if folder is not None and self._exports_allowed():
+        if folder is not None and self._exports_allowed("mesh", res):
             from gui.sensitivity.study_export import write_gci_exports
             try:
                 paths = write_gci_exports(folder, res, calls, tol)
