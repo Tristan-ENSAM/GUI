@@ -135,6 +135,10 @@ class GeometryPreview(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cfg = None  # last config received, kept for external redraws
+        # A tab that draws its own overlays on this preview sets a callable
+        # here: the toolbar Home button then calls it instead of fitting the
+        # bare model (which would cut the overlays off).
+        self.fit_override = None
         self.picking_enabled: bool = False
         # Reference-image watermark (set from the Alignment tab). Drawn behind
         # the sketch, centred on the model origin at the alignment scale, so
@@ -209,6 +213,9 @@ class GeometryPreview(QWidget):
     def fit_view(self):
         """Recompute optimal axis limits for the current cfg and apply them.
         Called by the Home toolbar button and at the end of update_from_config."""
+        if callable(self.fit_override):
+            self.fit_override()
+            return
         if self._cfg is None:
             return
         xlim, ylim = self._compute_fit_limits(self._cfg)

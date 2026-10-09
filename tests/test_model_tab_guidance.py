@@ -50,7 +50,7 @@ def test_essential_inputs_stay_outside_the_advanced_sections(tab):
 
     for w in (*tab.le_zoi.values(), *tab._q_eps.values(), tab.le_ms_values,
               tab.le_gci_finest, tab.sp_gci_n, tab.btn_ms, tab.btn_mesh,
-              tab.btn_domain, tab.btn_checks, tab.btn_init):
+              tab.btn_domain, tab.btn_checks):
         assert not inside(w)
     for w in (tab.le_grid_step, tab.le_ms_elem, tab.le_gci_ratio,
               tab.le_gci_min, tab.sp_margin, *tab._max.values(),

@@ -12,11 +12,22 @@ from gui.core.model_config import ModelConfig
 from gui.tabs.optimization_tab import OptimizationTab
 
 
+@pytest.fixture(autouse=True)
+def _answer_first_choice(monkeypatch):
+    """Questions of the tab (steps out of order, resume) answer with their
+    first choice ("Run anyway", "Resume") instead of a modal box."""
+    monkeypatch.setattr(OptimizationTab, "_ask",
+                        lambda self, title, text, choices, default=None:
+                        choices[0][0])
+    monkeypatch.setattr(OptimizationTab, "_inform",
+                        lambda self, title, text: None)
+
+
 @pytest.fixture
 def tab(qapp, monkeypatch):
     t = OptimizationTab(ModelConfig())
     # Neutralise the Preferences/Abaqus path check; the input guards run first.
-    monkeypatch.setattr(t, "_validate_launch", lambda: ("prefs", "wd", 1))
+    monkeypatch.setattr(t, "_validate_launch", lambda *a: ("prefs", "wd", 1))
     return t
 
 
@@ -66,7 +77,7 @@ class TestRestructuredTab:
     def test_gci_requires_the_six_absolute_tolerances(self, tab, warnings,
                                                       monkeypatch):
         monkeypatch.setattr(tab, "_validate_launch",
-                            lambda: ({}, "wd", 1))
+                            lambda *a: ({}, "wd", 1))
         for le in tab._q_eps.values():
             le.setText("")
         tab._on_run_mesh_gci()
@@ -153,7 +164,7 @@ def launch(tab, monkeypatch, tmp_path):
     monkeypatch.setattr(ot, "DomainIndependenceWorker", _CaptureWorker)
     monkeypatch.setattr(ot, "MeshGciWorker", _CaptureWorker)
     monkeypatch.setattr(tab, "_validate_launch",
-                        lambda: (type("P", (), {"abaqus_cmd": "a",
+                        lambda *a: (type("P", (), {"abaqus_cmd": "a",
                                                 "abaqus_script": "s"})(),
                                  tmp_path, 4))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
@@ -317,7 +328,7 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
     tab._dom_spins["dom_step_elems"].setValue(4)
-    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
 
     def fake_make(prefs, run_dir, cpus, prefix):
@@ -354,7 +365,7 @@ def _analytic_tab(qapp, monkeypatch, tmp_path):
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
     tab._dom_spins["dom_step_elems"].setValue(4)
-    monkeypatch.setattr(tab, "_validate_launch", lambda: ("p", tmp_path, 2))
+    monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
 
     def fake_make(prefs, run_dir, cpus, prefix):
@@ -498,7 +509,8 @@ class TestMsStudyWiring:
     def test_defaults(self, tab):
         values, elem = tab.ms_settings()
         assert values == (250.0, 500.0, 1000.0, 2000.0, 4000.0)
-        assert elem == tab.cfg.elem_size
+        # blank: the coarsest mesh of the step-1 plan (4 meshes, ratio 2)
+        assert elem == pytest.approx(tab.cfg.elem_size * 2 ** 3)
 
     def test_busy_includes_the_ms_button(self, tab):
         tab._busy(True, "running")

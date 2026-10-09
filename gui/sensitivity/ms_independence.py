@@ -279,6 +279,10 @@ def run_ms_independence(
             status = "cancelled"
             break
         cur = simulate(ms_values[k])
+        if cancelled():
+            # A cancel during this run: its failure says nothing about ms.
+            status = "cancelled"
+            break
         (rec_a, s_a), (rec_b, s_b) = prev, cur
         info: Dict[str, float] = {}
         if s_a is None or s_b is None:

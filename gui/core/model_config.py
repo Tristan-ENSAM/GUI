@@ -501,6 +501,11 @@ class OptimizationCfg:
     # tested factors, increasing, and its element size ("" = the Mesh tab's).
     ms_values:      str  = "250, 500, 1000, 2000, 4000"
     ms_elem_size:   str  = ""
+    # What each sizing step found for this model (ms, mesh, domain,
+    # checks): one record per step, written when a study ends, so the tab
+    # can tell which steps are done for the current model and in which
+    # order. Format: gui.sensitivity.study_state.
+    steps:          dict = field(default_factory=dict)
 
 
 @dataclass

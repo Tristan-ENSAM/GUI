@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
         self.sensitivity_tab.set_model_settings_getter(
             self.optimization_tab.model_settings)
         self.sensitivity_tab.zoiProposed.connect(self.optimization_tab.set_zoi)
+        # "Use in model" / "Run all steps" write ms*, h* and D* into the cfg;
+        # the tabs that show them are reloaded here.
+        self.optimization_tab.set_model_refresher(self._reload_sized_model)
 
         # Two-level tabs: a top row of theme categories, each holding its
         # own row of sub-tabs (so the window shows several tab rows).
@@ -317,6 +320,18 @@ class MainWindow(QMainWindow):
                           "geometry tab")
         self._mark_dirty()
 
+    def _reload_sized_model(self, _step=None):
+        """The Model tab wrote a sizing result (mass scaling, element size or
+        Eulerian domain) into the cfg: show it in the Step, Mesh and
+        Geometry tabs, redraw what depends on it, mark the profile
+        modified."""
+        self.step_tab.apply_from_cfg()
+        self.mesh_tab.apply_from_cfg()
+        self.geometry_tab.apply_from_cfg()
+        self.mesh_tab.on_external_change()
+        self.bcs_tab.on_external_change()
+        self._mark_dirty()
+
     def _mark_dirty(self, *_):
         if not self._dirty:
             self._dirty = True
@@ -395,7 +410,25 @@ class MainWindow(QMainWindow):
             return True
         return False  # Cancel
 
+    def _model_study_running(self, title) -> bool:
+        """True (after telling the user) while a study of the Model tab
+        runs: its results are written into the current profile, so another
+        one cannot be opened meanwhile."""
+        try:
+            running = bool(self.optimization_tab.is_running())
+        except Exception:
+            running = False
+        if running:
+            QMessageBox.information(
+                self, title,
+                "A study of the Model tab (Optimization > Model) is running. "
+                "Its results go into the current profile: wait for it to end, "
+                "or cancel it, before opening another profile.")
+        return running
+
     def file_new(self):
+        if self._model_study_running("New profile"):
+            return
         if not self._confirm_discard_changes():
             return
         self.cfg = ModelConfig()
@@ -405,6 +438,8 @@ class MainWindow(QMainWindow):
         self._mark_clean()
 
     def file_open(self):
+        if self._model_study_running("Open profile"):
+            return
         if not self._confirm_discard_changes():
             return
         path_str, _ = QFileDialog.getOpenFileName(
@@ -496,13 +531,9 @@ class MainWindow(QMainWindow):
         # It has no apply_from_cfg(); refresh_from_model() rebuilds its Ref
         # values, and is called whenever it becomes the visible page.
         self.sensitivity_tab.cfg = self.cfg
-        # Optimization reads t1/rake/mu/ROI/elem straight from the cfg; rebind
-        # and refresh its displayed inputs.
+        # Optimization reads t1/rake/mu/ROI/elem straight from the cfg; it is
+        # rebound here and refreshed once the other tabs are reloaded.
         self.optimization_tab.cfg = self.cfg
-        try:
-            self.optimization_tab.refresh_inputs()
-        except Exception:
-            pass
         # Activate the loaded profile's unit system so every tab converts
         # through it (and the displayed values match the saved preference).
         units.set_active_system(self.cfg.units)
@@ -513,6 +544,13 @@ class MainWindow(QMainWindow):
         self.mesh_tab.apply_from_cfg()
         self.step_tab.apply_from_cfg()
         self.job_tab.apply_from_cfg()
+        # The Model tab: forget the study results of the previous profile,
+        # reload its panel and the state of its steps.
+        try:
+            self.optimization_tab.forget_results()
+            self.optimization_tab.refresh_inputs()
+        except Exception:
+            log_swallowed("refreshing the Model tab")
         # Ensure unit labels (not just values) reflect the loaded system.
         self.materials_tab.refresh_units()
         self.bcs_tab.refresh_units()
@@ -563,6 +601,26 @@ class MainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 self.sensitivity_tab.shutdown()
+            finally:
+                QApplication.restoreOverrideCursor()
+        # Same for a study of the Model tab (or 'Run all steps').
+        if self.optimization_tab.is_running():
+            from PySide6.QtWidgets import QMessageBox, QApplication
+            reply = QMessageBox.question(
+                self, "Model tab study running",
+                "A study of the Model tab is still running. Quitting now\n"
+                "stops it and terminates the current Abaqus job; its result\n"
+                "is not recorded. The finished runs stay in the study\n"
+                "folder: 'Open a study' reads them back or resumes it.\n\n"
+                "Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.optimization_tab.shutdown()
             finally:
                 QApplication.restoreOverrideCursor()
         event.accept()
