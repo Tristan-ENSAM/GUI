@@ -139,7 +139,7 @@ def csv_to_xlsx(csv_path, xlsx_path=None) -> Path:
         xlsx_path = csv_path.with_suffix(".xlsx")
     with open(csv_path, newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.reader(fh))
-    return write_xlsx(xlsx_path, rows, sheet=csv_path.stem)
+    return write_xlsx(xlsx_path, rows, sheet=Path(xlsx_path).stem)
 
 
 def excel_copy(csv_path) -> None:
