@@ -620,3 +620,125 @@ def test_checks_take_the_ms_value_before_ms_star(qapp):
     assert tab.ms_lower_for_checks() == 500.0
     tab.cfg.step.mass_scaling_factor = 1500.0
     assert tab.ms_lower_for_checks() is None
+
+
+# ---------------------------------------------------------------------------
+# Step 2 starting domain set by hand
+# ---------------------------------------------------------------------------
+def _manual_tab(tab):
+    tab.cfg.elem_size = 0.01
+    tab.cfg.euler_position.x0 = 0.0
+    tab.cfg.euler_position.y0 = 0.0
+    for k, v in (("xmin", "-0.1"), ("xmax", "0.05"), ("ymin", "-0.05"),
+                 ("ymax", "0.05")):
+        tab.le_zoi[k].setText(v)
+    tab._set_init_mode("manual")
+    for d, v in (("h_wp", "0.2"), ("h_void", "0.2"), ("l_wp", "0.2"),
+                 ("l_void", "0.2")):
+        tab._init_edit[d].setText(v)
+    return tab
+
+
+def test_manual_starting_domain_is_used_and_snapped(qapp):
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.core.model_config import ModelConfig
+    tab = _manual_tab(OptimizationTab(ModelConfig()))
+    d = tab.compute_initial_dims()
+    assert (d.h_wp, d.h_void, d.l_wp, d.l_void) == pytest.approx(
+        (0.2, 0.2, 0.2, 0.2))
+    tab._init_edit["l_void"].setText("0.155")          # 15.5 elements
+    assert tab.compute_initial_dims().l_void == pytest.approx(0.16)
+    # the margin is not required around the ZOI for a start set by hand
+    tab.sp_margin.setValue(5)
+    assert tab._initial_margin() == 0
+    assert not tab.sp_margin.isEnabled()
+    assert not tab._init_edit["h_wp"].isReadOnly()
+
+
+def test_manual_starting_domain_blank_raises(qapp):
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.core.model_config import ModelConfig
+    tab = _manual_tab(OptimizationTab(ModelConfig()))
+    tab._init_edit["h_wp"].setText("")
+    with pytest.raises(ValueError):
+        tab.compute_initial_dims()
+
+
+def test_zoi_mode_fields_are_read_only_and_keep_manual_values(qapp):
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.core.model_config import ModelConfig
+    tab = _manual_tab(OptimizationTab(ModelConfig()))
+    assert tab.cfg.optimization.initial_mode == "manual"
+    assert tab.cfg.optimization.initial_dims["l_wp"] == "0.2"
+    tab._set_init_mode("zoi")
+    tab._draw_preview()
+    assert tab._init_edit["l_wp"].isReadOnly()
+    assert tab._init_edit["l_wp"].text() == "0.1"       # ZOI, no margin
+    assert tab.cfg.optimization.initial_mode == "zoi"
+    assert tab.cfg.optimization.initial_dims["l_wp"] == "0.2"
+    tab._set_init_mode("manual")
+    assert tab._init_edit["l_wp"].text() == "0.2"
+
+
+def test_from_geometry_tab_copies_the_eulerian_domain(qapp):
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.core.model_config import ModelConfig
+    tab = OptimizationTab(ModelConfig())
+    g = tab.cfg.euler_geometry
+    g.discretize = False
+    g.h_wp, g.h_void, g.l_wp, g.l_void = 0.3, 0.25, 0.4, 0.35
+    tab._init_from_geometry()
+    assert tab.init_mode() == "manual"
+    assert {d: float(le.text()) for d, le in tab._init_edit.items()} == {
+        "h_wp": 0.3, "h_void": 0.25, "l_wp": 0.4, "l_void": 0.35}
+
+
+def test_manual_starting_domain_round_trips_through_the_profile(qapp):
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.core.model_config import ModelConfig
+    tab = _manual_tab(OptimizationTab(ModelConfig()))
+    cfg2 = ModelConfig.from_json_dict(tab.cfg.to_json_dict())
+    tab2 = OptimizationTab(cfg2)
+    assert tab2.init_mode() == "manual"
+    assert tab2._init_edit["h_void"].text() == "0.2"
+    assert tab2.compute_initial_dims().h_void == pytest.approx(0.2)
+
+
+def test_launch_uses_the_manual_starting_domain(launch, warnings):
+    tab = _manual_tab(launch)
+    _fill_thresholds(tab)
+    tab.sp_margin.setValue(3)
+    tab._on_run_domain_independence()
+    kw = _CaptureWorker.last
+    assert kw is not None, warnings
+    d = kw["initial_dims"]
+    assert (d.h_wp, d.h_void, d.l_wp, d.l_void) == pytest.approx(
+        (0.2, 0.2, 0.2, 0.2))
+    assert kw["margin_elems"] == 0
+    assert tab._pending_domain_spec["initial_mode"] == "manual"
+
+
+def test_launch_refuses_a_manual_start_without_the_zoi(launch, warnings):
+    tab = _manual_tab(launch)
+    _fill_thresholds(tab)
+    tab._init_edit["l_wp"].setText("0.05")      # ZOI xmin = -0.1
+    tab._on_run_domain_independence()
+    assert _CaptureWorker.last is None
+    assert any("ZOI goes beyond" in w for w in warnings)
+
+
+def test_opening_a_study_puts_back_a_manual_starting_domain(qapp):
+    tab = OptimizationTab(ModelConfig())
+    tab.sp_margin.setValue(2)
+    spec = {"initial_mode": "manual", "margin_elems": 0,
+            "initial_dims": {"h_wp": 0.3, "h_void": 0.2, "l_wp": 0.25,
+                             "l_void": 0.15}}
+    tab._restore_settings("domain", spec)
+    assert tab.init_mode() == "manual"
+    assert float(tab._init_edit["l_wp"].text()) == pytest.approx(0.25)
+    assert tab.sp_margin.value() == 2           # untouched by a manual start
+    snap = tab._panel_snapshot()
+    tab._set_init_mode("zoi")
+    tab._panel_restore(snap)
+    assert tab.init_mode() == "manual"
+    assert float(tab._init_edit["h_wp"].text()) == pytest.approx(0.3)

@@ -622,14 +622,18 @@ class ModelStepsMixin:
     def _panel_snapshot(self):
         spins = [self.sp_margin, self.sp_gci_n] + list(self._dom_spins.values())
         return ([(le, le.text()) for le in self._opt_line_edits()],
-                [(sp, int(sp.value())) for sp in spins])
+                [(sp, int(sp.value())) for sp in spins],
+                self.init_mode())
 
     def _panel_restore(self, snap):
         """Put the panel back as `snap` (from _panel_snapshot) had it."""
         if not snap:
             return
-        les, spins = snap
+        les, spins, mode = snap
         changed = False
+        if mode != self.init_mode():
+            self._set_init_mode(mode)
+            changed = True
         for le, text in les:
             if le.text() != text:
                 le.setText(text)
@@ -713,6 +717,15 @@ class ModelStepsMixin:
             else:
                 put(self.le_gci_min, minh, "smallest finest size")
         elif step == "domain":
+            mode = ("manual" if spec.get("initial_mode") == "manual"
+                    else "zoi")
+            if mode != self.init_mode():
+                self._set_init_mode(mode)
+                changed.append("starting domain")
+            if mode == "manual":
+                dims0 = spec.get("initial_dims") or {}
+                for d, le in self._init_edit.items():
+                    put(le, dims0.get(d), "starting %s" % d)
             ints = (("margin_elems", self.sp_margin, "margin"),
                     ("step_elems", self._dom_spins["dom_step_elems"],
                      "growth step"),
@@ -721,6 +734,8 @@ class ModelStepsMixin:
                     ("n_hold", self._dom_spins["dom_n_hold"], "passes"),
                     ("m_ratios", self._dom_spins["dom_m_ratios"], "m"))
             for key, sp, name in ints:
+                if key == "margin_elems" and mode == "manual":
+                    continue        # not used by a start set by hand
                 v = spec.get(key)
                 if v is not None and int(v) != int(sp.value()):
                     sp.setValue(int(v))

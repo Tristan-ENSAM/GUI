@@ -27,7 +27,8 @@ summary.json        selected model, Eq. (24) normalisation, Eq. (22)-(23)
 ==================  =======================================================
 
 Eq. (22)-(23): the reference cost C_initial is the cost of the STARTING
-domain of the study, i.e. its first run (ZOI + margin, decision D2-a)
+domain of the study, i.e. its first run (ZOI + margin, decision D2-a, or
+the starting domain set by hand)
 (decision D12 of 2026-10-02, revised the same day). summary.json gives it
 under "cost_eq22_23_paper" with C = C_CPU (Eq. 11, solver time), and keeps,
 for information, the same ratios by Eulerian element count and against the
@@ -347,8 +348,8 @@ def summary(study, t1: Optional[float], h_star: Optional[float],
                        for n, d in study.per_dimension.items()},
         "cost_eq22_23_paper": dict(
             gains("c_cpu_s")["vs_initial_domain"],
-            reference="starting domain of the study, ZOI + margin "
-                      "(decision D12)",
+            reference="starting domain of the study (first run; ZOI + "
+                      "margin or set by hand, decision D12)",
             reference_run=rec_init.index if rec_init else None,
             cost="C_CPU = N_CPU * t_wall,solver (Eq. 11)"),
         "cost_eq22_23": {"by_C_CPU": gains("c_cpu_s"),

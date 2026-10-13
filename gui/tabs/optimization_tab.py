@@ -15,7 +15,8 @@ distinct from the output ROI of the Geometry tab), then the final checks:
     GCI is reported, not used to select);
   * Eulerian-domain sizing by a sequential independence study
     (gui.sensitivity.domain_independence): each dimension grown by a
-    constant step from the initial domain = ZOI + margin, successive runs
+    constant step from the initial domain (ZOI + margin, or four values
+    set by hand), successive runs
     compared by the mean absolute difference (paper Eq. 5, 7) against
     ABSOLUTE tolerances eps_q, residual influence bounded by a geometric tail
     (fallback: successive criterion), run safeguards R_K, R_HG and outputs.
@@ -43,7 +44,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter,
-    QScrollArea, QFrame
+    QScrollArea, QFrame, QComboBox
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -58,7 +59,8 @@ from gui.core.model_config import OptimizationCfg as _OptimizationCfg
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
-from gui.sensitivity.domain_independence import initial_dims_from_zoi
+from gui.sensitivity.domain_independence import (
+    initial_dims_by_hand, initial_dims_from_zoi, zoi_inside)
 from gui.sensitivity.domain_independence_worker import DomainIndependenceWorker
 from gui.sensitivity.ms_independence import filter_guards, parse_ms_values
 from gui.sensitivity.ms_independence_worker import MsIndependenceWorker
@@ -551,25 +553,49 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dg.setHorizontalSpacing(8)
         dg.setVerticalSpacing(4)
         dv.addLayout(dg)
-        # initial domain (read-only), one row per dimension pair
-        self._init_lbl = {}
+        # Starting domain: ZOI + margin (computed, read-only) or set by
+        # hand; one row per dimension pair.
         dg.addWidget(QLabel("starting domain [mm]"), 0, 0)
-        for r, pair in enumerate([("l_wp", "l_void"), ("h_wp", "h_void")]):
+        self.cb_init_mode = QComboBox()
+        self.cb_init_mode.addItem("ZOI + margin", "zoi")
+        self.cb_init_mode.addItem("Set by hand", "manual")
+        self.cb_init_mode.setToolTip(
+            "Where the domain study starts.\n"
+            "ZOI + margin: the smallest domain holding the ZOI, plus the\n"
+            "margin of the advanced parameters (computed, read-only).\n"
+            "Set by hand: the four values typed here. They are rounded up\n"
+            "to whole elements and must hold the ZOI.")
+        dg.addWidget(self.cb_init_mode, 0, 1, 1, 2)
+        self.btn_init_geom = QPushButton("From the Geometry tab")
+        self.btn_init_geom.setToolTip(
+            "Copy the Eulerian domain of the Geometry tab into the four\n"
+            "starting values (switches to 'Set by hand').")
+        self.btn_init_geom.clicked.connect(self._init_from_geometry)
+        dg.addWidget(self.btn_init_geom, 0, 3, 1, 2)
+        self._init_edit = {}
+        for r, pair in enumerate([("l_wp", "l_void"), ("h_wp", "h_void")],
+                                 start=1):
             for c, d in enumerate(pair):
                 lab = QLabel(_DIM_LABELS[d])
                 lab.setToolTip(_DIM_TIPS[d])
                 dg.addWidget(lab, r, 1 + 2 * c)
-                il = QLabel("—"); il.setStyleSheet("color:#374151;")
-                self._init_lbl[d] = il
-                dg.addWidget(il, r, 2 + 2 * c)
+                le = num_edit(tip="Starting value of %s [mm]" % d)
+                self._init_edit[d] = le
+                dg.addWidget(le, r, 2 + 2 * c)
+        self._init_note = QLabel("")
+        self._init_note.setWordWrap(True)
+        self._init_note.setStyleSheet("color:#8a1f11;")
+        self._init_note.setVisible(False)
+        dg.addWidget(self._init_note, 3, 0, 1, 6)
         dg.setColumnStretch(5, 1)
         btn_row = QHBoxLayout()
         self.btn_domain = QPushButton("Run domain sizing (independence)")
         self.btn_domain.setToolTip(
             "Sequential independence study: each dimension grown by a constant\n"
-            "step from ZOI + margin (mesh and mass scaling held fixed), runs\n"
-            "compared by the mean absolute difference in the ZOI against the\n"
-            "absolute eps_q, residual influence bounded by a geometric tail.\n"
+            "step from the starting domain (mesh and mass scaling held\n"
+            "fixed), runs compared by the mean absolute difference in the\n"
+            "ZOI against the absolute eps_q, residual influence bounded by\n"
+            "a geometric tail.\n"
             "The domain diagonal only raises a warning.")
         self.btn_domain.clicked.connect(self._on_run_domain_independence)
         btn_row.addWidget(self.btn_domain)
@@ -577,7 +603,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dv.addLayout(btn_row)
         dv.addLayout(status_row("domain"))
         dv.addWidget(hint(
-            "Starts from the ZOI plus the margin (teal box of the preview) "
+            "Starts from the starting domain (teal box of the preview: the "
+            "ZOI plus the margin, or four values set by hand) "
             "and grows each side until the results in the ZOI stop changing "
             "beyond ε_q. Runs at ms* and h* (the element size of the Mesh "
             "tab). Result: D*, for the Geometry tab (Eulerian part)."))
@@ -780,6 +807,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self._max[_d].textChanged.connect(self._schedule_preview)
         self.le_grid_step.textChanged.connect(self._schedule_preview)
         self.sp_margin.valueChanged.connect(self._schedule_preview)
+        for _le in self._init_edit.values():
+            _le.textChanged.connect(self._schedule_preview)
+        self.cb_init_mode.currentIndexChanged.connect(self._on_init_mode)
 
         self._wire_opt_persistence()
         self.refresh_inputs()
@@ -818,18 +848,84 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return (float(self.cfg.euler_position.x0),
                 float(self.cfg.euler_position.y0))
 
+    def init_mode(self) -> str:
+        """'zoi' (starting domain = ZOI + margin) or 'manual' (set by hand)."""
+        return self.cb_init_mode.currentData() or "zoi"
+
     def compute_initial_dims(self) -> DomainDims:
-        """Initial Eulerian domain = the ZOI + margin (decision D2-a), mapped
-        to the domain dimensions (part rectangle (-l_wp, -h_wp) ->
-        (l_void, h_void), cel_model.py:291, translated by euler_position) and
-        snapped up to whole elements:
+        """Starting domain of the domain study (step 2), snapped up to
+        whole elements of the Mesh tab's size.
+
+        'zoi' mode (decision D2-a): the ZOI + margin, mapped to the domain
+        dimensions (part rectangle (-l_wp, -h_wp) -> (l_void, h_void),
+        cel_model.py:291, translated by euler_position):
             l_wp = -xmin, l_void = xmax, h_wp = -ymin, h_void = ymax
         in the domain's own frame, each + margin. A blank ZOI is the ROI, so
-        this reproduces the previous ROI-based value when no ZOI is set."""
+        this reproduces the previous ROI-based value when no ZOI is set.
+
+        'manual' mode: the four values typed in the tab. Raises ValueError
+        when one is blank or not a positive number."""
+        if self.init_mode() == "manual":
+            vals = {}
+            for d, le in self._init_edit.items():
+                v = self._float_or(le, None)
+                if v is None or not v > 0:
+                    raise ValueError(
+                        "Starting domain set by hand: %s must be a positive "
+                        "number [mm]." % d)
+                vals[d] = v
+            return initial_dims_by_hand(vals, float(self.cfg.elem_size))
+        return self._zoi_initial_dims()
+
+    def _zoi_initial_dims(self) -> DomainDims:
+        """The ZOI + margin starting domain, whatever the mode."""
         return initial_dims_from_zoi(
             self.zoi(), float(self.cfg.elem_size),
             margin_elems=int(self.sp_margin.value()),
             offset=self.euler_offset())
+
+    def _initial_margin(self) -> int:
+        """Margin the study requires around the ZOI: the margin spin box in
+        'zoi' mode, none for a starting domain set by hand."""
+        return int(self.sp_margin.value()) if self.init_mode() == "zoi" else 0
+
+    def _set_init_mode(self, mode):
+        i = self.cb_init_mode.findData(mode if mode == "manual" else "zoi")
+        if i >= 0 and i != self.cb_init_mode.currentIndex():
+            self.cb_init_mode.setCurrentIndex(i)
+        else:
+            self._apply_init_mode()
+
+    def _apply_init_mode(self):
+        manual = self.init_mode() == "manual"
+        for le in self._init_edit.values():
+            le.setReadOnly(not manual)
+            le.setStyleSheet("" if manual else "color:#374151;"
+                             "background:transparent;border:none;")
+        self.sp_margin.setEnabled(not manual)
+
+    def _on_init_mode(self, *_):
+        """'Set by hand' takes back the values last set by hand (kept in the
+        profile); with none, it starts from the values shown (ZOI + margin),
+        so only what changes needs typing."""
+        if self.init_mode() == "manual" and not self._loading:
+            kept = getattr(self.cfg.optimization, "initial_dims", {}) or {}
+            if any(str(kept.get(d, "")).strip() for d in self._init_edit):
+                for d, le in self._init_edit.items():
+                    le.setText(str(kept.get(d, "")))
+        self._apply_init_mode()
+        self._sync_opt_to_cfg()
+        self._schedule_preview()
+
+    def _init_from_geometry(self):
+        """Copy the Eulerian domain of the Geometry tab as the starting
+        domain set by hand."""
+        h_wp, h_void, l_wp, l_void = self.cfg.effective_euler_dims()
+        vals = {"h_wp": h_wp, "h_void": h_void, "l_wp": l_wp,
+                "l_void": l_void}
+        self._set_init_mode("manual")
+        for d, le in self._init_edit.items():
+            le.setText("%.6g" % float(vals[d]))
 
     # =====================================================================
     # UI actions
@@ -844,6 +940,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         les += list(self._q_eps.values())
         les += list(self._max.values())
         les += list(self._dom_texts.values())
+        les += list(self._init_edit.values())
         return les
 
     def _wire_opt_persistence(self):
@@ -893,6 +990,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.gci_n_meshes = int(self.sp_gci_n.value())
         o.caps = {d: le.text() for d, le in self._max.items()}
         o.margin_elems = int(self.sp_margin.value())
+        o.initial_mode = self.init_mode()
+        if o.initial_mode == "manual":
+            # In 'zoi' mode the fields only show the computed values: the
+            # values last set by hand are kept.
+            o.initial_dims = {d: le.text()
+                              for d, le in self._init_edit.items()}
         o.centroid_step = self.le_grid_step.text()
         for attr, sp in self._dom_spins.items():
             setattr(o, attr, int(sp.value()))
@@ -923,6 +1026,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             for d, le in self._max.items():
                 le.setText(str(o.caps.get(d, "")))
             self.sp_margin.setValue(int(o.margin_elems or 0))
+            mode = getattr(o, "initial_mode", "zoi")
+            self.cb_init_mode.setCurrentIndex(max(0, self.cb_init_mode.findData(
+                "manual" if mode == "manual" else "zoi")))
+            kept = getattr(o, "initial_dims", {}) or {}
+            for d, le in self._init_edit.items():
+                le.setText(str(kept.get(d, "")) if mode == "manual" else "")
+            self._apply_init_mode()
             self.le_grid_step.setText(str(o.centroid_step))
             for attr, sp in self._dom_spins.items():
                 sp.setValue(int(getattr(o, attr, getattr(
@@ -1118,17 +1228,37 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             return all(math.isclose(u, v, rel_tol=1e-9, abs_tol=1e-12)
                        for u, v in zip(a, b))
 
-        # Step-2 starting domain = ZOI + margin (also shown as numbers).
+        # Step-2 starting domain: ZOI + margin (its values shown in the
+        # read-only fields) or set by hand.
+        manual = self.init_mode() == "manual"
         di = None
+        note = ""
         try:
             di = self.compute_initial_dims()
-            for d in _DIM_ORDER:
-                self._init_lbl[d].setText("%.4g" % getattr(di, d))
-        except Exception:
-            for d in _DIM_ORDER:
-                self._init_lbl[d].setText("\u2014")
+        except Exception as e:
+            note = str(e) if manual else ""
+        if not manual:
+            for d, le in self._init_edit.items():
+                le.blockSignals(True)
+                le.setText("\u2014" if di is None
+                           else "%.4g" % getattr(di, d))
+                le.blockSignals(False)
         zoi = self.zoi()
         zoi_ok = zoi[1] > zoi[0] and zoi[3] > zoi[2]
+        if manual and di is not None:
+            typed = {d: self._float_or(le, None)
+                     for d, le in self._init_edit.items()}
+            snapped = [d for d in _DIM_ORDER if not math.isclose(
+                typed[d], getattr(di, d), rel_tol=1e-9, abs_tol=1e-12)]
+            if zoi_ok and not zoi_inside(di, zoi, 0.0, self.euler_offset()):
+                note = ("The ZOI goes beyond this starting domain: the "
+                        "domain study cannot start. Enlarge it.")
+            elif snapped:
+                note = ("Rounded up to whole elements (%.4g mm): %s." % (
+                    float(self.cfg.elem_size), ", ".join(
+                        "%s = %.4g" % (d, getattr(di, d)) for d in snapped)))
+        self._init_note.setText(note)
+        self._init_note.setVisible(bool(note))
         if zoi_ok:
             rect(zoi, edgecolor=_C_ZOI, lw=1.8, zorder=7,
                  label="ZOI (comparison zone)")
@@ -1140,6 +1270,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             rect(start, edgecolor=_C_START, lw=1.3, ls="--",
                  zorder=8 if on_zoi else 6,
                  label="Step 2 starting domain (= ZOI)" if on_zoi
+                 else "Step 2 starting domain (set by hand)" if manual
                  else "Step 2 starting domain (ZOI + margin)")
         # Largest size allowed: a box when the four caps are set, else one
         # line per cap that is set.
@@ -2041,14 +2172,27 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             window = self.window()
             guards = self.guard_settings()
             ds = self.domain_settings()
+            dims0 = self.compute_initial_dims()
         except ValueError as e:
             QMessageBox.warning(self, "Domain study settings", str(e))
             return None
-        dims0 = self.compute_initial_dims()
+        margin = self._initial_margin()
+        if not zoi_inside(dims0, self.zoi(),
+                          margin * float(self.cfg.elem_size),
+                          self.euler_offset()):
+            QMessageBox.warning(
+                self, "Starting domain",
+                "The ZOI goes beyond the starting domain set by hand "
+                "(h_wp=%.4g, h_void=%.4g, l_wp=%.4g, l_void=%.4g mm): the "
+                "domain study needs the ZOI inside it. Enlarge the starting "
+                "domain or reduce the ZOI."
+                % (dims0.h_wp, dims0.h_void, dims0.l_wp, dims0.l_void))
+            return None
         return {
             "zoi": self._zoi_dict(self.zoi()),
             "elem_size": float(self.cfg.elem_size),
-            "margin_elems": int(self.sp_margin.value()),
+            "margin_elems": margin,
+            "initial_mode": self.init_mode(),
             "euler_offset": list(self.euler_offset()),
             "grid_step": self.grid_step(),
             "grid_step_set": self._grid_step_set(),
@@ -2122,10 +2266,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("=" * 68)
         self._log_ui("DOMAIN SIZING BY SEQUENTIAL INDEPENDENCE (ZOI fixed)")
         self._log_ui("  ZOI  x[%.4g,%.4g] y[%.4g,%.4g]" % zoi)
-        self._log_ui("  initial = ZOI + %d elem: h_wp=%.4g h_void=%.4g "
+        self._log_ui("  initial = %s: h_wp=%.4g h_void=%.4g "
                      "l_wp=%.4g l_void=%.4g"
-                     % (margin, dims0.h_wp, dims0.h_void, dims0.l_wp,
-                        dims0.l_void))
+                     % ("set by hand" if spec.get("initial_mode") == "manual"
+                        else "ZOI + %d elem" % margin,
+                        dims0.h_wp, dims0.h_void, dims0.l_wp, dims0.l_void))
         self._log_ui("  mesh %.4g mm (held) | step %d elem | n_max %d | "
                      "n_hold %d | m %d | T [%.3g, %.3g]"
                      % (elem, ds["dom_step_elems"], ds["dom_n_max"],
@@ -2219,8 +2364,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "converged": "every dimension independent",
             "partial": "at least one dimension NOT converged (largest tested "
                        "value kept)",
-            "zoi_outside": "the ZOI is not inside the initial domain with the "
-                           "margin",
+            "zoi_outside": "the ZOI is not inside the starting domain (with "
+                           "the margin, for ZOI + margin)",
             "cancelled": "cancelled",
         }.get(res.status, res.status or "stopped")
         d = res.final
