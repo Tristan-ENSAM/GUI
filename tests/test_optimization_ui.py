@@ -730,7 +730,8 @@ def test_launch_refuses_a_manual_start_without_the_zoi(launch, warnings):
 def test_opening_a_study_puts_back_a_manual_starting_domain(qapp):
     tab = OptimizationTab(ModelConfig())
     tab.sp_margin.setValue(2)
-    spec = {"initial_mode": "manual", "margin_elems": 0,
+    spec = {"zoi": tab._zoi_dict(tab.zoi()), "initial_mode": "manual",
+            "margin_elems": 0,
             "initial_dims": {"h_wp": 0.3, "h_void": 0.2, "l_wp": 0.25,
                              "l_void": 0.15}}
     tab._restore_settings("domain", spec)
