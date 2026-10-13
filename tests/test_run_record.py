@@ -230,3 +230,15 @@ class TestRecordingRunner:
         rr = RecordingRunner(lambda cfg: None)
         assert rr(self._cfg(0.02)) is None
         assert rr.records[0].error == "no results bundle"
+
+
+def test_reported_guards_do_not_block():
+    from gui.sensitivity.run_record import (
+        REPORTED_GUARDS, blocking_ok, reported_above)
+    assert REPORTED_GUARDS == {"R_K", "R_HG", "filter", "reverb"}
+    g = {"outputs": (0.0, True), "R_K": (0.06, False),
+         "filter": (None, False)}
+    assert blocking_ok(True, g)
+    assert not blocking_ok(False, g)
+    assert not blocking_ok(True, dict(g, outputs=(1.0, False)))
+    assert reported_above(g) == ["R_K", "filter"]

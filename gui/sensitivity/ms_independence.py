@@ -55,9 +55,10 @@ Safeguards
 Injected `guard_fn(bundle) -> {name: (value, ok)}`, as in the domain study.
 The Optimization tab combines the run safeguards (outputs, R_K, R_HG over T)
 with the filter check and the reverberation check of gui.core.filter_check
-(see `filter_guards`): a factor whose filtered forces deviate from the
-offline Butterworth, or whose force band carries more than the reverberation
-tolerance, fails here even if E_max < 1.
+(see `filter_guards`). Only the job and the outputs block a run; R_K, R_HG,
+the filter check and the reverberation are reported only (decision of
+2026-10-13, gui.sensitivity.run_record.REPORTED_GUARDS): their effect, if
+any, shows in the quantities compared, and their values explain it.
 
 Pure host-side module (CPython 3.x): `run_bundle(cfg)` is injected and must
 return a ResultsBundle-like object or None.

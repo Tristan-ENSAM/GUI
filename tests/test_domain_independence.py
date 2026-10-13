@@ -349,8 +349,18 @@ class TestDriver:
         assert res.warnings
         assert len(res.per_dimension["l_wp"].comparisons) >= 3
 
+    def test_reported_guard_does_not_block(self):
+        bad = lambda b: {"R_K": (0.5, False), "reverb": (0.5, False),
+                         "R_HG": (0.5, False), "filter": (0.5, False)}
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+            thresholds={"Vx": 1e9}, step_elems=5, n_max=8, m_ratios=2,
+            order=("l_wp",), guard_fn=bad)
+        assert res.per_dimension["l_wp"].retained == pytest.approx(0.1)
+        assert all(r.guards_ok for r in res.runs)
+
     def test_guard_failure_blocks_candidate(self):
-        bad = lambda b: {"R_K": (0.5, abs(b.dims.l_wp - 0.1) > 1e-9)}
+        bad = lambda b: {"outputs": (1.0, abs(b.dims.l_wp - 0.1) > 1e-9)}
         res = run_domain_independence(
             _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
             thresholds={"Vx": 1e9}, step_elems=5, n_max=8, m_ratios=2,

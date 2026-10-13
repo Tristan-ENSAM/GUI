@@ -75,8 +75,10 @@ Metrics (paper Eq. 5 and Eq. 7)
 Safeguards
 ----------
 Safeguards are evaluated by an injected `guard_fn(bundle) -> {name: (value,
-ok)}` (energy ratios etc., lot L2). A run that produced no bundle is recorded
-as a failed "job" safeguard; the study continues. The domain-diagonal
+ok)}` (energy ratios etc., lot L2). Only the blocking ones enter
+`guards_ok`; R_K, R_HG, the filter and the reverberation are reported only
+(gui.sensitivity.run_record.REPORTED_GUARDS). A run that produced no bundle
+is recorded as a failed "job" safeguard; the study continues. The domain-diagonal
 ceiling is NOT a safeguard any more: diag/h > `diagonal_coeff` only raises a
 warning flag on the run (decision of 2026-10-01).
 
@@ -103,6 +105,7 @@ from gui.core.domain_sizing import DomainDims, diagonal
 from gui.sensitivity.zoi_sampling import (
     roi_grid, nearest_samples, window_mask)
 from gui.sensitivity.runner_core import eulerian_instance
+from gui.sensitivity.run_record import blocking_ok
 
 # Paper quantity label -> bundle element-field name.
 FIELD_QUANTITIES: Dict[str, str] = {"Vx": "V1", "Vy": "V2", "T": "TEMP",
@@ -459,7 +462,8 @@ class RunRecord:
 
     @property
     def guards_ok(self) -> bool:
-        return self.job_ok and all(ok for (_v, ok) in self.guards.values())
+        """Job finished and every blocking safeguard passed."""
+        return blocking_ok(self.job_ok, self.guards)
 
 
 @dataclass

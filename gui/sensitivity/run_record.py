@@ -21,6 +21,16 @@ Each run of a sizing study is checked against:
   that remove singular modes, such as hourglass control, per the Abaqus
   documentation quoted by Tristan).
 
+Blocking and reported safeguards (decision of 2026-10-13)
+---------------------------------------------------------
+The studies select on the quantities of interest only (E_max < 1). A run
+is blocked only when the comparison cannot be computed: the job did not
+finish or an ``outputs`` entry is missing. ``R_K``, ``R_HG`` and the
+``filter`` and ``reverb`` checks (gui.sensitivity.ms_independence) are
+REPORTED: their value and verdict against the threshold are kept and
+exported, to explain a deviation if one appears, but they never make a run
+fail (`REPORTED_GUARDS`, `blocking_ok`).
+
 Default thresholds:
 
 * G_HG,max = 0.05 - decision of the author (2026-10-02), modifiable; no
@@ -77,6 +87,22 @@ DEFAULT_RHG_MAX = 0.05     # author's decision, 2026-10-02
 
 # Guard result: (value or None when not evaluable, ok, reason)
 GuardValue = Tuple[Optional[float], bool]
+
+# Safeguards that are reported, never blocking (decision of 2026-10-13).
+REPORTED_GUARDS = frozenset({"R_K", "R_HG", "filter", "reverb"})
+
+
+def blocking_ok(job_ok: bool, guards: Dict[str, GuardValue]) -> bool:
+    """True when the job finished and every BLOCKING safeguard passed."""
+    return bool(job_ok) and all(ok for name, (_v, ok) in guards.items()
+                                if name not in REPORTED_GUARDS)
+
+
+def reported_above(guards: Dict[str, GuardValue]) -> list:
+    """Names of the reported safeguards beyond their threshold (or not
+    evaluable), sorted."""
+    return sorted(name for name, (_v, ok) in guards.items()
+                  if name in REPORTED_GUARDS and not ok)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +334,7 @@ class CallRecord:
 
     @property
     def guards_ok(self) -> bool:
-        return self.job_ok and all(ok for (_v, ok) in self.guards.values())
+        return blocking_ok(self.job_ok, self.guards)
 
 
 class RecordingRunner:

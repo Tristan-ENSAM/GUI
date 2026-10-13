@@ -149,9 +149,17 @@ class TestStudy:
         assert res.retained is None
         assert res.n_runs == 2
 
+    def test_reported_safeguards_never_break_the_chain(self):
+        def guard(bundle):
+            return {"R_K": (0.1, False), "R_HG": (0.1, False),
+                    "filter": (0.1, False), "reverb": (0.1, False)}
+        res = _study(0.001, guard_fn=guard)
+        assert res.status == "upper_end"
+        assert all(c.guards_ok for c in res.comparisons)
+
     def test_a_failed_safeguard_breaks_the_chain(self):
         def guard(bundle):
-            return {"reverb": (0.02, bundle.ms < 1000.0)}
+            return {"outputs": (1.0, bundle.ms < 1000.0)}
         res = _study(0.001, guard_fn=guard)
         assert res.retained == 500.0 and res.status == "converged"
         assert res.comparisons[-1].guards_ok is False
