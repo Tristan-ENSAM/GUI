@@ -505,8 +505,12 @@ class OptimizationCfg:
     rhg_max:        str  = "0.05"
     # Mass-scaling independence study (step 0, decision of 2026-10-07): the
     # tested factors, increasing, and its element size ("" = the Mesh tab's).
-    ms_values:      str  = "250, 500, 1000, 2000, 4000"
+    # Reference of the comparisons (2026-10-13): "first" compares every run
+    # with the first value (ms = 1: the model without mass scaling),
+    # "previous" compares each run with the one before it.
+    ms_values:      str  = "1, 250, 500, 1000, 2000, 4000"
     ms_elem_size:   str  = ""
+    ms_reference:   str  = "first"
     # What each sizing step found for this model (ms, mesh, domain,
     # checks): one record per step, written when a study ends, so the tab
     # can tell which steps are done for the current model and in which

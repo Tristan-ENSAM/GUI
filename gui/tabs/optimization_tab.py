@@ -455,14 +455,27 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.le_ms_values = QLineEdit(OptimizationCfgDefaults.ms_values)
         self.le_ms_values.setToolTip(
             "Mass-scaling factors to test, strictly increasing, separated by\n"
-            "commas or spaces. Default 250 to 4000, factor 2 between values.\n"
+            "commas or spaces. Default 1 (no mass scaling, the reference run)\n"
+            "then 250 to 4000, factor 2 between values.\n"
             "If every comparison passes, the study adds values by doubling\n"
             "the last one (up to 5 more) until a comparison fails.")
         sg.addWidget(self.le_ms_values, 0, 1)
+        sg.addWidget(QLabel("compare each run with"), 1, 0)
+        self.cb_ms_reference = QComboBox()
+        self.cb_ms_reference.addItem("the first value (reference run)",
+                                     "first")
+        self.cb_ms_reference.addItem("the previous value", "previous")
+        self.cb_ms_reference.setToolTip(
+            "First value: every run is compared with the run of the first ms\n"
+            "of the list (with 1 first: the model without mass scaling, the\n"
+            "most expensive run of the study). Previous value: each run is\n"
+            "compared with the one before it (no expensive reference run).\n"
+            "Both stop at the first failed comparison.")
+        sg.addWidget(self.cb_ms_reference, 1, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
-            "compares each run with the previous one (E_max with the absolute\n"
+            "compares each run with the reference chosen on the left (E_max with the absolute\n"
             "eps_q of the common settings). Safeguards: outputs, R_K, R_HG, filter check and\n"
             "reverberation check. Keeps the largest ms reached by an unbroken\n"
             "chain of successes; stops at the first failure. Finished runs of\n"
@@ -474,7 +487,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         sv.addWidget(hint(
             "Finds ms*, the largest factor that does not change the results "
             "beyond ε_q (larger ms = faster runs). Runs on the coarsest mesh "
-            "of step 1 and the Eulerian domain of the Geometry tab. Before: "
+            "of step 1 and the Eulerian domain of the Geometry tab. With 1 as "
+            "first value and the first value as reference, every ms is "
+            "compared with the model without mass scaling. Before: "
             "enable the output filter (Step tab). Result: ms*, for the Step "
             "tab."))
         sec = advanced("ms", lambda: [(self.le_ms_elem, "")])
@@ -983,6 +998,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         for le in self._opt_line_edits():
             le.textChanged.connect(self._sync_opt_to_cfg)
         self.sp_margin.valueChanged.connect(self._sync_opt_to_cfg)
+        self.cb_ms_reference.currentIndexChanged.connect(
+            self._sync_opt_to_cfg)
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
         for sp in self._dom_spins.values():
             sp.valueChanged.connect(self._sync_opt_to_cfg)
@@ -1039,6 +1056,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             setattr(o, attr, le.text())
         o.ms_values = self.le_ms_values.text()
         o.ms_elem_size = self.le_ms_elem.text()
+        o.ms_reference = self.ms_reference()
         self.changed.emit()
         self._refresh_step_status()
 
@@ -1079,6 +1097,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self.le_ms_values.setText(str(getattr(
                 o, "ms_values", OptimizationCfgDefaults.ms_values)))
             self.le_ms_elem.setText(str(getattr(o, "ms_elem_size", "")))
+            self.set_ms_reference(getattr(
+                o, "ms_reference", OptimizationCfgDefaults.ms_reference))
         finally:
             self._loading = False
 
@@ -1995,6 +2015,16 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             raise ValueError("the element size of the ms study must be > 0")
         return values, float(elem)
 
+    def ms_reference(self) -> str:
+        """"first" or "previous": what each ms run is compared with."""
+        return self.cb_ms_reference.currentData() or "first"
+
+    def set_ms_reference(self, ref) -> None:
+        i = self.cb_ms_reference.findData(
+            "previous" if ref == "previous" else "first")
+        if i >= 0 and i != self.cb_ms_reference.currentIndex():
+            self.cb_ms_reference.setCurrentIndex(i)
+
     def _study_base_cfg(self, spec, elem=None):
         """Config of a study's runs: the current model with what the study
         was started with (mass scaling, filter verification, window T of
@@ -2049,6 +2079,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return {
             "zoi": self._zoi_dict(self.zoi()),
             "elem_size": elem, "ms_values": list(ms_values),
+            "reference": self.ms_reference(),
             "grid_step": self.grid_step(),
             "grid_step_set": self._grid_step_set(),
             "thresholds_abs": self.thresholds(),
@@ -2073,6 +2104,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                              for k in DIM_KEYS})
         elem = float(spec["elem_size"])
         ms_values = tuple(float(v) for v in spec["ms_values"])
+        # A study started before the reference choice compared successive
+        # values.
+        reference = spec.get("reference") or "previous"
         thr = {k: float(v) for k, v in spec["thresholds_abs"].items()}
         window = tuple(float(v) for v in spec["window"])
         grid = float(spec["grid_step"])
@@ -2114,6 +2148,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                      % (", ".join("%g" % v for v in ms_values), elem,
                         dims.h_wp, dims.h_void, dims.l_wp, dims.l_void,
                         window[0], window[1]))
+        self._log_ui("  each run compared with %s"
+                     % ("the first value (ms = %g, reference run)"
+                        % ms_values[0] if reference == "first"
+                        else "the previous value"))
         self._log_ui("  eps_q: " + "  ".join("%s=%.4g" % kv
                                               for kv in sorted(thr.items())))
         self._log_ui("  safeguards: R_K < %.4g, R_HG < %.4g, outputs, filter "
@@ -2126,7 +2164,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             domain_dims=dims, grid_step=grid, elem_size=elem,
             thresholds=thr, ms_values=ms_values, window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
-            guard_fn=guard_fn, cost_fn=cost_fn)
+            guard_fn=guard_fn, cost_fn=cost_fn, reference=reference)
         self._ms_worker.progress.connect(self._on_ms_progress)
         self._ms_worker.finished_ok.connect(self._on_ms_done)
         self._ms_worker.failed.connect(self._on_fail)
@@ -2172,7 +2210,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "upper_end": "every comparison passed: ms = %s is the LARGEST "
                          "TESTED value",
             "below_range": "the first comparison failed (%s): start the "
-                           "sequence lower",
+                           "sequence lower (or, with the first value as "
+                           "reference, bring the second value closer to it)",
             "cancelled": "cancelled (ms reached: %s)",
         }.get(res.status, res.status + " (%s)")
         why = why % ("n/a" if res.retained is None else "%g" % res.retained)

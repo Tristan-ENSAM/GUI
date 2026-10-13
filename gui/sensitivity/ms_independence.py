@@ -15,18 +15,23 @@ Algorithm
 ---------
 The mesh and the domain are held fixed (inputs of this study). The factors
 ms_0 < ms_1 < ... < ms_n are run in increasing order and each run S(ms_k) is
-compared with the previous one S(ms_(k-1)) by the same metrics as the domain
-study (Eq. 5 for the fields, Eq. 7 for the forces, E_max = max_q E_q/eps_q,
+compared, depending on `reference`, either with the first run S(ms_0)
+("first": ms_0 is the reference, e.g. ms_0 = 1, the model without mass
+scaling) or with the previous run S(ms_(k-1)) ("previous"), by the same
+metrics as the domain study (Eq. 5 for the fields, Eq. 7 for the forces, E_max = max_q E_q/eps_q,
 gui.sensitivity.domain_independence). Comparison k succeeds when E_max < 1
 AND both runs pass every safeguard. The sequence stops at the first failed
 comparison and the retained factor is the last ms_k reached by an unbroken
 chain of successes:
 
+Both modes use the same stop rule:
+
 * comparison k fails, k >= 2 -> ms* = ms_(k-1)        status "converged"
 * every comparison succeeds  -> ms* = ms_n            status "upper_end"
   (the largest TESTED value; a larger one was not tried)
 * comparison 1 fails         -> ms* = None            status "below_range"
-  (independence not shown at ms_1: the sequence must start lower)
+  (independence not shown at ms_1: the sequence must start lower, or,
+  in "first" mode, ms_1 must be closer to the reference)
 * cancelled                  -> ms* as reached so far status "cancelled"
 
 Time alignment (why the domain study's exact rule is relaxed here)
@@ -74,6 +79,10 @@ from gui.sensitivity.domain_independence import (
 # Default sequence (decision of 2026-10-07): factor 2 between values, around
 # the ms = 1000 used so far.
 DEFAULT_MS_VALUES = (250.0, 500.0, 1000.0, 2000.0, 4000.0)
+
+# What each run is compared with: the first value of the sequence (the
+# reference run) or the previous value.
+MS_REFERENCES = ("first", "previous")
 
 
 def parse_ms_values(text: str) -> Tuple[float, ...]:
@@ -161,7 +170,8 @@ def align_samples(sa: ZoiSample, sb: ZoiSample
 
 @dataclass
 class MsComparison:
-    """Comparison k: S(ms_k) against S(ms_(k-1))."""
+    """Comparison k: S(ms_k) against S(ms_0) ("first" reference) or
+    S(ms_(k-1)) ("previous"); ms_from is the one compared with."""
     k: int
     ms_from: float
     ms_to: float
@@ -209,8 +219,8 @@ def run_ms_independence(
         guard_fn: Optional[Callable] = None,
         cost_fn: Optional[Callable] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
-        progress_cb: Optional[Callable[[dict], None]] = None
-        ) -> MsStudyResult:
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        reference: str = "previous") -> MsStudyResult:
     """Run the ms sequence and retain the largest independent factor.
 
     run_bundle(cfg) -> ResultsBundle | None. Each config passed is a deep
@@ -218,7 +228,9 @@ def run_ms_independence(
         set; `base_cfg` itself is never modified.
     thresholds : absolute tolerances eps_q per quantity label (same as the
         domain study). Only thresholded quantities enter E_max.
-    cost_fn(bundle_or_None, dims, host_wall_s) -> CostRecord (optional)."""
+    cost_fn(bundle_or_None, dims, host_wall_s) -> CostRecord (optional).
+    reference : "first" compares every run with the run of ms_values[0];
+        "previous" compares each run with the one before it."""
     ms_values = [float(v) for v in ms_values]
     if len(ms_values) < 2:
         raise ValueError("at least two ms values are needed")
@@ -226,6 +238,8 @@ def run_ms_independence(
         raise ValueError("the ms values must be strictly increasing")
     if any(v < 1.0 for v in ms_values):
         raise ValueError("every ms value must be >= 1")
+    if reference not in MS_REFERENCES:
+        raise ValueError("reference must be one of %s" % (MS_REFERENCES,))
     if elem_size <= 0 or grid_step <= 0:
         raise ValueError("elem_size and grid_step must be > 0")
     thr = {q: float(v) for q, v in thresholds.items()
@@ -247,6 +261,7 @@ def run_ms_independence(
         "zoi": tuple(float(v) for v in zoi), "grid_step": float(grid_step),
         "elem_size": elem, "thresholds": dict(thr), "window": tuple(window),
         "evf_threshold": float(evf_threshold), "ms_values": list(ms_values),
+        "reference": reference,
         "domain_dims": {"h_wp": float(domain_dims.h_wp),
                         "h_void": float(domain_dims.h_void),
                         "l_wp": float(domain_dims.l_wp),
@@ -273,6 +288,7 @@ def run_ms_independence(
         emit({"phase": "done", "result": result, "n_runs": 0})
         return result
     prev = simulate(ms_values[0])
+    i_prev = 0
     status = "upper_end"
     for k in range(1, len(ms_values)):
         if cancelled():
@@ -297,7 +313,7 @@ def run_ms_independence(
         em, qc = e_max(errs, thr)
         pair_ok = rec_a.guards_ok and rec_b.guards_ok
         success = bool(math.isfinite(em) and em < 1.0 and pair_ok)
-        comp = MsComparison(k=k, ms_from=ms_values[k - 1],
+        comp = MsComparison(k=k, ms_from=ms_values[i_prev],
                             ms_to=ms_values[k], errors=errs, e_max=em,
                             q_crit=qc, guards_ok=pair_ok, success=success,
                             run_from=rec_a.index, run_to=rec_b.index,
@@ -311,7 +327,8 @@ def run_ms_independence(
             status = "converged" if k >= 2 else "below_range"
             break
         result.retained = ms_values[k]
-        prev = cur
+        if reference == "previous":
+            prev, i_prev = cur, k
     result.status = status
     emit({"phase": "done", "result": result, "n_runs": len(result.runs)})
     return result

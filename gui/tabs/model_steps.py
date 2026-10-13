@@ -694,6 +694,10 @@ class ModelStepsMixin:
                     same(a, b) for a, b in zip(vals, cur_vals))):
                 self.le_ms_values.setText(", ".join("%g" % v for v in vals))
                 changed.append("ms values")
+            ref = spec.get("reference") or "previous"
+            if ref != self.ms_reference():
+                self.set_ms_reference(ref)
+                changed.append("ms comparison reference")
             try:
                 cur_elem = self.ms_settings()[1]
             except ValueError:
@@ -980,7 +984,9 @@ class ModelStepsMixin:
                         "values" % values[-1], {"values": values})
             if res.status == "below_range":
                 return ("failed", None, "the first comparison already "
-                        "failed: start the ms values lower", {})
+                        "failed: start the ms values lower (or, with the "
+                        "first value as reference, bring the second value "
+                        "closer to it)", {})
             return "interrupted", None, "cancelled", {}
         if step == "mesh":
             if res.stopped_by == "cancelled" or cancelled:

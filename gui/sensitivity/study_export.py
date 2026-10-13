@@ -19,7 +19,8 @@ gci_meshes.csv      per-mesh scalars and cost of a GCI study (Table 8)
 checks.csv          interaction checks (Table 10)
 ms_runs.csv         every run of the mass-scaling study: ms, cost,
                     safeguards incl. filter and reverberation (Fig. 8)
-ms_comparisons.csv  successive ms comparisons: E_q, E_q/eps_q, E_max,
+ms_comparisons.csv  ms comparisons (each run vs the reference run or the
+                    previous one, ms_from): E_q, E_q/eps_q, E_max,
                     q_crit, decision (Table 7)
 ms_summary.json     retained ms, status, settings of the ms study
 summary.json        selected model, Eq. (24) normalisation, Eq. (22)-(23)
@@ -450,7 +451,8 @@ def ms_run_rows(ms_result) -> List[Dict[str, object]]:
 
 def ms_comparison_rows(ms_result, quantities: Sequence[str] = ALL_QUANTITIES
                        ) -> List[Dict[str, object]]:
-    """One row per successive comparison S(ms_k) vs S(ms_(k-1)) (Table 7)."""
+    """One row per comparison S(ms_k) vs S(ms_from) (Table 7); ms_from is
+    the first value (reference run) or ms_(k-1), see settings.reference."""
     thr = ms_result.settings.get("thresholds", {})
     rows = []
     for c in ms_result.comparisons:

@@ -141,8 +141,12 @@ class TestDomainStudyPersistence:
 
 def test_ms_study_settings_round_trip(qapp):
     cfg = ModelConfig()
-    assert cfg.optimization.ms_values == "250, 500, 1000, 2000, 4000"
+    assert cfg.optimization.ms_values == "1, 250, 500, 1000, 2000, 4000"
+    assert cfg.optimization.ms_reference == "first"
     tab = OptimizationTab(cfg)
+    assert tab.ms_reference() == "first"
+    tab.set_ms_reference("previous")
+    assert cfg.optimization.ms_reference == "previous"
     tab.le_ms_values.setText("500, 1000")
     tab.le_ms_elem.setText("0.004")
     assert (cfg.optimization.ms_values, cfg.optimization.ms_elem_size) == \
@@ -151,3 +155,4 @@ def test_ms_study_settings_round_trip(qapp):
     tab2 = OptimizationTab(cfg2)
     assert tab2.le_ms_values.text() == "500, 1000"
     assert tab2.le_ms_elem.text() == "0.004"
+    assert tab2.ms_reference() == "previous"
