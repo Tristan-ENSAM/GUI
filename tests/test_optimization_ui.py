@@ -265,7 +265,7 @@ class TestDomainIndependenceWiring:
                                     runs=[rec], status="partial",
                                     warnings=["diag"]))
         text = tab.log.toPlainText()
-        assert "R_HG=n/a FAIL" in text and "diag/h=120.0" in text
+        assert "R_HG=n/a (not evaluable, reported)" in text and "diag/h=120.0" in text
         assert "E_max=0.5 (Vx)" in text and "retained 0.2" in text
         assert "NOT converged" in text
         assert tab._last_domain_result is not None

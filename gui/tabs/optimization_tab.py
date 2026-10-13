@@ -2180,7 +2180,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         phase = ev.get("phase")
         if phase == "run":
             r = ev["record"]
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok, v))
                           for k, (v, ok) in sorted(r.guards.items()))
             cpu = self._fmt_cost(r.cost)
             self._log_ui("[run %d] ms=%g | %s | %s | C_CPU=%s"
@@ -2395,13 +2395,16 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return True
 
     @staticmethod
-    def _guard_flag(name, ok):
+    def _guard_flag(name, ok, value=0.0):
         """'' when passed, ' FAIL' for a blocking safeguard, ' (above
-        limit, reported)' for a reported one."""
+        limit, reported)' or ' (not evaluable, reported)' for a reported
+        one."""
         if ok:
             return ""
-        return " (above limit, reported)" if name in REPORTED_GUARDS \
-            else " FAIL"
+        if name not in REPORTED_GUARDS:
+            return " FAIL"
+        return (" (not evaluable, reported)" if value is None
+                else " (above limit, reported)")
 
     @staticmethod
     def _fmt(v, fmt="%.4g"):
@@ -2426,7 +2429,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if phase == "run":
             r = ev["record"]
             d = r.dims
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok, v))
                           for k, (v, ok) in sorted(r.guards.items()))
             c = r.cost
             cpu = self._fmt_cost(c)
@@ -3041,7 +3044,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                                         (None, {}, None))
         calls = list(getattr(recorder, "records", []) or [])
         for c in calls:
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok, v))
                           for k, (v, ok) in sorted(c.guards.items()))
             self._log_ui("  h=%.4g | C_CPU=%s | N_elem=%s | %s"
                          % (c.elem_size, self._fmt_cost(c.cost),
