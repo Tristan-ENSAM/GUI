@@ -192,6 +192,17 @@ def initial_dims_from_zoi(zoi: Sequence[float], elem_size: float,
                       l_void=_snap_up(zx1 + m, elem_size))
 
 
+def initial_dims_by_hand(values: Dict[str, float], elem_size: float
+                         ) -> DomainDims:
+    """Initial domain typed by the user (h_wp, h_void, l_wp, l_void in mm),
+    each snapped up to a whole number of elements (at least one), like the
+    ZOI + margin start: the study grows and caches whole elements."""
+    if elem_size <= 0:
+        raise ValueError("elem_size must be > 0")
+    return DomainDims(**{n: _snap_up(float(values[n]), elem_size)
+                         for n in DIMENSIONS})
+
+
 def _with(dims: DomainDims, name: str, value: float) -> DomainDims:
     d = {n: float(getattr(dims, n)) for n in DIMENSIONS}
     d[name] = float(value)

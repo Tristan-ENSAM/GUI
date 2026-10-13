@@ -69,8 +69,9 @@ from gui.sensitivity.ms_independence import align_samples, with_mass_scaling
 # Action attached to a failed combined-domain check (decision D11-a).
 REDO_DOMAIN_ACTION = (
     "redo the domain study (step 2) with other settings (the same eps_q "
-    "apply): an identical rerun returns the same D*, so change the margin, "
-    "the growth step or 'passes in a row' (Advanced parameters)")
+    "apply): an identical rerun returns the same D*, so change the starting "
+    "domain (or its margin), the growth step or 'passes in a row' (Advanced "
+    "parameters)")
 
 CHECK_PURPOSES = {
     "ms_x_mesh": "Mass-scaling factor against its analytic filter-ratio "

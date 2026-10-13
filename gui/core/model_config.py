@@ -479,6 +479,12 @@ class OptimizationCfg:
     gci_n_meshes:   int  = 4
     caps:           dict = field(default_factory=dict)
     margin_elems:   int  = 0
+    # Starting domain of the domain study (step 2): "zoi" = the ZOI + the
+    # margin, computed; "manual" = the four values of initial_dims [mm]
+    # (raw widget strings, snapped up to whole elements when used).
+    initial_mode:   str  = "zoi"
+    initial_dims:   dict = field(default_factory=lambda: {
+        "h_wp": "", "h_void": "", "l_wp": "", "l_void": ""})
     centroid_step:  str  = ""
     # Domain independence study (correction report, Part B, T1-T5; defaults
     # decided by the author on 2026-10-02, all modifiable). criterion_rmse
