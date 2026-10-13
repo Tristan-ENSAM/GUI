@@ -1238,9 +1238,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         from matplotlib.patches import Rectangle
         # The base drawing, named for this tab; the tool reference point
         # (where the BCs apply) is not needed here.
-        names = {"Eulerian domain": "Eulerian domain (Geometry tab)",
+        names = {"Eulerian domain": "Domain",
                  "Workpiece (reference)": "Workpiece",
-                 "ROI / bbox": "ROI (results written here)"}
+                 "ROI / bbox": "ROI"}
         for art in list(ax.patches) + list(ax.lines):
             lab = str(art.get_label())
             if lab in names:
@@ -1300,7 +1300,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._init_note.setVisible(bool(note))
         if zoi_ok:
             rect(zoi, edgecolor=_C_ZOI, lw=1.8, zorder=7,
-                 label="ZOI (comparison zone)")
+                 label="ZOI")
             self._draw_sampling_points(ax, zoi)
         if di is not None:
             start = euler_box(di.h_wp, di.h_void, di.l_wp, di.l_void)
@@ -1308,13 +1308,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             on_zoi = zoi_ok and same_box(start, zoi)
             rect(start, edgecolor=_C_START, lw=1.3, ls="--",
                  zorder=8 if on_zoi else 6,
-                 label="Step 2 starting domain (= ZOI)" if on_zoi
-                 else "Step 2 starting domain (set by hand)" if manual
-                 else "Step 2 starting domain (ZOI + margin + nose)")
+                 label="Start domain = ZOI" if on_zoi
+                 else "Start domain")
         nose = self.tool_nose_box()
         if nose is not None:
             rect(nose, edgecolor=_C_NOSE, lw=1.2, ls=":", zorder=9,
-                 label="Tool nose (inside the starting domain)")
+                 label="Tool nose")
         # Largest size allowed: a box when the four caps are set, else one
         # line per cap that is set.
         cp = self.caps()
@@ -1322,12 +1321,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             rect(euler_box(cp["h_wp"], cp["h_void"], cp["l_wp"],
                            cp["l_void"]),
                  edgecolor=_C_CAP, lw=1.3, ls="-.", zorder=5,
-                 label="Largest size allowed (step 2)")
+                 label="Max size")
         elif cp:
             first = True
             for d, v in cp.items():
                 kw = dict(color=_C_CAP, lw=1.2, ls="-.", zorder=5,
-                          label="Largest size allowed (step 2)"
+                          label="Max size"
                           if first else "_nolegend_")
                 if d in ("l_wp", "l_void"):
                     x = -v + ex0 if d == "l_wp" else v + ex0
@@ -1345,7 +1344,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             v = rec["value"]
             rect(euler_box(v[0], v[1], v[2], v[3]), edgecolor=_C_DSTAR,
                  lw=1.8, ls=":", zorder=6,
-                 label="D* found by step 2 (not in the model yet)")
+                 label="D* (not in model)")
         # What would make a study fail or sample nothing.
         warn = []
         roi = inp["roi"]
@@ -1429,7 +1428,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         n_est = (fx + 1.0) * (fy + 1.0)
         if n_est > _MAX_GRID_POINTS:
             ax.plot([], [], ls="none", marker=".", color=_C_ZOI,
-                    label="ZOI sampling points: %.3g (not drawn)" % n_est)
+                    label="ZOI points: %.3g (hidden)" % n_est)
             return
         nx = int(math.floor(fx + 1e-9)) + 1
         ny = int(math.floor(fy + 1e-9)) + 1
@@ -1438,9 +1437,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         xs = zoi[0] + step * np.arange(0, nx, k)
         ys = zoi[2] + step * np.arange(0, ny, k)
         XX, YY = np.meshgrid(xs, ys)
-        label = ("ZOI sampling points (%d)" % n if k == 1 else
-                 "ZOI sampling points (%d, 1 in %d per direction shown)"
-                 % (n, k))
+        label = ("ZOI points (%d)" % n if k == 1 else
+                 "ZOI points (%d, 1/%d shown)" % (n, k))
         ax.scatter(XX.ravel(), YY.ravel(), s=3, c=_C_ZOI, alpha=0.5,
                    linewidths=0, zorder=7, label=label)
 
