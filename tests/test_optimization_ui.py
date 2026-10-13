@@ -514,7 +514,8 @@ class TestMsStudyWiring:
 
     def test_defaults(self, tab):
         values, elem = tab.ms_settings()
-        assert values == (250.0, 500.0, 1000.0, 2000.0, 4000.0)
+        assert values == (1.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0)
+        assert tab.ms_reference() == "first"
         # blank: the coarsest mesh of the step-1 plan (4 meshes, ratio 2)
         assert elem == pytest.approx(tab.cfg.elem_size * 2 ** 3)
 

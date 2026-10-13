@@ -192,6 +192,49 @@ class TestStudy:
             _study(0.001, thresholds={})
 
 
+class TestReference:
+    _VALUES = (1, 250, 500, 1000, 2000, 4000)
+
+    def test_every_run_is_compared_with_the_first(self):
+        # E_T = 0.012 * (ms_k - 1): 2.99 K, 5.99 K pass, 11.99 K fails.
+        res = _study(0.012, ms_values=self._VALUES, reference="first")
+        assert res.status == "converged" and res.retained == 500.0
+        assert [c.ms_from for c in res.comparisons] == [1.0, 1.0, 1.0]
+        assert [c.run_from for c in res.comparisons] == [0, 0, 0]
+        assert res.comparisons[-1].e_max == pytest.approx(1.199, abs=1e-3)
+        assert res.settings["reference"] == "first"
+
+    def test_previous_value_compares_successive_runs(self):
+        # Same model: successive steps 2.99, 3, 6 K pass, 12 K fails.
+        res = _study(0.012, ms_values=self._VALUES, reference="previous")
+        assert res.retained == 1000.0
+        assert [c.ms_from for c in res.comparisons] == [1.0, 250.0, 500.0,
+                                                        1000.0]
+
+    def test_default_is_previous(self):
+        res = _study(0.012)
+        assert res.settings["reference"] == "previous"
+        assert res.comparisons[1].ms_from == 500.0
+
+    def test_a_failed_reference_run_gives_no_factor(self):
+        res = _study(0.001, ms_values=self._VALUES, reference="first",
+                     run_bundle=_runner(0.001, fail_ms=1.0))
+        assert res.status == "below_range" and res.retained is None
+        assert res.n_runs == 2
+
+    def test_rejects_an_unknown_reference(self):
+        with pytest.raises(ValueError):
+            _study(0.001, reference="base")
+
+    def test_exports_carry_the_reference(self, tmp_path):
+        res = _study(0.012, ms_values=self._VALUES, reference="first")
+        write_ms_exports(tmp_path, res)
+        comps = list(csv.DictReader(open(tmp_path / "ms_comparisons.csv")))
+        assert [c["ms_from"] for c in comps] == ["1.0", "1.0", "1.0"]
+        s = json.loads((tmp_path / "ms_summary.json").read_text())
+        assert s["settings"]["reference"] == "first"
+
+
 def test_exports(tmp_path):
     res = _study(0.012, guard_fn=lambda b: {"filter": (0.001, True),
                                             "reverb": (0.002, True)})
