@@ -16,7 +16,7 @@ distinct from the output ROI of the Geometry tab), then the final checks:
   * Eulerian-domain sizing by a sequential independence study
     (gui.sensitivity.domain_independence): each dimension grown by a
     constant step from the initial domain (ZOI + margin, or four values
-    set by hand), successive runs
+    set by hand; it always holds the whole tool nose), successive runs
     compared by the mean absolute difference (paper Eq. 5, 7) against
     ABSOLUTE tolerances eps_q, residual influence bounded by a geometric tail
     (fallback: successive criterion), run safeguards R_K, R_HG and outputs.
@@ -59,8 +59,9 @@ from gui.core.model_config import OptimizationCfg as _OptimizationCfg
 from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
+from gui.core.tool_geometry_calc import tool_nose_points
 from gui.sensitivity.domain_independence import (
-    initial_dims_by_hand, initial_dims_from_zoi, zoi_inside)
+    dims_union, initial_dims_by_hand, initial_dims_from_zoi, zoi_inside)
 from gui.sensitivity.domain_independence_worker import DomainIndependenceWorker
 from gui.sensitivity.ms_independence import filter_guards, parse_ms_values
 from gui.sensitivity.ms_independence_worker import MsIndependenceWorker
@@ -170,6 +171,7 @@ _DIM_ORDER = ("l_wp", "h_wp", "h_void", "l_void")
 # tab take colours none of those use.
 _C_ZOI = "#7c3aed"          # ZOI and its sampling points (purple)
 _C_START = "#0f766e"        # step-2 starting domain (teal, dashed)
+_C_NOSE = "#be185d"         # tool nose the starting domain holds (pink)
 _C_CAP = "#374151"          # largest size allowed (dark grey, dash-dot)
 _C_DSTAR = "#1e3a8a"        # D* found by step 2, not in the model (navy)
 _MAX_PREVIEW_POINTS = 2000  # sampling points drawn (subsampled beyond)
@@ -557,14 +559,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # hand; one row per dimension pair.
         dg.addWidget(QLabel("starting domain [mm]"), 0, 0)
         self.cb_init_mode = QComboBox()
-        self.cb_init_mode.addItem("ZOI + margin", "zoi")
+        self.cb_init_mode.addItem("ZOI + margin + tool nose", "zoi")
         self.cb_init_mode.addItem("Set by hand", "manual")
         self.cb_init_mode.setToolTip(
             "Where the domain study starts.\n"
-            "ZOI + margin: the smallest domain holding the ZOI, plus the\n"
-            "margin of the advanced parameters (computed, read-only).\n"
+            "ZOI + margin + tool nose: the smallest domain holding the ZOI\n"
+            "plus the margin of the advanced parameters, and the whole tool\n"
+            "nose (cutting-edge radius) (computed, read-only).\n"
             "Set by hand: the four values typed here. They are rounded up\n"
-            "to whole elements and must hold the ZOI.")
+            "to whole elements and must hold the ZOI and the whole tool\n"
+            "nose.\n"
+            "Rule: the starting domain always holds the whole tool nose.")
         dg.addWidget(self.cb_init_mode, 0, 1, 1, 2)
         self.btn_init_geom = QPushButton("From the Geometry tab")
         self.btn_init_geom.setToolTip(
@@ -604,7 +609,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dv.addLayout(status_row("domain"))
         dv.addWidget(hint(
             "Starts from the starting domain (teal box of the preview: the "
-            "ZOI plus the margin, or four values set by hand) "
+            "ZOI plus the margin, or four values set by hand; it always "
+            "holds the whole tool nose) "
             "and grows each side until the results in the ZOI stop changing "
             "beyond ε_q. Runs at ms* and h* (the element size of the Mesh "
             "tab). Result: D*, for the Geometry tab (Eulerian part)."))
@@ -860,8 +866,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dimensions (part rectangle (-l_wp, -h_wp) -> (l_void, h_void),
         cel_model.py:291, translated by euler_position):
             l_wp = -xmin, l_void = xmax, h_wp = -ymin, h_void = ymax
-        in the domain's own frame, each + margin. A blank ZOI is the ROI, so
-        this reproduces the previous ROI-based value when no ZOI is set.
+        in the domain's own frame, each + margin. A blank ZOI is the ROI.
+        The result is enlarged where needed to hold the whole tool nose.
 
         'manual' mode: the four values typed in the tab. Raises ValueError
         when one is blank or not a positive number."""
@@ -878,11 +884,41 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return self._zoi_initial_dims()
 
     def _zoi_initial_dims(self) -> DomainDims:
-        """The ZOI + margin starting domain, whatever the mode."""
-        return initial_dims_from_zoi(
-            self.zoi(), float(self.cfg.elem_size),
-            margin_elems=int(self.sp_margin.value()),
+        """The ZOI + margin starting domain, enlarged when needed so that
+        it holds the whole tool nose (rule of the author, 2026-10-13)."""
+        elem = float(self.cfg.elem_size)
+        di = initial_dims_from_zoi(
+            self.zoi(), elem, margin_elems=int(self.sp_margin.value()),
             offset=self.euler_offset())
+        nose = self.tool_nose_box()
+        if nose is not None:
+            di = dims_union(di, initial_dims_from_zoi(
+                nose, elem, offset=self.euler_offset()))
+        return di
+
+    def tool_nose_box(self):
+        """(xmin, xmax, ymin, ymax) of the tool nose (the cutting-edge
+        fillet of radius r) in the assembly frame, placed as the Geometry
+        tab and the Abaqus model place the tool; None when the tool
+        geometry is invalid."""
+        g = self.cfg.tool_geometry
+        try:
+            pts = tool_nose_points(g.h_tool, g.l_tool, g.r_tool,
+                                   g.rake_angle, g.clear_angle)
+            dx, dy, _engages, _why = GeometryPreview._tool_offset(self.cfg)
+        except Exception:
+            log_swallowed("tool nose position", level=logging.DEBUG)
+            return None
+        xs = pts[:, 0] + dx
+        ys = pts[:, 1] + dy
+        return (float(xs.min()), float(xs.max()),
+                float(ys.min()), float(ys.max()))
+
+    def _nose_inside(self, dims) -> bool:
+        """True when the tool nose lies inside `dims` (or is unknown)."""
+        nose = self.tool_nose_box()
+        return nose is None or zoi_inside(dims, nose, 0.0,
+                                          self.euler_offset())
 
     def _initial_margin(self) -> int:
         """Margin the study requires around the ZOI: the margin spin box in
@@ -1202,9 +1238,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         from matplotlib.patches import Rectangle
         # The base drawing, named for this tab; the tool reference point
         # (where the BCs apply) is not needed here.
-        names = {"Eulerian domain": "Eulerian domain (Geometry tab)",
+        names = {"Eulerian domain": "Domain",
                  "Workpiece (reference)": "Workpiece",
-                 "ROI / bbox": "ROI (results written here)"}
+                 "ROI / bbox": "ROI"}
         for art in list(ax.patches) + list(ax.lines):
             lab = str(art.get_label())
             if lab in names:
@@ -1253,6 +1289,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             if zoi_ok and not zoi_inside(di, zoi, 0.0, self.euler_offset()):
                 note = ("The ZOI goes beyond this starting domain: the "
                         "domain study cannot start. Enlarge it.")
+            elif not self._nose_inside(di):
+                note = ("The tool nose goes beyond this starting domain: "
+                        "the domain study cannot start. Enlarge it.")
             elif snapped:
                 note = ("Rounded up to whole elements (%.4g mm): %s." % (
                     float(self.cfg.elem_size), ", ".join(
@@ -1261,7 +1300,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._init_note.setVisible(bool(note))
         if zoi_ok:
             rect(zoi, edgecolor=_C_ZOI, lw=1.8, zorder=7,
-                 label="ZOI (comparison zone)")
+                 label="ZOI")
             self._draw_sampling_points(ax, zoi)
         if di is not None:
             start = euler_box(di.h_wp, di.h_void, di.l_wp, di.l_void)
@@ -1269,9 +1308,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             on_zoi = zoi_ok and same_box(start, zoi)
             rect(start, edgecolor=_C_START, lw=1.3, ls="--",
                  zorder=8 if on_zoi else 6,
-                 label="Step 2 starting domain (= ZOI)" if on_zoi
-                 else "Step 2 starting domain (set by hand)" if manual
-                 else "Step 2 starting domain (ZOI + margin)")
+                 label="Start domain = ZOI" if on_zoi
+                 else "Start domain")
+        nose = self.tool_nose_box()
+        if nose is not None:
+            rect(nose, edgecolor=_C_NOSE, lw=1.2, ls=":", zorder=9,
+                 label="Tool nose")
         # Largest size allowed: a box when the four caps are set, else one
         # line per cap that is set.
         cp = self.caps()
@@ -1279,12 +1321,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             rect(euler_box(cp["h_wp"], cp["h_void"], cp["l_wp"],
                            cp["l_void"]),
                  edgecolor=_C_CAP, lw=1.3, ls="-.", zorder=5,
-                 label="Largest size allowed (step 2)")
+                 label="Max size")
         elif cp:
             first = True
             for d, v in cp.items():
                 kw = dict(color=_C_CAP, lw=1.2, ls="-.", zorder=5,
-                          label="Largest size allowed (step 2)"
+                          label="Max size"
                           if first else "_nolegend_")
                 if d in ("l_wp", "l_void"):
                     x = -v + ex0 if d == "l_wp" else v + ex0
@@ -1302,7 +1344,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             v = rec["value"]
             rect(euler_box(v[0], v[1], v[2], v[3]), edgecolor=_C_DSTAR,
                  lw=1.8, ls=":", zorder=6,
-                 label="D* found by step 2 (not in the model yet)")
+                 label="D* (not in model)")
         # What would make a study fail or sample nothing.
         warn = []
         roi = inp["roi"]
@@ -1386,7 +1428,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         n_est = (fx + 1.0) * (fy + 1.0)
         if n_est > _MAX_GRID_POINTS:
             ax.plot([], [], ls="none", marker=".", color=_C_ZOI,
-                    label="ZOI sampling points: %.3g (not drawn)" % n_est)
+                    label="ZOI points: %.3g (hidden)" % n_est)
             return
         nx = int(math.floor(fx + 1e-9)) + 1
         ny = int(math.floor(fy + 1e-9)) + 1
@@ -1395,9 +1437,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         xs = zoi[0] + step * np.arange(0, nx, k)
         ys = zoi[2] + step * np.arange(0, ny, k)
         XX, YY = np.meshgrid(xs, ys)
-        label = ("ZOI sampling points (%d)" % n if k == 1 else
-                 "ZOI sampling points (%d, 1 in %d per direction shown)"
-                 % (n, k))
+        label = ("ZOI points (%d)" % n if k == 1 else
+                 "ZOI points (%d, 1/%d shown)" % (n, k))
         ax.scatter(XX.ravel(), YY.ravel(), s=3, c=_C_ZOI, alpha=0.5,
                    linewidths=0, zorder=7, label=label)
 
@@ -2188,10 +2229,21 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "domain or reduce the ZOI."
                 % (dims0.h_wp, dims0.h_void, dims0.l_wp, dims0.l_void))
             return None
+        if not self._nose_inside(dims0):
+            QMessageBox.warning(
+                self, "Starting domain",
+                "The tool nose (cutting-edge radius) goes beyond the starting "
+                "domain set by hand (h_wp=%.4g, h_void=%.4g, l_wp=%.4g, "
+                "l_void=%.4g mm): the starting domain must hold the whole "
+                "tool nose. Enlarge it."
+                % (dims0.h_wp, dims0.h_void, dims0.l_wp, dims0.l_void))
+            return None
+        nose = self.tool_nose_box()
         return {
             "zoi": self._zoi_dict(self.zoi()),
             "elem_size": float(self.cfg.elem_size),
             "margin_elems": margin,
+            "tool_nose": None if nose is None else self._zoi_dict(nose),
             "initial_mode": self.init_mode(),
             "euler_offset": list(self.euler_offset()),
             "grid_step": self.grid_step(),

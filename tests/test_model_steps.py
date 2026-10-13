@@ -353,13 +353,13 @@ def test_preview_legend_names_every_element_once(tab):
     tab._max["l_wp"].setText("0.5")
     tab._draw_preview()
     labels = _legend(tab)
-    assert "ROI (results written here)" in labels
-    assert "ZOI (comparison zone)" in labels
-    assert any(l.startswith("Step 2 starting domain (") for l in labels)
-    assert "Largest size allowed (step 2)" in labels   # a single cap
-    assert "Eulerian domain (Geometry tab)" in labels
+    assert "ROI" in labels
+    assert "ZOI" in labels
+    assert "Start domain" in labels
+    assert "Max size" in labels   # a single cap
+    assert "Domain" in labels
     assert not any(l.startswith("Tool RP") for l in labels)
-    assert any(l.startswith("ZOI sampling points") for l in labels)
+    assert any(l.startswith("ZOI points") for l in labels)
     assert len(labels) == len(set(labels))
     assert tab.preview._ax.get_title() == ""
     # the view holds the cap line

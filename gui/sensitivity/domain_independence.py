@@ -203,6 +203,12 @@ def initial_dims_by_hand(values: Dict[str, float], elem_size: float
                          for n in DIMENSIONS})
 
 
+def dims_union(a: DomainDims, b: DomainDims) -> DomainDims:
+    """Smallest domain holding both `a` and `b` (same origin)."""
+    return DomainDims(**{n: max(float(getattr(a, n)), float(getattr(b, n)))
+                         for n in DIMENSIONS})
+
+
 def _with(dims: DomainDims, name: str, value: float) -> DomainDims:
     d = {n: float(getattr(dims, n)) for n in DIMENSIONS}
     d[name] = float(value)
