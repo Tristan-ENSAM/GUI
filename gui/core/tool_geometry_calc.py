@@ -119,6 +119,19 @@ def tool_polygon(h_tool: float, l_tool: float, r_tool: float,
     return poly
 
 
+def tool_nose_points(h_tool: float, l_tool: float, r_tool: float,
+                     rake_deg: float, clear_deg: float,
+                     n_fillet: int = 24) -> np.ndarray:
+    """Points of the tool nose in the tool's local frame: the cutting-edge
+    fillet of radius r_tool, from its tangent point on the rake face to its
+    tangent point on the bottom face (the BL corner when r_tool = 0).
+    Raises ToolGeometryError like tool_polygon."""
+    poly = tool_polygon(h_tool, l_tool, r_tool, rake_deg, clear_deg,
+                        n_fillet=n_fillet)
+    # tool_polygon: P_on_bot, BR, TR, TL, P_on_rake, arc (reversed).
+    return poly[4:]
+
+
 def point_segment_distance(px: float, py: float,
                            x0: float, y0: float,
                            x1: float, y1: float) -> float:

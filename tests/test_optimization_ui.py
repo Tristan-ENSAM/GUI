@@ -192,7 +192,10 @@ class TestDomainIndependenceWiring:
         with pytest.raises(ValueError):
             tab.domain_settings()
 
-    def test_initial_domain_is_zoi_plus_margin_with_offset(self, tab):
+    def test_initial_domain_is_zoi_plus_margin_with_offset(self, tab,
+                                                           monkeypatch):
+        # tool nose rule tested separately: here the nose is not known
+        monkeypatch.setattr(tab, "tool_nose_box", lambda: None)
         tab.cfg.elem_size = 0.01
         tab.cfg.euler_position.x0 = 1.0
         for k, v in (("xmin", "0.9"), ("xmax", "1.05"), ("ymin", "-0.08"),
@@ -322,6 +325,9 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
     from gui.core.domain_sizing import DomainDims
     tab = OptimizationTab(ModelConfig())
     tab.cfg.elem_size = 0.01
+    # a nose inside the ZOI: the start stays ZOI + margin
+    monkeypatch.setattr(tab, "tool_nose_box",
+                        lambda: (-0.01, 0.0, -0.01, 0.0))
     for k, v in (("xmin", "-0.03"), ("xmax", "0.03"), ("ymin", "-0.03"),
                  ("ymax", "0.03")):
         tab.le_zoi[k].setText(v)
@@ -743,3 +749,44 @@ def test_opening_a_study_puts_back_a_manual_starting_domain(qapp):
     tab._panel_restore(snap)
     assert tab.init_mode() == "manual"
     assert float(tab._init_edit["h_wp"].text()) == pytest.approx(0.3)
+
+
+# ---------------------------------------------------------------------------
+# Rule: the starting domain holds the whole tool nose
+# ---------------------------------------------------------------------------
+def test_tool_nose_box_is_the_cutting_edge_fillet(qapp):
+    tab = OptimizationTab(ModelConfig())
+    g = tab.cfg.tool_geometry
+    x0, x1, y0, y1 = tab.tool_nose_box()
+    # the fillet spans less than its diameter in each direction
+    assert 0 < x1 - x0 <= 2 * g.r_tool + 1e-12
+    assert 0 < y1 - y0 <= 2 * g.r_tool + 1e-12
+
+
+def test_zoi_start_is_enlarged_to_hold_the_tool_nose(qapp, monkeypatch):
+    tab = OptimizationTab(ModelConfig())
+    tab.cfg.elem_size = 0.01
+    tab.sp_margin.setValue(0)
+    for k, v in (("xmin", "-0.03"), ("xmax", "0.03"), ("ymin", "-0.03"),
+                 ("ymax", "0.03")):
+        tab.le_zoi[k].setText(v)
+    monkeypatch.setattr(tab, "tool_nose_box",
+                        lambda: (0.0, 0.012, -0.065, -0.05))
+    d = tab.compute_initial_dims()
+    assert d.h_wp == pytest.approx(0.07)        # -0.065 -> 7 elements
+    assert d.l_void == pytest.approx(0.03)      # ZOI already holds 0.012
+    assert d.l_wp == pytest.approx(0.03) and d.h_void == pytest.approx(0.03)
+
+
+def test_launch_refuses_a_manual_start_without_the_tool_nose(launch,
+                                                             warnings,
+                                                             monkeypatch):
+    tab = _manual_tab(launch)
+    _fill_thresholds(tab)
+    monkeypatch.setattr(tab, "tool_nose_box",
+                        lambda: (0.0, 0.01, -0.25, -0.24))
+    tab._on_run_domain_independence()
+    assert _CaptureWorker.last is None
+    assert any("tool nose" in w for w in warnings)
+    tab._draw_preview()
+    assert "tool nose" in tab._init_note.text()
