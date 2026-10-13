@@ -66,7 +66,8 @@ from gui.sensitivity.domain_independence_worker import DomainIndependenceWorker
 from gui.sensitivity.ms_independence import filter_guards, parse_ms_values
 from gui.sensitivity.ms_independence_worker import MsIndependenceWorker
 from gui.sensitivity.run_record import (
-    GuardSettings, cost_record, guard_reasons, make_guard_fn)
+    REPORTED_GUARDS, GuardSettings, cost_record, guard_reasons,
+    make_guard_fn)
 from gui.sensitivity.run_worker import (
     abaqus_terminate_job, build_abaqus_args, kill_process_tree_by_pid,
     script_log_path)
@@ -125,12 +126,14 @@ _DOM_TEXTS = [
     ("window_end", "end", "End of the time window T, as a fraction of the "
                           "simulated time (default 1.0)"),
     ("rk_max", "max kinetic / internal energy G_K",
-     "A run is rejected if R_K = \u03a3ALLKE/\u03a3ALLIE over T exceeds this\n"
-     "value (too much kinetic energy, typically from mass scaling).\n"
-     "Default 0.05 (5 %), the value used on the reference case."),
+     "R_K = \u03a3ALLKE/\u03a3ALLIE over T is reported against this value\n"
+     "(kinetic energy, typically from mass scaling). Reported only: it\n"
+     "never rejects a run, it helps explain a deviation of the compared\n"
+     "quantities. Default 0.05 (5 %)."),
     ("rhg_max", "max artificial / internal energy G_HG",
-     "A run is rejected if R_HG = \u03a3ALLAE/\u03a3ALLIE over T exceeds this\n"
-     "value (too much hourglass energy). Default 0.05 (5 %)."),
+     "R_HG = \u03a3ALLAE/\u03a3ALLIE over T is reported against this value\n"
+     "(hourglass energy). Reported only: it never rejects a run.\n"
+     "Default 0.05 (5 %)."),
 ]
 # Domain dimensions: short label and definition (Eulerian part rectangle
 # (-l_wp, -h_wp) -> (l_void, h_void), cel_model.py create_parts).
@@ -476,8 +479,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
             "compares each run with the reference chosen on the left (E_max with the absolute\n"
-            "eps_q of the common settings). Safeguards: outputs, R_K, R_HG, filter check and\n"
-            "reverberation check. Keeps the largest ms reached by an unbroken\n"
+            "eps_q of the common settings). A run fails only when its job or an\n"
+            "output is missing; R_K, R_HG, the filter check and the\n"
+            "reverberation are reported only, to explain a deviation. Keeps the largest ms reached by an unbroken\n"
             "chain of successes; stops at the first failure. Finished runs of\n"
             "an interrupted study are reused when it is resumed.")
         self.btn_ms.clicked.connect(self._on_run_ms_independence)
@@ -2154,8 +2158,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                         else "the previous value"))
         self._log_ui("  eps_q: " + "  ".join("%s=%.4g" % kv
                                               for kv in sorted(thr.items())))
-        self._log_ui("  safeguards: R_K < %.4g, R_HG < %.4g, outputs, filter "
-                     "check, reverberation check"
+        self._log_ui("  blocking: outputs present | reported: R_K (limit "
+                     "%.4g), R_HG (limit %.4g), filter check, reverberation"
                      % (guards.rk_max, guards.rhg_max))
         self._log_ui("=" * 68)
         self._retire_worker("_ms_worker")
@@ -2176,7 +2180,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         phase = ev.get("phase")
         if phase == "run":
             r = ev["record"]
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
                           for k, (v, ok) in sorted(r.guards.items()))
             cpu = self._fmt_cost(r.cost)
             self._log_ui("[run %d] ms=%g | %s | %s | C_CPU=%s"
@@ -2369,7 +2373,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                         window[1]))
         self._log_ui("  eps_q: " + "  ".join("%s=%.4g" % kv
                                               for kv in sorted(thr.items())))
-        self._log_ui("  safeguards: R_K < %.4g, R_HG < %.4g, outputs present"
+        self._log_ui("  blocking: outputs present | reported: R_K (limit "
+                     "%.4g), R_HG (limit %.4g)"
                      % (guards.rk_max, guards.rhg_max))
         self._log_ui("=" * 68)
         self._retire_worker("_di_worker")
@@ -2388,6 +2393,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._start_progress()
         self._di_worker.start()
         return True
+
+    @staticmethod
+    def _guard_flag(name, ok):
+        """'' when passed, ' FAIL' for a blocking safeguard, ' (above
+        limit, reported)' for a reported one."""
+        if ok:
+            return ""
+        return " (above limit, reported)" if name in REPORTED_GUARDS \
+            else " FAIL"
 
     @staticmethod
     def _fmt(v, fmt="%.4g"):
@@ -2412,7 +2426,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if phase == "run":
             r = ev["record"]
             d = r.dims
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
                           for k, (v, ok) in sorted(r.guards.items()))
             c = r.cost
             cpu = self._fmt_cost(c)
@@ -3027,7 +3041,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                                         (None, {}, None))
         calls = list(getattr(recorder, "records", []) or [])
         for c in calls:
-            g = "  ".join("%s=%s%s" % (k, self._fmt(v), "" if ok else " FAIL")
+            g = "  ".join("%s=%s%s" % (k, self._fmt(v), self._guard_flag(k, ok))
                           for k, (v, ok) in sorted(c.guards.items()))
             self._log_ui("  h=%.4g | C_CPU=%s | N_elem=%s | %s"
                          % (c.elem_size, self._fmt_cost(c.cost),

@@ -303,7 +303,7 @@ class TestMsAtPoint:
     def test_safeguard_failure_on_the_new_run(self):
         study, _ = _study()
         c = ic.ms_at_point_check(_ms_runner(0.0), _MsCfg(), study,
-                                 guard_fn=lambda b: {"reverb": (0.5, False)})
+                                 guard_fn=lambda b: {"outputs": (1.0, False)})
         assert c.e_max < 1.0 and c.passed is False
         assert c.safeguards_ok is False
 
