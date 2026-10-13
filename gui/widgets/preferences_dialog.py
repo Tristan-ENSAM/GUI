@@ -109,8 +109,9 @@ class PreferencesDialog(QDialog):
         self.cb_remote.setToolTip(
             "Runs are queued in the folder below and executed by the agent\n"
             "started on the compute PC (start_agent.bat, written in that\n"
-            "folder when you click OK). The working directory must then be\n"
-            "on the same shared drive.")
+            "folder when you click OK). Results come back to the working\n"
+            "directory on this PC; the shared folder only holds runs in\n"
+            "progress.")
         f_exec.addRow(self.cb_remote)
         self.fld_queue = _PathField(prefs.remote_queue_dir, "dir")
         f_exec.addRow("Queue folder (shared drive):", self.fld_queue)

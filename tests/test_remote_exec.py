@@ -58,7 +58,8 @@ def setup(tmp_path):
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     shared = tmp_path / "Z"
     return {"scripts": scripts, "abaqus": str(fake), "queue": shared / "queue",
-            "shared": shared, "local_root": str(tmp_path / "C_local")}
+            "shared": shared, "gui_wd": tmp_path / "gui_pc_wd",
+            "local_root": str(tmp_path / "C_local")}
 
 
 def _agent(setup, **kw):
@@ -84,7 +85,7 @@ def running_agent(setup):
 
 
 def _submit(setup, job="job1", model=None, check_agent=False, sub="study"):
-    run_dir = setup["shared"] / sub
+    run_dir = setup["gui_wd"] / sub      # on the GUI PC, not on Z:
     proc = rx.RemoteProcess(setup["queue"], run_dir, model or {},
                             {"cpus": 16, "job_name": job}, setup["scripts"],
                             remote_abaqus_cmd=setup["abaqus"],
@@ -100,8 +101,11 @@ def test_round_trip_copies_results_back_and_keeps_odb_local(setup,
     for name in ("job1.meta.json", "job1.sta", "job1.gui.log"):
         assert (run_dir / name).is_file(), name
     assert not (run_dir / "job1.odb").exists()
-    local = Path(ra.local_run_dir(setup["local_root"], str(run_dir)))
+    local = Path(ra.local_run_dir(setup["local_root"], str(proc.transit)))
     assert (local / "job1.odb").is_file()
+    # Z: was only a transit area: nothing of the run is left on it.
+    assert not proc.transit.exists()
+    assert list((setup["queue"] / "runs").iterdir()) == []
     assert b"licence banner" in proc.stdout.read()
     assert proc.stdout.read() == b""
     for sub in ("pending", "running", "done", "cancel"):
@@ -126,7 +130,10 @@ def test_the_agent_runs_the_scripts_copied_from_the_gui_pc(setup,
 def test_live_mirror_of_sta_and_log_while_running(setup, running_agent):
     proc, run_dir = _submit(setup, model={"duration": 4.0})
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not (run_dir / "job1.sta").exists():
+    # The GUI's run loops poll every 0.4 s; polling is what brings the live
+    # files from the transit folder to the local run folder.
+    while proc.poll() is None and not (run_dir / "job1.sta").exists() \
+            and time.monotonic() < deadline:
         time.sleep(0.1)
     assert (run_dir / "job1.sta").exists()
     assert proc.poll() is None
@@ -140,9 +147,10 @@ def test_runs_execute_one_at_a_time_in_order(setup, running_agent):
     p2, run_dir = _submit(setup, job="b", model={"duration": 0.1})
     assert p2.wait(timeout=30) == 0
     assert p1.poll() == 0
-    local = Path(ra.local_run_dir(setup["local_root"], str(run_dir)))
-    assert (local / "a.results.npz").stat().st_mtime \
-        <= (local / "b.results.npz").stat().st_mtime
+    on_cpc = [Path(ra.local_run_dir(setup["local_root"], str(p.transit)))
+              / (j + ".results.npz") for p, j in ((p1, "a"), (p2, "b"))]
+    assert on_cpc[0].stat().st_mtime <= on_cpc[1].stat().st_mtime
+    assert (run_dir / "a.results.npz").is_file()
 
 
 def test_line_endings_do_not_change_the_fingerprint(tmp_path):
@@ -232,10 +240,8 @@ def test_launch_problems(tmp_path):
                         abaqus_script=str(scripts / "run_simul.py"),
                         execution_mode="remote",
                         remote_queue_dir=r"Z:\ABQ\queue")
-    probs = rx.launch_problems(prefs, r"C:\TEMP\wd")
-    assert any("shared drive Z:" in p for p in probs)
-    assert not any("Abaqus command" in p for p in probs)
-    assert rx.launch_problems(prefs, r"z:\ABQ\wd") == []
+    # The working directory stays on the GUI PC; no local Abaqus needed.
+    assert rx.launch_problems(prefs, r"C:\TEMP\wd") == []
     prefs.remote_queue_dir = r"Z:\my queue"
     assert any("spaces" in p for p in rx.launch_problems(prefs, r"Z:\wd"))
     prefs.execution_mode = "local"
@@ -265,7 +271,7 @@ def test_job_tab_client_command_round_trip(setup, running_agent):
                         execution_mode="remote",
                         remote_queue_dir=str(setup["queue"]),
                         remote_abaqus_cmd=setup["abaqus"])
-    run_dir = setup["shared"] / "jobtab"
+    run_dir = setup["gui_wd"] / "jobtab"
     program, args, root = rx.submit_command(
         prefs, run_dir, {}, {"cpus": 1, "job_name": "Cutting_job"})
     env = dict(os.environ, PYTHONPATH=root)
