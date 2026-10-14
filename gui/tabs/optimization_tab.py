@@ -63,7 +63,8 @@ from gui.core.tool_geometry_calc import tool_nose_points
 from gui.sensitivity.domain_independence import (
     dims_union, initial_dims_by_hand, initial_dims_from_zoi, zoi_inside)
 from gui.sensitivity.domain_independence_worker import DomainIndependenceWorker
-from gui.sensitivity.ms_independence import filter_guards, parse_ms_values
+from gui.sensitivity.ms_independence import (
+    failure_cause, filter_guards, parse_ms_values)
 from gui.sensitivity.ms_independence_worker import MsIndependenceWorker
 from gui.sensitivity.run_record import (
     REPORTED_GUARDS, GuardSettings, cost_record, guard_reasons,
@@ -2219,6 +2220,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "cancelled": "cancelled (ms reached: %s)",
         }.get(res.status, res.status + " (%s)")
         why = why % ("n/a" if res.retained is None else "%g" % res.retained)
+        if res.status in ("below_range", "converged") and \
+                failure_cause(res) == "run":
+            why += ("; the failed comparison was not judged on the "
+                    "quantities: one of its runs did not finish or misses "
+                    "outputs (see the run lines above)")
+            if res.status == "below_range":
+                why = ("the first comparison could not be judged: one of "
+                       "its runs did not finish or misses outputs (see the "
+                       "run lines above); fix the run and resume the study")
         self._log_ui("=" * 68)
         self._log_ui("MASS-SCALING RESULT: %s | %d runs" % (why, res.n_runs))
         for w in res.warnings:

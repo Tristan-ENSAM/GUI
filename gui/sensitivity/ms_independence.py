@@ -202,6 +202,15 @@ class MsStudyResult:
         return len(self.runs)
 
 
+def failure_cause(result: MsStudyResult) -> Optional[str]:
+    """Why the last comparison failed: "run" (a run of the pair did not
+    finish or misses outputs, so the factor was not judged), "qoi"
+    (E_max >= 1), or None when it did not fail."""
+    if not result.comparisons or result.comparisons[-1].success:
+        return None
+    return "run" if not result.comparisons[-1].guards_ok else "qoi"
+
+
 def with_mass_scaling(cfg, ms: float):
     """Deep copy of `cfg` with mass scaling enabled at factor `ms`."""
     out = copy.deepcopy(cfg)

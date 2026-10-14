@@ -28,6 +28,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from gui.core.logging_util import log_swallowed
+from gui.sensitivity.ms_independence import failure_cause
 from gui.sensitivity.run_cache import RunCache, same_folder
 from gui.sensitivity.study_specs import (
     CHECKS_CONFIG, DIM_KEYS, JOB_PREFIX, ZOI_KEYS, comparison_settings,
@@ -982,6 +983,10 @@ class ModelStepsMixin:
                         "every comparison passed up to ms = %g, so the "
                         "largest acceptable ms is not bracketed: add larger "
                         "values" % values[-1], {"values": values})
+            if res.status == "below_range" and failure_cause(res) == "run":
+                return ("failed", None, "the first comparison could not be "
+                        "judged: one of its runs did not finish or misses "
+                        "outputs (see the log)", {})
             if res.status == "below_range":
                 return ("failed", None, "the first comparison already "
                         "failed: start the ms values lower (or, with the "
