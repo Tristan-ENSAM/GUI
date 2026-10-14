@@ -296,3 +296,25 @@ class TestTimeAlignment:
         res = self._run(1e-6)
         assert res.status == "below_range"
         assert "half the frame interval" in res.warnings[0]
+
+
+class TestFailureCause:
+    def test_qoi_failure(self):
+        from gui.sensitivity.ms_independence import failure_cause
+        assert failure_cause(_study(1.0)) == "qoi"
+
+    def test_run_failure(self):
+        from gui.sensitivity.ms_independence import failure_cause
+        res = _study(0.001, run_bundle=_runner(0.001, fail_ms=500.0))
+        assert res.status == "below_range" and failure_cause(res) == "run"
+
+    def test_no_failure(self):
+        from gui.sensitivity.ms_independence import failure_cause
+        assert failure_cause(_study(0.001)) is None
+
+    def test_reported_r_hg_on_the_reference_does_not_stop(self):
+        # 14/10 case: R_HG = 5.74 % on ms = 1, E_max(1 -> 200) = 0.108.
+        res = _study(0.0001, ms_values=(1, 200, 400), reference="first",
+                     guard_fn=lambda b: {"R_HG": (0.0574, b.ms > 1.0),
+                                         "outputs": (0.0, True)})
+        assert res.status == "upper_end" and res.retained == 400.0
