@@ -2707,18 +2707,26 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return paths
 
     def ms_lower_for_checks(self):
-        """The ms value before the current ms* in the ms study (the one of
-        record when step 0 is done for this model, else the last one run
-        here), or None (the check then uses ms*/2)."""
-        values = None
+        """The ms compared with ms* by the final ms check: the reference run
+        (first value) when the ms study compared every ms with it, else the
+        value before ms* (successive comparisons). Taken from the record of
+        step 0 when it is done for this model, else from the last ms study
+        run here. None when unknown (the check then uses ms*/2)."""
+        values, reference = None, None
         st, rec = self._step_state("ms")
         if st == "done":
             values = rec.get("values")
+            reference = rec.get("reference")
         if not values and self._last_ms is not None:
             values = list(self._last_ms[0].ms_values)
+            reference = (self._last_ms[0].settings or {}).get("reference")
         if not values:
             return None
         ms = self._ms_factor()
+        if reference == "first":
+            # Same reference as the ms study: ms* is judged against it.
+            first = float(values[0])
+            return first if first < ms else None
         for a, b in zip(values[:-1], values[1:]):
             if math.isclose(float(b), ms, rel_tol=1e-5):
                 return float(a)
