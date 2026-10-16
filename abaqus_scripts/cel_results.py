@@ -8,6 +8,7 @@ bundle consumed by the GUI.
 
 import os
 import sys
+import time as _time
 import json as _json
 
 from odbAccess import openOdb as _openOdb
@@ -20,6 +21,36 @@ def _vprint(msg):
     """stdout-and-flush — so the GUI's output panel streams progress."""
     print(msg)
     sys.stdout.flush()
+
+
+class _FrameProgress(object):
+    """Print 'frame i/N, elapsed, remaining' about every 10 % of the frames.
+
+    The frame loops below read every value of the instance in Python and can
+    run for hours on a fine mesh without printing anything, which reads as a
+    frozen GUI. These lines show the extraction is moving and how long the
+    current field still needs (remaining = linear extrapolation)."""
+
+    def __init__(self, label, n_frames, n_steps=10):
+        self.label = label
+        self.n = max(int(n_frames), 1)
+        self.every = max(self.n // n_steps, 1)
+        self.t0 = _time.time()
+
+    def tick(self, fi):
+        """Call at the top of iteration `fi`: frames 0..fi-1 are done."""
+        done = fi
+        if done == 0 or done % self.every:
+            return
+        el = _time.time() - self.t0
+        rem = el * (self.n - done) / float(done)
+        _vprint("    %s: %d/%d frames read, %s elapsed, ~%s remaining"
+                % (self.label, done, self.n, _hms(el), _hms(rem)))
+
+
+def _hms(seconds):
+    s = int(round(seconds))
+    return "%dh%02dm%02ds" % (s // 3600, (s % 3600) // 60, s % 60)
 
 
 def _resolve_roi(model_cfg):
@@ -258,7 +289,9 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
     except Exception:
         use_region = False
 
+    _prog = _FrameProgress("%s" % key, n_frames)
     for fi in range(n_frames):
+        _prog.tick(fi)
         try:
             fo = step.frames[fi].fieldOutputs[key]
         except KeyError:
@@ -303,7 +336,9 @@ def _extract_displacements(step, inst_name, kept_node_ids, root_assembly):
     n_nodes = len(kept_node_ids)
     n_frames = len(step.frames)
     out = _np.full((n_frames, n_nodes, 3), _np.nan, dtype=_np.float32)
+    _prog = _FrameProgress("U", n_frames)
     for fi in range(n_frames):
+        _prog.tick(fi)
         try:
             fo = step.frames[fi].fieldOutputs["U"]
         except KeyError:
@@ -351,7 +386,9 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     n_frames = len(step.frames)
     v1_out = _np.full((n_frames, n_elem), _np.nan, dtype=_np.float32)
     v2_out = _np.full((n_frames, n_elem), _np.nan, dtype=_np.float32)
+    _prog = _FrameProgress("%s" % key, n_frames)
     for fi in range(n_frames):
+        _prog.tick(fi)
         try:
             fo = step.frames[fi].fieldOutputs[key]
         except KeyError:
