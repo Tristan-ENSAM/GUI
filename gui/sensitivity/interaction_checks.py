@@ -19,8 +19,8 @@ separately), so four interactions are checked once the domain study is done
    domain study must satisfy the GCI selection rule on D*:
    |f_q(h*) - f_q^ref| <= eps_q for every quantity, eps_q the ABSOLUTE
    common tolerances (decision of 2026-10-07: one tolerance set for ms, h, D),
-   f_q^ref = Richardson extrapolate when reliable, else the finest mesh value
-   (same rule as mesh_gci.run_mesh_gci). h* must belong to the plan.
+   f_q^ref = the finest mesh value (same rule as mesh_gci.run_mesh_gci, see
+   mesh_gci.selection_reference). h* must belong to the plan.
    Recovery rule (decision of 2026-10-07): on failure, adopt the size the
    GCI recommends ON D* (or, when none is within tolerance, extend the GCI
    plan one level finer), redo the domain study at that size, then the
@@ -65,6 +65,7 @@ from gui.sensitivity.domain_independence import (
     errors_between, run_candidate,
 )
 from gui.sensitivity.ms_independence import align_samples, with_mass_scaling
+from gui.sensitivity.mesh_gci import selection_reference
 
 # Action attached to a failed combined-domain check (decision D11-a).
 REDO_DOMAIN_ACTION = (
@@ -219,7 +220,7 @@ def mesh_domain_check(gci_result, h_star: float,
         if tol is None or tol <= 0:
             continue
         fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
-        ref = g.f_extrapolated if g.reliable else g.f_fine
+        ref = selection_reference(g)
         if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
             r = float("inf")
         else:

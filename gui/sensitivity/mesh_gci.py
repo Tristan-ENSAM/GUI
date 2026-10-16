@@ -146,6 +146,18 @@ class QuantityGci:
 _DENOM_MIN = 0.1
 
 
+def selection_reference(g: "QuantityGci") -> float:
+    """Reference f_q^ref of the element-size selection: the FINEST mesh value.
+
+    Decision of 2026-10-16 (Tristan): on the CL-WTS-1 GCI (0.5/1/2/4 um) the
+    successive differences did not shrink with refinement for Vx, T and Vy
+    (not in the asymptotic range), so the Richardson extrapolate (p = 0.42 for
+    Vx) was not supported by the data, and it put even the finest mesh 14 mm/s
+    away from it. The selection therefore compares each mesh with the finest
+    one; f_extrapolated and the GCI % are still computed and reported."""
+    return g.f_fine
+
+
 def quantity_gci(f1: float, f2: float, f3: float, r21: float, r32: float,
                  safety: float = _SAFETY_3PLUS) -> QuantityGci:
     """Full GCI outcome for one quantity (f1 = finest, f3 = coarsest)."""
@@ -324,8 +336,9 @@ def run_mesh_gci(
     the observed order p, the extrapolated value and the GCI per quantity from
     the three FINEST meshes. `recommended_size` is the coarsest mesh whose every
     quantity is within its ABSOLUTE tolerance eps_q (`tolerances`, physical
-    units, the common values) of the reference -- the cheapest mesh with a
-    bounded discretization error. Without tolerances no size is recommended.
+    units, the common values) of the reference = the FINEST mesh value (see
+    `selection_reference`) -- the cheapest mesh with a bounded deviation from
+    the finest one. Without tolerances no size is recommended.
 
     The domain must be large enough that the ZOI is boundary-independent (run
     the domain study, or use a conservative domain); otherwise p/GCI describe a
@@ -384,11 +397,8 @@ def run_mesh_gci(
     result.in_asymptotic_range = bool(ratios) and all(
         0.9 <= a <= 1.1 for a in ratios)
 
-    # Recommended = coarsest size whose every quantity is within tolerance of a
-    # reference: the Richardson-extrapolated (h->0) value when that extrapolation
-    # is reliable, else the FINEST value (a quantity already converged below the
-    # noise floor has a meaningless extrapolate -- see QuantityGci.reliable --
-    # and must not block the recommendation with a garbage h->0 estimate).
+    # Recommended = coarsest size whose every quantity is within tolerance of
+    # the finest mesh value (selection_reference).
     def _within_tol(h: float) -> bool:
         for q in quantities:
             g = result.per_quantity.get(q)
@@ -396,7 +406,7 @@ def run_mesh_gci(
             if g is None or tol is None:
                 continue
             fq = result.scalars[h].get(q, float("nan"))
-            ref = g.f_extrapolated if g.reliable else g.f_fine
+            ref = selection_reference(g)
             if not (math.isfinite(fq) and math.isfinite(ref)):
                 return False
             if abs(fq - ref) > tol:              # absolute, units of q

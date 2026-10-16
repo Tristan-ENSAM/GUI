@@ -2655,8 +2655,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if self._last_gci is not None:
             gres, gtol = self._last_gci[0], self._last_gci[2] or {}
             gci_pts = False
+            from gui.sensitivity.mesh_gci import selection_reference
             for q, g in gres.per_quantity.items():
-                ref = g.f_extrapolated if g.reliable else g.f_fine
+                ref = selection_reference(g)
                 eps = gtol.get(q)
                 hs = [h for h in gres.sizes if q in gres.scalars.get(h, {})]
                 ys = []
@@ -2672,7 +2673,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             if gci_pts:
                 axg.set_xscale("log")
             axg.set_xlabel("h [mm]", fontsize=7)
-            axg.set_ylabel("|f_q(h) - f_ref| / eps_q", fontsize=7)
+            axg.set_ylabel("|f_q(h) - f_q(finest)| / eps_q", fontsize=7)
             if axg.get_legend_handles_labels()[0]:
                 axg.legend(fontsize=6)
         for ax, title in ((axm, "Mass scaling"), (axd, "Domain study"),
@@ -3044,7 +3045,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                    g.asymptotic_ratio,
                    "" if g.monotonic else "  (non-monotonic)",
                    "" if g.reliable else "  [extrapolation unreliable "
-                   "\u2014 converged/noisy, ref = finest]"))
+                   "\u2014 converged/noisy]"))
+        self._log_ui("  element size selected against the finest mesh "
+                     "(f_ext and GCI are reported only)")
         self._log_ui("  in asymptotic range: %s" % res.in_asymptotic_range)
         rec = res.recommended_size
         self._log_ui("  recommended element size: %s"

@@ -106,7 +106,8 @@ class TestMeshDomain:
                                       True, True)}, rec=0.01)
         c = mesh_domain_check(g, 0.01, {"TEMP": 2.0})       # eps_T = 2 K
         assert c.passed is True
-        assert c.e_max == pytest.approx(abs(101 - 99.67) / 2.0)
+        # reference = finest mesh (100), not the extrapolate (99.67)
+        assert c.e_max == pytest.approx(abs(101 - 100) / 2.0)
 
     def test_unreliable_uses_finest(self):
         g = _gci([0.005, 0.01, 0.02],
@@ -126,7 +127,7 @@ class TestMeshDomain:
                                     True, True)})
         c = mesh_domain_check(g, 0.01, {"V2": 10.0})        # mm/s
         assert c.passed is True
-        assert c.e_max == pytest.approx(0.4)
+        assert c.e_max == pytest.approx(0.3)                 # |3 - 0| / 10
 
     def test_h_star_not_in_plan(self):
         g = _gci([0.005, 0.01, 0.02], {}, {})
@@ -139,7 +140,8 @@ class TestMeshDomain:
                   0.02: {"TEMP": 130.0}},
                  {"TEMP": QuantityGci(100.0, 1.0, 90.0, 0.1, 0.2, 1.0,
                                       True, True)})
-        assert mesh_domain_check(g, 0.01, {"TEMP": 10.0}).passed is False
+        # |130 - 100| = 30 K > 10 K (the finest mesh is the reference)
+        assert mesh_domain_check(g, 0.02, {"TEMP": 10.0}).passed is False
         bad = [SimpleNamespace(guards_ok=False)]
         c = mesh_domain_check(g, 0.005, {"TEMP": 50.0}, bad)
         assert c.passed is False and c.safeguards_ok is False
@@ -329,10 +331,10 @@ class TestRecoveryRules:
                                          True, True)}, rec=rec)
 
     def test_mesh_failure_adopts_the_size_recommended_on_d_star(self):
-        c = mesh_domain_check(self._failing(0.005), 0.01, {"TEMP": 10.0})
+        c = mesh_domain_check(self._failing(0.005), 0.02, {"TEMP": 10.0})
         assert c.passed is False
         assert "adopt h = 0.005" in c.details["action"]
 
     def test_mesh_failure_without_recommendation_extends_the_plan(self):
-        c = mesh_domain_check(self._failing(None), 0.01, {"TEMP": 10.0})
+        c = mesh_domain_check(self._failing(None), 0.02, {"TEMP": 10.0})
         assert "one level finer" in c.details["action"]

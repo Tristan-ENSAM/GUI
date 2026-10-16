@@ -242,6 +242,37 @@ class TestDriver:
             tolerances=_abs(0.002))
         assert res.recommended_size == pytest.approx(0.01)
 
+    def test_cl_wts_1_gci_selects_against_the_finest_mesh(self, monkeypatch):
+        # GCI of 2026-10-16 on CL-WTS-1 (ms 51200, 0.5/1/2/4 um, log values).
+        # Vx's Richardson extrapolate (245) is 14.2 mm/s from the finest mesh,
+        # so an extrapolate reference recommended nothing; against the finest
+        # mesh, 1 um passes (Vx 4.8 mm/s) and 2 um fails (Vx 11.1 mm/s).
+        data = {0.0005: dict(EVF=0.804, TEMP=229.8, V1=259.2, V2=146.4,
+                             Fc=-70.25, Ff=-32.39),
+                0.001: dict(EVF=0.7937, TEMP=226.0, V1=264.0, V2=148.3,
+                            Fc=-69.6, Ff=-33.42),
+                0.002: dict(EVF=0.7828, TEMP=223.6, V1=270.3, V2=149.6,
+                            Fc=-69.7, Ff=-34.91),
+                0.004: dict(EVF=0.7761, TEMP=224.2, V1=273.3, V2=151.4,
+                            Fc=-70.92, Ff=-36.7)}
+
+        def fake(bundle, zoi, gs, field_vars, **kw):
+            h = bundle.elem_size
+            d = data[round(h, 6)]
+            out = {q: d[q] for q in field_vars}
+            out.update(Fc=d["Fc"] * h, Ff=d["Ff"] * h)  # raw RF ~ width h
+            return out
+        monkeypatch.setattr(mg, "zoi_scalars", fake)
+        eps = dict(EVF=0.1, TEMP=10.0, V1=10.0, V2=10.0, Fc=10.0, Ff=10.0)
+        res = run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.0005, ratio=2.0, n_meshes=4,
+            tolerances=eps)
+        # (the log rounds to 4 digits: the extrapolate lands near 244-245)
+        g = res.per_quantity["V1"]
+        assert abs(g.f_extrapolated - g.f_fine) > eps["V1"]
+        assert res.recommended_size == pytest.approx(0.001)
+
     def test_min_elem_size_floor(self):
         # finest below the floor is clamped up to it
         res = run_mesh_gci(
