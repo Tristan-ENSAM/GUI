@@ -42,8 +42,9 @@ separately), so four interactions are checked once the domain study is done
    warnings, not failures.
 4. ``ms_at_point`` - mass-scaling factor measured at the final point (h*, D*)
    (decision of 2026-10-07): S(h*, D*, ms*) is compared with
-   S(h*, D*, ms_lower), ms_lower being the value before ms* in the ms study
-   (default ms*/2), with the study's metric and absolute tolerances; passed
+   S(h*, D*, ms_lower), ms_lower being the reference run of the ms study
+   (its first value, usually ms = 1) when that study compared every ms with
+   it, else the value before ms* (default ms*/2), with the study's metric and absolute tolerances; passed
    iff E_max < 1 and both runs pass their safeguards. One run (S(h*, D*,
    ms*) is the retained run of the domain study, reused). With checks 1 and
    2 it re-checks each of the three axes (ms, h, D) at the final point.
