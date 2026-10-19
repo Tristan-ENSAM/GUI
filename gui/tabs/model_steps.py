@@ -1002,11 +1002,19 @@ class ModelStepsMixin:
             if h is None:
                 return ("failed", None, "no mesh of the plan stays within "
                         "ε_q of the reference value: start the plan at "
-                        "a finer mesh", {})
-            msg = ("" if res.in_asymptotic_range else
-                   "not every quantity is in the asymptotic range, the GCI "
-                   "values are indicative")
-            return "done", float(h), msg, {}
+                        "a finer mesh (at the latest the smallest allowed "
+                        "finest size, Advanced parameters)", {})
+            notes = []
+            if getattr(res, "at_lower_bound", False):
+                notes.append(
+                    "no mesh within ε_q: the smallest allowed size is kept; "
+                    "outside ε_q: %s" % ", ".join(
+                        "%s %.2f ε_q" % (q, r)
+                        for q, r in sorted(res.exceeding.items())))
+            if not res.in_asymptotic_range:
+                notes.append("not every quantity is in the asymptotic "
+                             "range, the GCI values are indicative")
+            return "done", float(h), "; ".join(notes), {}
         if step == "domain":
             if cancelled and res.status != "converged":
                 return "interrupted", None, "cancelled", {}

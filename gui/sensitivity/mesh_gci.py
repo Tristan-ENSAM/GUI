@@ -290,6 +290,11 @@ class MeshGciResult:
     scalars: Dict[float, Dict[str, float]] = field(default_factory=dict)
     per_quantity: Dict[str, QuantityGci] = field(default_factory=dict)
     recommended_size: Optional[float] = None      # coarsest within tolerance of f_ext
+    # Exit rule (decision of 2026-10-19): when no mesh is within tolerance and
+    # the finest mesh is the lower bound h_min (min_elem_size), h_min is
+    # retained; `exceeding` holds |f_q(h_min) - f_q^ref| / eps_q > 1.
+    at_lower_bound: bool = False
+    exceeding: Dict[str, float] = field(default_factory=dict)
     in_asymptotic_range: bool = False
     n_runs: int = 0
     stopped_by: str = ""       # "ok"|"cancelled"|"nan"
@@ -326,6 +331,10 @@ def run_mesh_gci(
     quantity is within its ABSOLUTE tolerance eps_q (`tolerances`, physical
     units, the common values) of the reference -- the cheapest mesh with a
     bounded discretization error. Without tolerances no size is recommended.
+    When none is within tolerance and the finest mesh is the lower bound
+    `min_elem_size` (h_min), h_min is retained (`at_lower_bound`) and the
+    quantities outside eps_q are listed in `exceeding`: the mesh cannot be
+    refined further, so the remaining deviation is reported, not removed.
 
     The domain must be large enough that the ZOI is boundary-independent (run
     the domain study, or use a conservative domain); otherwise p/GCI describe a
@@ -389,7 +398,8 @@ def run_mesh_gci(
     # is reliable, else the FINEST value (a quantity already converged below the
     # noise floor has a meaningless extrapolate -- see QuantityGci.reliable --
     # and must not block the recommendation with a garbage h->0 estimate).
-    def _within_tol(h: float) -> bool:
+    def _dev_over_eps(h: float) -> Dict[str, float]:
+        out = {}
         for q in quantities:
             g = result.per_quantity.get(q)
             tol = tolerances.get(q)
@@ -398,16 +408,26 @@ def run_mesh_gci(
             fq = result.scalars[h].get(q, float("nan"))
             ref = g.f_extrapolated if g.reliable else g.f_fine
             if not (math.isfinite(fq) and math.isfinite(ref)):
-                return False
-            if abs(fq - ref) > tol:              # absolute, units of q
-                return False
-        return True
+                out[q] = float("inf")
+            else:
+                out[q] = abs(fq - ref) / tol     # absolute, units of q
+        return out
+
+    def _within_tol(h: float) -> bool:
+        return all(r <= 1.0 for r in _dev_over_eps(h).values())
 
     if any(q in tolerances for q in quantities):
         for h in sorted(sizes, reverse=True):    # coarsest first
             if _within_tol(h):
                 result.recommended_size = h
                 break
+        finest = sizes[0]
+        if (result.recommended_size is None and min_elem_size is not None
+                and finest <= float(min_elem_size) * (1.0 + 1e-9)):
+            result.recommended_size = finest
+            result.at_lower_bound = True
+            result.exceeding = {q: r for q, r in _dev_over_eps(finest).items()
+                                if not r <= 1.0}
 
     if any(not math.isfinite(g.p) for g in result.per_quantity.values()):
         result.stopped_by = result.stopped_by or "nan"

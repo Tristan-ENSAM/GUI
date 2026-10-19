@@ -3058,6 +3058,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("  recommended element size: %s"
                      % ("none within tolerance" if rec is None
                         else "%.4g mm" % rec))
+        if getattr(res, "at_lower_bound", False):
+            self._log_ui(
+                "  no mesh within tolerance: smallest allowed size kept; "
+                "outside eps_q: %s" % ", ".join(
+                    "%s %.2f eps_q" % (q, r)
+                    for q, r in sorted(res.exceeding.items())))
         recorder, tol, folder = getattr(self, "_pending_gci",
                                         (None, {}, None))
         calls = list(getattr(recorder, "records", []) or [])
@@ -3078,7 +3084,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 self._log_ui("[EXPORT] failed: %s: %s"
                              % (type(e).__name__, e))
         self._refresh_convergence_view()
-        ok = rec is not None and res.in_asymptotic_range
+        ok = (rec is not None and res.in_asymptotic_range
+              and not getattr(res, "at_lower_bound", False))
         self.lbl_status.setStyleSheet(
             "color: %s;" % ("#15803d" if ok else "#b45309"))
         self.lbl_status.setText(
