@@ -298,7 +298,23 @@ class TestMsAtPoint:
                                  ms_lower=250.0)
         assert c.details["ms_lower"] == 250.0
         assert c.passed is False and "E_max" in c.conclusion
-        assert "redo the ms study" in c.details["action"]
+        # recovery tried 500 (vs 250: 250 > 50) and found nothing above 250
+        assert [t["ms"] for t in c.details["recovery"]] == [500.0]
+        assert "ms_recovered" not in c.details
+        assert "no ms between" in c.details["action"]
+
+    def test_recovery_halves_ms_star_against_the_reference_run(self):
+        # Vx shift = 0.1 (ms* - ms): vs ms = 1, ms* = 1000 deviates 99.9
+        # (> 50) and 500 deviates 49.9 (< 50) -> adopt 500, redo the GCI.
+        study, _ = _study()
+        log = []
+        c = ic.ms_at_point_check(_ms_runner(0.1, log=log), _MsCfg(), study,
+                                 ms_lower=1.0)
+        assert c.passed is False
+        assert log == [1.0, 500.0]          # one run per tried value
+        assert c.details["ms_recovered"] == 500.0
+        assert c.details["recovery"][0]["e_max"] == pytest.approx(49.9 / 50)
+        assert "redo the GCI at that ms" in c.details["action"]
 
     def test_safeguard_failure_on_the_new_run(self):
         study, _ = _study()

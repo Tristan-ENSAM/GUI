@@ -977,7 +977,9 @@ class ModelStepsMixin:
                 # A run stopped by the Cancel says nothing about ms.
                 return "interrupted", None, "cancelled", {}
             if res.status == "converged" and res.retained is not None:
-                return "done", float(res.retained), "", {"values": values}
+                return "done", float(res.retained), "", {
+                    "values": values,
+                    "reference": (res.settings or {}).get("reference")}
             if res.status == "upper_end":
                 return ("unbracketed", None,
                         "every comparison passed up to ms = %g, so the "

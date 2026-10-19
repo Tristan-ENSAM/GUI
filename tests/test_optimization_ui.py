@@ -629,6 +629,21 @@ def test_checks_take_the_ms_value_before_ms_star(qapp):
     assert tab.ms_lower_for_checks() is None
 
 
+def test_checks_take_the_reference_run_when_the_ms_study_used_it(qapp):
+    # ms study in "first" mode (PR #37): every ms was compared with ms = 1,
+    # so the final check compares ms* with ms = 1 too, not with ms*/2.
+    from gui.sensitivity.ms_independence import MsStudyResult
+    tab = OptimizationTab(ModelConfig())
+    tab.cfg.step.mass_scaling_enabled = True
+    tab.cfg.step.mass_scaling_factor = 51200.0
+    res = MsStudyResult(ms_values=[1., 200., 25600., 51200., 102400.])
+    res.settings = {"reference": "first"}
+    tab._last_ms = (res, None)
+    assert tab.ms_lower_for_checks() == 1.0
+    res.settings = {"reference": "previous"}
+    assert tab.ms_lower_for_checks() == 25600.0
+
+
 # ---------------------------------------------------------------------------
 # Step 2 starting domain set by hand
 # ---------------------------------------------------------------------------

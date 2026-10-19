@@ -42,13 +42,19 @@ separately), so four interactions are checked once the domain study is done
    warnings, not failures.
 4. ``ms_at_point`` - mass-scaling factor measured at the final point (h*, D*)
    (decision of 2026-10-07): S(h*, D*, ms*) is compared with
-   S(h*, D*, ms_lower), ms_lower being the value before ms* in the ms study
-   (default ms*/2), with the study's metric and absolute tolerances; passed
+   S(h*, D*, ms_lower), ms_lower being the reference run of the ms study
+   (its first value, usually ms = 1) when that study compared every ms with
+   it, else the value before ms* (default ms*/2), with the study's metric and absolute tolerances; passed
    iff E_max < 1 and both runs pass their safeguards. One run (S(h*, D*,
    ms*) is the retained run of the domain study, reused). With checks 1 and
    2 it re-checks each of the three axes (ms, h, D) at the final point.
    The filter and reverberation safeguards (`ms_guard_fn`) are evaluated on
    the new run; the reused run keeps the safeguards of the domain study.
+   Recovery rule (decision of 2026-10-19): on an E_max failure, ms*/2,
+   ms*/4, ... (above ms_lower) are run at (h*, D*) and compared with the
+   same ms_lower run; the first that passes is reported (details
+   "ms_recovered"): set it, redo the GCI at it, then the domain study and
+   the checks, until h* no longer changes (ms <-> h fixed point).
 
 Pure host-side module; run_bundle is injected.
 """
@@ -381,13 +387,76 @@ def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
                       "NOT admissible: %s" % (
                           "safeguards failed" if not res.safeguards_ok
                           else "E_max >= 1 (q_crit %s)" % res.q_crit))
-    if not res.passed:
+    if not res.passed and res.safeguards_ok and math.isfinite(res.e_max):
+        # Recovery rule (decision of 2026-10-19): halve ms* until it passes
+        # against the SAME lower run (ms = 1 in reference mode), one run per
+        # value, largest passing first. The GCI is then redone at that value
+        # (step 1), then the domain study and the checks: the loop ms <-> h
+        # stops when h* no longer changes.
+        rec = _ms_recovery(run_bundle, base_cfg, study, s, d_star, elem,
+                           quantities, s_b, ms_star, lower, guard_fn,
+                           cost_fn, emit)
+        res.details["recovery"] = rec["tried"]
+        if rec["ms"] is not None:
+            res.details["ms_recovered"] = rec["ms"]
+            res.details["action"] = (
+                "set ms = %.6g in the Step tab (largest value passing against "
+                "ms = %.6g at (h*, D*)), redo the GCI at that ms (step 1), "
+                "then the domain study and the checks; stop when h* no "
+                "longer changes" % (rec["ms"], lower))
+        else:
+            res.details["action"] = (
+                "no ms between %.6g and ms* = %.6g passes against ms = %.6g "
+                "at (h*, D*): run without mass scaling or redo the ms study "
+                "at (h*, D*)" % (lower, ms_star, lower))
+        res.warnings.append(res.details["action"])
+    elif not res.passed:
         res.details["action"] = ("redo the ms study at (h*, D*) and, if ms* "
                                  "changes, set it in the Step tab and redo "
                                  "the domain study and the checks (the GCI "
                                  "on D* revalidates h* at the new ms*)")
         res.warnings.append(res.details["action"])
     return res
+
+
+def _ms_recovery(run_bundle, base_cfg, study, s, d_star, elem, quantities,
+                 s_lower, ms_star, lower, guard_fn, cost_fn, emit):
+    """Try ms*/2, ms*/4, ... (> lower) against the lower run `s_lower`.
+    Returns {"ms": first passing value or None, "tried": [{ms, e_max,
+    q_crit, passed}]}; stops at the first pass or at a run without result."""
+    out = {"ms": None, "tried": []}
+    ms = ms_star / 2.0
+    while ms > lower * (1.0 + 1e-9):
+        rec_c, s_c = run_candidate(
+            run_bundle, with_mass_scaling(base_cfg, ms), d_star,
+            index=len(study.runs), zoi=s["zoi"], grid_step=s["grid_step"],
+            elem_size=elem, window=s["window"],
+            evf_threshold=s["evf_threshold"], quantities=quantities,
+            diagonal_coeff=float("inf"), guard_fn=guard_fn,
+            cost_fn=cost_fn, warnings=study.warnings, emit=emit)
+        study.runs.append(rec_c)
+        if emit is not None:
+            emit({"phase": "run", "record": rec_c, "n_runs": len(study.runs)})
+        if s_c is None:
+            out["tried"].append({"ms": ms, "e_max": None, "q_crit": None,
+                                 "passed": None})
+            return out
+        try:
+            b2, a2, _info = align_samples(s_lower, s_c)
+            errs = errors_between(a2, b2, quantities)
+        except AlignmentError:
+            out["tried"].append({"ms": ms, "e_max": None, "q_crit": None,
+                                 "passed": None})
+            return out
+        em, qc = e_max(errs, s["thresholds"])
+        ok = bool(math.isfinite(em) and em < 1.0)
+        out["tried"].append({"ms": ms, "e_max": em, "q_crit": qc,
+                             "passed": ok})
+        if ok:
+            out["ms"] = ms
+            return out
+        ms /= 2.0
+    return out
 
 
 # ---------------------------------------------------------------------------
