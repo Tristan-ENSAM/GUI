@@ -274,7 +274,11 @@ def gci_mesh_rows(gci_result, calls: Optional[Sequence] = None
         row = {"h_mm": h,
                "recommended": (gci_result.recommended_size is not None and
                                math.isclose(h, gci_result.recommended_size,
-                                            rel_tol=1e-9))}
+                                            rel_tol=1e-9)),
+               "lower_bound_kept": bool(
+                   getattr(gci_result, "at_lower_bound", False)
+                   and math.isclose(h, gci_result.recommended_size,
+                                    rel_tol=1e-9))}
         for q, v in gci_result.scalars.get(h, {}).items():
             row["f_" + q] = _num(v)
         c = by_h.get(round(h, 12))

@@ -25,6 +25,9 @@ separately), so four interactions are checked once the domain study is done
    GCI recommends ON D* (or, when none is within tolerance, extend the GCI
    plan one level finer), redo the domain study at that size, then the
    checks. One iteration: a second failure is reported as is.
+   Exit rule (decision of 2026-10-19): the plan is never refined below the
+   smallest allowed size h_min; when h* = h_min and no mesh is within
+   tolerance, the check passes with the deviations beyond eps_q reported.
 3. ``ms_x_mesh`` - mass-scaling factor versus final mesh and domain: the
    fixed factor f is checked against the analytic window of
    ModelConfig.mass_scaling_bounds evaluated at (h*, D*). No run.
@@ -236,6 +239,20 @@ def mesh_domain_check(gci_result, h_star: float,
     res.e_max, res.q_crit = worst, crit
     res.details["dev_over_eps"] = ratio
     within = crit is not None and math.isfinite(worst) and worst <= 1.0
+    # Exit rule (decision of 2026-10-19): h* = h_min, the lower bound of the
+    # plan, is admissible when no mesh is within tolerance on D*; the
+    # deviations beyond eps_q are reported.
+    at_floor = bool(getattr(gci_result, "at_lower_bound", False)
+                    and gci_result.recommended_size is not None
+                    and math.isclose(h, gci_result.recommended_size,
+                                     rel_tol=1e-9))
+    if at_floor and not within:
+        within = True
+        res.details["at_lower_bound"] = True
+        res.warnings.append(
+            "h* is the smallest allowed size; outside eps_q on D*: %s"
+            % ", ".join("%s %.2f" % (q, r) for q, r in sorted(ratio.items())
+                        if not r <= 1.0))
     res.passed = bool(within and res.safeguards_ok is not False)
     if not gci_result.in_asymptotic_range:
         res.warnings.append("GCI on D*: meshes not in the asymptotic range")

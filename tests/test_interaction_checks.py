@@ -352,3 +352,16 @@ class TestRecoveryRules:
     def test_mesh_failure_without_recommendation_extends_the_plan(self):
         c = mesh_domain_check(self._failing(None), 0.01, {"TEMP": 10.0})
         assert "one level finer" in c.details["action"]
+
+    def test_mesh_at_the_lower_bound_passes_with_the_deviation_reported(self):
+        # f(0.005) = 100, f_ext = 90, eps 5: 2 eps_q at the finest mesh; the
+        # GCI on D* kept it as the lower bound h_min (decision 2026-10-19).
+        g = self._failing(0.005)
+        g.at_lower_bound = True
+        c = mesh_domain_check(g, 0.005, {"TEMP": 5.0})
+        assert c.passed is True and c.details["at_lower_bound"]
+        assert c.e_max == pytest.approx(2.0)
+        assert any("smallest allowed size" in w for w in c.warnings)
+        # h* coarser than h_min still fails and adopts h_min
+        c = mesh_domain_check(g, 0.01, {"TEMP": 5.0})
+        assert c.passed is False and "adopt h = 0.005" in c.details["action"]

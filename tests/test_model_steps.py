@@ -1119,6 +1119,19 @@ def test_plain_words_in_step_messages(tab):
     assert "agent down" in tab._step_status["ms"].text()
 
 
+def test_mesh_step_keeps_the_lower_bound_and_names_the_deviations():
+    res = SimpleNamespace(stopped_by="ok", recommended_size=0.0005,
+                          in_asymptotic_range=False, at_lower_bound=True,
+                          exceeding={"V1": 1.42})
+    status, h, msg, _ = OptimizationTab._outcome("mesh", res, None, False)
+    assert status == "done" and h == 0.0005
+    assert "V1 1.42" in msg and "smallest allowed size" in msg
+    res = SimpleNamespace(stopped_by="ok", recommended_size=None,
+                          in_asymptotic_range=True)
+    status, _, msg, _ = OptimizationTab._outcome("mesh", res, None, False)
+    assert status == "failed" and "smallest allowed finest size" in msg
+
+
 def test_h_star_rounded_by_the_tabs_is_found_in_the_plan():
     from gui.sensitivity.interaction_checks import mesh_domain_check
     gci = SimpleNamespace(sizes=[0.001, 0.001 * math.sqrt(2), 0.002],

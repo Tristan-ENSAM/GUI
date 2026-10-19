@@ -227,6 +227,35 @@ class TestDriver:
             recs.append(res.recommended_size)
         assert recs == [pytest.approx(0.02), pytest.approx(0.02)]
 
+    def test_lower_bound_is_kept_when_no_mesh_is_within_tolerance(self):
+        # dev(0.005) = 10*0.005^2 = 2.5e-4 relative > 1e-6: no mesh passes.
+        # Without h_min the study recommends nothing; with h_min = the finest
+        # mesh it keeps h_min and lists the quantities outside eps_q.
+        kw = dict(grid_step=0.01, finest_elem_size=0.005, ratio=2.0,
+                  n_meshes=3, tolerances=_abs(1e-6))
+        res = run_mesh_gci(_runner(), _Cfg(), self.ZOI, self.DIMS, **kw)
+        assert res.recommended_size is None and not res.at_lower_bound
+        res = run_mesh_gci(_runner(), _Cfg(), self.ZOI, self.DIMS,
+                           min_elem_size=0.005, **kw)
+        assert res.recommended_size == pytest.approx(0.005)
+        assert res.at_lower_bound
+        assert set(res.exceeding) == set(_BASE)
+        assert res.exceeding["TEMP"] == pytest.approx(250.0, rel=1e-6)
+
+    def test_lower_bound_not_used_above_it_or_when_a_mesh_passes(self):
+        # finest 0.005 above h_min 0.0025: the plan can still be refined
+        res = run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.005, ratio=2.0, n_meshes=3,
+            tolerances=_abs(1e-6), min_elem_size=0.0025)
+        assert res.recommended_size is None and not res.at_lower_bound
+        res = run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.005, ratio=2.0, n_meshes=3,
+            tolerances=_abs(0.005), min_elem_size=0.005)
+        assert res.recommended_size == pytest.approx(0.02)
+        assert not res.at_lower_bound and res.exceeding == {}
+
     def test_no_tolerance_recommends_nothing(self):
         res = run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
