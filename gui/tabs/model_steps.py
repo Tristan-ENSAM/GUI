@@ -404,7 +404,8 @@ class ModelStepsMixin:
         if val is None:
             return False
         prefs, wd, cpus = val
-        spec["cache_folders"] = self._known_folders()
+        spec["cache_folders"] = (self._known_folders()
+                                 if self.cb_reuse_runs.isChecked() else [])
         prefix = {"ms": "massscaling", "mesh": "GCI",
                   "domain": "domainsizing"}[step]
         run_dir = self._study_run_dir(wd, prefix, spec)

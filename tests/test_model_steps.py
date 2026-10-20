@@ -1338,3 +1338,24 @@ def test_dims_shown_rounded_down_are_not_the_result(tab):
     assert st.in_model("domain", tab._model_values()["dims"], d_star)
     n = [round(e / h) for e in tab.cfg.effective_euler_dims()]
     assert n == [37, 11, 53, 7]
+
+
+def test_reuse_of_earlier_runs_can_be_switched_off(qapp, world, answers):
+    tab = world.tab
+    tab.le_ms_values.setText("500, 1000")
+    tab.le_ms_elem.setText("0.02")
+    tab._on_run_ms_independence()
+    _wait(qapp, tab, _idle(tab))
+    n1 = len(world.launched)
+    assert n1 >= 2
+    # On (default): a new study with the same runs launches nothing.
+    tab._launch_new("ms", confirm=False)
+    _wait(qapp, tab, _idle(tab))
+    assert len(world.launched) == n1
+    assert "reused" in tab.log.toPlainText()
+    # Off: every run is launched again; the choice is saved in the profile.
+    tab.cb_reuse_runs.setChecked(False)
+    assert tab.cfg.optimization.reuse_runs is False
+    tab._launch_new("ms", confirm=False)
+    _wait(qapp, tab, _idle(tab))
+    assert len(world.launched) == 2 * n1
