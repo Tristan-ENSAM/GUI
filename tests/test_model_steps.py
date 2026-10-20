@@ -1359,3 +1359,18 @@ def test_reuse_of_earlier_runs_can_be_switched_off(qapp, world, answers):
     tab._launch_new("ms", confirm=False)
     _wait(qapp, tab, _idle(tab))
     assert len(world.launched) == 2 * n1
+
+
+def test_time_flag_says_which_runs_were_slowed(tab):
+    lines = []
+    tab._log_ui = lines.append
+    tab._ms_plan = (200, 400, 800, 1600)
+    tab._ms_cost_pts = [(200, 260217, 3858), (400, 183989, 3092)]
+    cost = lambda n, t: SimpleNamespace(n_inc=n, t_wall_solver_s=t)
+    tab._log_ms_cost(800, cost(130108, 6000))        # fit predicts ~2.3 ks
+    assert "slower than the earlier runs" in lines[0]
+    lines.clear()
+    tab._ms_cost_pts = [(200, 260217, 3858), (400, 183989, 3092)]
+    tab._log_ms_cost(800, cost(130108, 1000))
+    assert "faster than the earlier runs" in lines[0]
+    assert "next run (ms=1600)" in lines[-1]

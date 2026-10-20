@@ -2248,12 +2248,22 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             pred = fit.predict(n)
             if pred > 0:
                 ratio = t / pred
+                # Slower: this run was slowed. Faster: the earlier runs
+                # were (2026-10-20: reruns on a free machine took 0.6 times
+                # the time predicted from a partly loaded study).
+                if ratio > 1.0 + OUTLIER_TOL:
+                    why = (": slower than the earlier runs, the machine was "
+                           "probably shared; this C_CPU is not "
+                           "representative")
+                elif ratio < 1.0 - OUTLIER_TOL:
+                    why = (": faster than the earlier runs, which were "
+                           "probably slowed by another process; their "
+                           "C_CPU and this prediction are too high")
+                else:
+                    why = ""
                 self._log_ui(
                     "  [TIME] solver %s, predicted %s (x%.2f)%s"
-                    % (fmt_duration(t), fmt_duration(pred), ratio,
-                       "" if abs(ratio - 1.0) <= OUTLIER_TOL else
-                       ": far from the earlier runs, the machine was "
-                       "probably shared; this C_CPU is not representative"))
+                    % (fmt_duration(t), fmt_duration(pred), ratio, why))
         if n and t:
             pts.append((float(ms), float(n), float(t)))
         fit = fit_cost([p[1] for p in pts], [p[2] for p in pts])
