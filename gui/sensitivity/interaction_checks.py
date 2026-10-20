@@ -224,22 +224,36 @@ def mesh_domain_check(gci_result, h_star: float,
     # |f_q(h*) - f_q^ref| / eps_q with the absolute common tolerances (same
     # criterion as the GCI's recommended size, see mesh_gci).
     worst, crit, ratio = 0.0, None, {}
+    pointwise = getattr(gci_result, "selection", "mean") == "pointwise"
+    finest = min(sizes) if sizes else None
     for q, g in gci_result.per_quantity.items():
         tol = tolerances.get(q)
         if tol is None or tol <= 0:
             continue
-        fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
-        ref = g.f_extrapolated if g.reliable else g.f_fine
-        if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
-            r = float("inf")
+        if pointwise:
+            # E_q / eps_q against the finest mesh (the GCI's own metric).
+            # h* = finest mesh: only the next coarser mesh has a measured
+            # deviation; it is reported and h* passes only by the exit rule.
+            at = h
+            if finest is not None and math.isclose(h, finest, rel_tol=1e-9):
+                at = sorted(sizes)[1] if len(sizes) > 1 else h
+            r = gci_result.deviation.get(at, {}).get(q, float("inf"))
         else:
-            r = abs(fq - ref) / tol
+            fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
+            ref = g.f_extrapolated if g.reliable else g.f_fine
+            if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
+                r = float("inf")
+            else:
+                r = abs(fq - ref) / tol
         ratio[q] = r
         if crit is None or r > worst:
             worst, crit = r, q
     res.e_max, res.q_crit = worst, crit
     res.details["dev_over_eps"] = ratio
     within = crit is not None and math.isfinite(worst) and worst <= 1.0
+    if pointwise and finest is not None and math.isclose(h, finest,
+                                                         rel_tol=1e-9):
+        within = False            # the reference cannot validate itself
     # Exit rule (decision of 2026-10-19): h* = h_min, the lower bound of the
     # plan, is admissible when no mesh is within tolerance on D*; the
     # deviations beyond eps_q are reported.
