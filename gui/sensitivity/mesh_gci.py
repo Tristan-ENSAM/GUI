@@ -144,6 +144,11 @@ class QuantityGci:
 # at -80 N/mm extrapolating to -118). Below this the extrapolation is declared
 # unreliable and the finest value is used as the reference instead.
 _DENOM_MIN = 0.1
+# Minimum observed order for the extrapolation to be trusted (decision of
+# 2026-10-20). Below it the series is read as outside the asymptotic range:
+# at ms 25600, T had p = 0.25 and an extrapolate 19 K beyond the finest mesh
+# for a 3.6 K fine-pair difference. The finest value is the reference then.
+_P_MIN = 0.5
 
 
 def quantity_gci(f1: float, f2: float, f3: float, r21: float, r32: float,
@@ -158,7 +163,7 @@ def quantity_gci(f1: float, f2: float, f3: float, r21: float, r32: float,
     denom = (r21 ** p - 1.0) if math.isfinite(p) else float("nan")
     reliable = bool(monotonic and math.isfinite(p) and math.isfinite(f_ext)
                     and f1 != 0.0 and math.isfinite(denom)
-                    and denom >= _DENOM_MIN)
+                    and denom >= _DENOM_MIN and p >= _P_MIN)
     return QuantityGci(
         f_fine=f1, p=p, f_extrapolated=f_ext,
         gci_fine=g21, gci_coarse=g32,

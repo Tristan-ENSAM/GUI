@@ -19,7 +19,8 @@ separately), so four interactions are checked once the domain study is done
    domain study must satisfy the GCI selection rule on D*:
    |f_q(h*) - f_q^ref| <= eps_q for every quantity, eps_q the ABSOLUTE
    common tolerances (decision of 2026-10-07: one tolerance set for ms, h, D),
-   f_q^ref = Richardson extrapolate when reliable, else the finest mesh value
+   f_q^ref = Richardson extrapolate when reliable (p >= 0.5 since
+   2026-10-20), else the finest mesh value
    (same rule as mesh_gci.run_mesh_gci). h* must belong to the plan.
    Recovery rule (decision of 2026-10-07): on failure, adopt the size the
    GCI recommends ON D* (or, when none is within tolerance, extend the GCI

@@ -62,6 +62,14 @@ class TestGciMath:
         # identical solutions -> order undefined (division by ~0)
         assert math.isnan(observed_order(5.0, 5.0, 5.0, 2.0, 2.0))
 
+    def test_low_order_falls_back_to_the_finest_value(self):
+        # GCI of 2026-10-20 (ms 25600, 0.5/1/2 um): T has p = 0.25 and is not
+        # trusted; Vx has p = 0.83 and keeps its extrapolate.
+        t = quantity_gci(237.52818948, 233.96130514, 229.72458197, 2.0, 2.0)
+        assert t.p == pytest.approx(0.248, abs=1e-3) and not t.reliable
+        vx = quantity_gci(252.55554406, 256.52186565, 263.57172664, 2.0, 2.0)
+        assert vx.p == pytest.approx(0.830, abs=1e-3) and vx.reliable
+
     def test_non_constant_ratio_iterates(self):
         # r21 != r32: p must still recover the power law (fixed-point solve)
         sizes = [1.0, 2.0, 3.0]                # r21=2, r32=1.5

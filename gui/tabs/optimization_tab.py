@@ -3119,7 +3119,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                    g.asymptotic_ratio,
                    "" if g.monotonic else "  (non-monotonic)",
                    "" if g.reliable else "  [extrapolation unreliable "
-                   "\u2014 converged/noisy, ref = finest]"))
+                   "\u2014 converged/noisy or p < 0.5, ref = finest]"))
         self._log_ui("  in asymptotic range: %s" % res.in_asymptotic_range)
         rec = res.recommended_size
         self._log_ui("  recommended element size: %s"
