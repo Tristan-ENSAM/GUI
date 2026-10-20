@@ -147,6 +147,30 @@ class TestMeshDomain:
     def test_no_result(self):
         assert mesh_domain_check(None, 0.01, {}).passed is None
 
+    def _pointwise(self, dev, rec=None, at_lower_bound=False):
+        q = QuantityGci(100.0, 2.0, 99.0, 0.0, 0.0, 1.0, True, True)
+        g = _gci([0.005, 0.01, 0.02], {h: {"TEMP": 100.0} for h in
+                                       (0.005, 0.01, 0.02)},
+                 {"TEMP": q}, rec=rec)
+        g.selection, g.deviation = "pointwise", dev
+        g.at_lower_bound = at_lower_bound
+        return g
+
+    def test_pointwise_uses_e_against_finest(self):
+        g = self._pointwise({0.01: {"TEMP": 0.4}, 0.02: {"TEMP": 1.3}},
+                            rec=0.01)
+        c = mesh_domain_check(g, 0.01, {"TEMP": 2.0})
+        assert c.passed is True and c.e_max == pytest.approx(0.4)
+        assert mesh_domain_check(g, 0.02, {"TEMP": 2.0}).passed is False
+
+    def test_pointwise_finest_passes_only_at_lower_bound(self):
+        dev = {0.01: {"TEMP": 1.5}, 0.02: {"TEMP": 3.0}}
+        c = mesh_domain_check(self._pointwise(dev), 0.005, {"TEMP": 2.0})
+        assert c.passed is False and c.e_max == pytest.approx(1.5)
+        g = self._pointwise(dev, rec=0.005, at_lower_bound=True)
+        c = mesh_domain_check(g, 0.005, {"TEMP": 2.0})
+        assert c.passed is True and c.details.get("at_lower_bound")
+
 
 class TestMassScalingWindow:
     def _cfg(self, f, filt=True):

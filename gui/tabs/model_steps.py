@@ -125,7 +125,8 @@ class ModelStepsMixin:
         g = self.guard_settings()
         return comparison_settings(self.zoi(), self.thresholds(),
                                    self.window(), g.rk_max, g.rhg_max,
-                                   self._grid_step_set())
+                                   self._grid_step_set(),
+                                   self._eps_shares_list())
 
     def _keys(self):
         mkey = model_key(self._model_params())
@@ -687,7 +688,19 @@ class ModelStepsMixin:
             put(self.le_grid_step, grid, "ZOI sampling step",
                 current=self._grid_step_set())
         if step == "ms":
+            search = spec.get("search") or "list"
+            if search != self.ms_search():
+                self.set_ms_search(search)
+                changed.append("ms search")
+            if search == "bisection":
+                for le, key, label in (
+                        (self.le_ms_factor, "factor", "bracketing factor"),
+                        (self.le_ms_stop, "stop_ratio", "stop ratio"),
+                        (self.le_ms_max, "ms_max", "largest ms tried")):
+                    put(le, spec.get(key), label)
             vals = [float(v) for v in spec.get("ms_values") or []]
+            if search == "bisection":
+                vals = []                  # the list is not used: keep it
             try:
                 cur_vals = list(self.ms_settings()[0])
             except ValueError:
@@ -981,6 +994,21 @@ class ModelStepsMixin:
                 return "done", float(res.retained), "", {
                     "values": values,
                     "reference": (res.settings or {}).get("reference")}
+            bis = (res.settings or {}).get("search") == "bisection"
+            if res.status == "upper_end" and bis:
+                return ("failed", None, "every value passed up to the "
+                        "largest ms tried (%g): raise it (Advanced "
+                        "parameters)" % values[-1], {"values": values})
+            if res.status == "below_range" and bis:
+                return ("failed", None, "no ms above the reference passed "
+                        "down to the stop ratio", {"values": values})
+            if res.status == "run_failed":
+                return ("failed", None, "a comparison could not be judged: "
+                        "one of its runs did not finish or misses outputs "
+                        "(see the log)", {})
+            if res.status == "cap":
+                return ("failed", None, "the largest number of runs was "
+                        "reached before the stop ratio", {"values": values})
             if res.status == "upper_end":
                 return ("unbracketed", None,
                         "every comparison passed up to ms = %g, so the "

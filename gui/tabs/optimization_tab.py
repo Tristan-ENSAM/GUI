@@ -182,6 +182,13 @@ _MAX_PREVIEW_POINTS = 2000  # sampling points drawn (subsampled beyond)
 _MAX_GRID_POINTS = 5000000  # beyond this the points are not even counted
 
 
+def _scaled(eps, spec, i) -> dict:
+    """eps_q of a study: the eps_q of its spec times its step's share
+    (spec["eps_shares"] = [ms, h, D]; an older spec has none: share 1)."""
+    shares = spec.get("eps_shares") or [1.0, 1.0, 1.0]
+    return {k: float(v) * float(shares[i]) for k, v in eps.items()}
+
+
 class OptimizationTab(ModelStepsMixin, QWidget):
     # Emitted when a persisted optimization parameter changes, so the
     # main window can mark the profile dirty.
@@ -397,6 +404,36 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             eps_row.addSpacing(10)
         eps_row.addStretch(1)
         cg0.addLayout(eps_row, 1, 1)
+        lab = QLabel("Weight of each step in ε_q")
+        share_tip = (
+            "How ε_q is split between the steps: ms (step 0), h (step 1)\n"
+            "and D (step 2) are each judged against share × ε_q, with\n"
+            "share = weight / (sum of the three weights). The deviations\n"
+            "of the three steps add up (the final model differs from the\n"
+            "exact one by at most their sum), so the shares sum to 1 and\n"
+            "the final model stays within ε_q of the model with no mass\n"
+            "scaling, an infinitely fine mesh and an infinite domain.\n"
+            "Default 1, 1, 1: ε_q/3 each. Give a larger weight to the step\n"
+            "whose tolerance is the most expensive to tighten. The final\n"
+            "checks use the same shares (ms at the point: ms share; domain\n"
+            "grown: D share; mesh plan on D*: h share).")
+        lab.setToolTip(share_tip)
+        cg0.addWidget(lab, 2, 0)
+        share_row = QHBoxLayout()
+        share_row.setSpacing(4)
+        self._eps_share = {}
+        for step, text in (("ms", "ms"), ("mesh", "h"), ("domain", "D")):
+            lbl = QLabel(text)
+            lbl.setToolTip(share_tip)
+            share_row.addWidget(lbl)
+            le = num_edit(getattr(OptimizationCfgDefaults,
+                                  "eps_share_" + step), tip=share_tip)
+            le.setFixedWidth(64)
+            self._eps_share[step] = le
+            share_row.addWidget(le)
+            share_row.addSpacing(10)
+        share_row.addStretch(1)
+        cg0.addLayout(share_row, 2, 1)
         cg0.setColumnStretch(1, 1)
         cv0.addWidget(hint(
             "ε_q: defaults are those of the reference case (Ti6Al4V). "
@@ -489,6 +526,23 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "compared with the one before it (no expensive reference run).\n"
             "Both stop at the first failed comparison.")
         sg.addWidget(self.cb_ms_reference, 1, 1)
+        sg.addWidget(QLabel("search"), 2, 0)
+        self.cb_ms_search = QComboBox()
+        self.cb_ms_search.addItem(
+            "from ms = 1: multiply by a factor, then bisection", "bisection")
+        self.cb_ms_search.addItem("the listed values, in order", "list")
+        self.cb_ms_search.setToolTip(
+            "Bisection: runs ms = 1 (the model without mass scaling, the\n"
+            "reference of every comparison), then 1 × factor, 1 × factor²...\n"
+            "until a comparison fails, then the geometric middle of the last\n"
+            "passing and the failed value, until their ratio is below the\n"
+            "stop ratio (Advanced parameters). ms* = the last passing value:\n"
+            "every tested value below it passed. The values list and the\n"
+            "reference choice are not used.\n"
+            "Listed values: the list above, compared as chosen above;\n"
+            "values are added by doubling if every comparison passes.")
+        self.cb_ms_search.currentIndexChanged.connect(self._on_ms_search)
+        sg.addWidget(self.cb_ms_search, 2, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
@@ -510,7 +564,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "compared with the model without mass scaling. Before: "
             "enable the output filter (Step tab). Result: ms*, for the Step "
             "tab."))
-        sec = advanced("ms", lambda: [(self.le_ms_elem, "")])
+        sec = advanced("ms", lambda: [
+            (self.le_ms_elem, ""),
+            (self.le_ms_factor, OptimizationCfgDefaults.ms_factor),
+            (self.le_ms_stop, OptimizationCfgDefaults.ms_stop_ratio),
+            (self.le_ms_max, OptimizationCfgDefaults.ms_max)])
         ag = sub_grid(sec.body)
         ag.addWidget(QLabel("element size of these runs [mm]"), 0, 0)
         self.le_ms_elem = num_edit(
@@ -519,6 +577,27 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "coarsest mesh of the step-1 plan (finest × ratio^(n−1)),\n"
                 "the cheapest runs of the plan.")
         ag.addWidget(self.le_ms_elem, 0, 1)
+        ag.addWidget(QLabel("bisection: bracketing factor"), 1, 0)
+        self.le_ms_factor = num_edit(
+            OptimizationCfgDefaults.ms_factor,
+            tip="ms is multiplied by this factor from ms = 1 until a\n"
+                "comparison fails (default 10: 10, 100, 1000...).")
+        ag.addWidget(self.le_ms_factor, 1, 1)
+        ag.addWidget(QLabel("stop ratio ms_hi / ms_lo"), 2, 0)
+        self.le_ms_stop = num_edit(
+            OptimizationCfgDefaults.ms_stop_ratio,
+            tip="The bisection stops when the failed value over the passing\n"
+                "one is at most this ratio. The run time goes as 1/√ms, so\n"
+                "1.0201 = 1.01²: the failed value would save at most 1 % of\n"
+                "run time (less with the fixed cost of a run). From a\n"
+                "factor-10 bracket: 7 bisection runs.")
+        ag.addWidget(self.le_ms_stop, 2, 1)
+        ag.addWidget(QLabel("largest ms tried"), 3, 0)
+        self.le_ms_max = num_edit(
+            OptimizationCfgDefaults.ms_max,
+            tip="The bracketing never goes beyond this factor. If it passes,\n"
+                "ms* is not bracketed (the study says so).")
+        ag.addWidget(self.le_ms_max, 3, 1)
         ag.setColumnStretch(2, 1)
         sv.addWidget(sec)
 
@@ -726,6 +805,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "final checks. An unfinished study can then be resumed.")
         self.btn_open.clicked.connect(self._on_open_study)
         top.addWidget(self.btn_open)
+        self.btn_dev_maps = QPushButton("Deviation maps…")
+        self.btn_dev_maps.setToolTip(
+            "Maps of the deviation between two finished runs of a study\n"
+            "(ms, mesh or domain), frame by frame or over the time window,\n"
+            "and the two time curves at a clicked ZOI point. Reads the saved\n"
+            "results only: no Abaqus run.")
+        self.btn_dev_maps.clicked.connect(self._on_deviation_maps)
+        top.addWidget(self.btn_dev_maps)
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.setToolTip("Show the grey explanations under each step.")
@@ -1004,9 +1091,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # ===================================================================
     def _opt_line_edits(self):
         les = [self.le_grid_step, self.le_gci_finest, self.le_gci_ratio,
-               self.le_gci_min, self.le_ms_values, self.le_ms_elem]
+               self.le_gci_min, self.le_ms_values, self.le_ms_elem,
+               self.le_ms_factor, self.le_ms_stop, self.le_ms_max]
         les += list(self.le_zoi.values())
         les += list(self._q_eps.values())
+        les += list(self._eps_share.values())
         les += list(self._max.values())
         les += list(self._dom_texts.values())
         les += list(self._init_edit.values())
@@ -1018,6 +1107,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.sp_margin.valueChanged.connect(self._sync_opt_to_cfg)
         self.cb_ms_reference.currentIndexChanged.connect(
             self._sync_opt_to_cfg)
+        self.cb_ms_search.currentIndexChanged.connect(self._sync_opt_to_cfg)
         self.cb_reuse_runs.toggled.connect(self._sync_opt_to_cfg)
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
         for sp in self._dom_spins.values():
@@ -1056,6 +1146,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.zoi = {k: self.le_zoi[k].text()
                  for k in ("xmin", "xmax", "ymin", "ymax")}
         o.criterion_rmse = {q: le.text() for q, le in self._q_eps.items()}
+        for step, le in self._eps_share.items():
+            setattr(o, "eps_share_" + step, le.text())
         o.gci_finest = self.le_gci_finest.text()
         o.gci_ratio = self.le_gci_ratio.text()
         o.gci_min = self.le_gci_min.text()
@@ -1076,6 +1168,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.ms_values = self.le_ms_values.text()
         o.ms_elem_size = self.le_ms_elem.text()
         o.ms_reference = self.ms_reference()
+        o.ms_search = self.ms_search()
+        o.ms_factor = self.le_ms_factor.text()
+        o.ms_stop_ratio = self.le_ms_stop.text()
+        o.ms_max = self.le_ms_max.text()
         o.reuse_runs = bool(self.cb_reuse_runs.isChecked())
         self.changed.emit()
         self._refresh_step_status()
@@ -1092,6 +1188,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 self.le_zoi[k].setText(str(o.zoi.get(k, "")))
             for q, le in self._q_eps.items():
                 le.setText(str(o.criterion_rmse.get(q, "")))
+            for step, le in self._eps_share.items():
+                attr = "eps_share_" + step
+                le.setText(str(getattr(o, attr, getattr(
+                    OptimizationCfgDefaults, attr))))
             self.le_gci_finest.setText(str(o.gci_finest))
             self.le_gci_ratio.setText(str(o.gci_ratio or "2"))
             self.le_gci_min.setText(str(o.gci_min))
@@ -1119,6 +1219,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self.le_ms_elem.setText(str(getattr(o, "ms_elem_size", "")))
             self.set_ms_reference(getattr(
                 o, "ms_reference", OptimizationCfgDefaults.ms_reference))
+            self.set_ms_search(getattr(
+                o, "ms_search", OptimizationCfgDefaults.ms_search))
+            for le, attr in ((self.le_ms_factor, "ms_factor"),
+                             (self.le_ms_stop, "ms_stop_ratio"),
+                             (self.le_ms_max, "ms_max")):
+                le.setText(str(getattr(o, attr, getattr(
+                    OptimizationCfgDefaults, attr))))
             self.cb_reuse_runs.setChecked(bool(getattr(
                 o, "reuse_runs", OptimizationCfgDefaults.reuse_runs)))
         finally:
@@ -1496,6 +1603,32 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 if math.isfinite(v):
                     out[q] = v
         return out
+
+    def eps_shares(self) -> dict:
+        """{"ms", "mesh", "domain"} -> share of eps_q of each step: its
+        weight over the sum of the three (so the shares sum to 1); raises
+        ValueError unless every weight is a number > 0."""
+        w = {}
+        for step, le in self._eps_share.items():
+            v = self._float_or(le, None)
+            if v is None or not (math.isfinite(v) and v > 0.0):
+                raise ValueError("the weight of each step in ε_q must be a "
+                                 "number > 0")
+            w[step] = float(v)
+        total = sum(w.values())
+        return {step: v / total for step, v in w.items()}
+
+    def _eps_shares_list(self):
+        sh = self.eps_shares()
+        return [sh["ms"], sh["mesh"], sh["domain"]]
+
+    def _shares_or_warn(self, title):
+        """[ms, h, D] shares of eps_q, or None after a warning."""
+        try:
+            return self._eps_shares_list()
+        except ValueError as e:
+            QMessageBox.warning(self, title, str(e))
+            return None
 
     def thresholds_complete(self) -> bool:
         """True iff every field/force has a threshold (all are required)."""
@@ -1916,6 +2049,21 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # ===================================================================
     # Shared launch helpers (preserved verbatim)
     # ===================================================================
+    def _on_deviation_maps(self):
+        """Open (or bring back) the deviation-maps window on the study
+        folders recorded for this model."""
+        from gui.widgets.deviation_maps_dialog import DeviationMapsDialog
+        dlg = getattr(self, "_dev_maps_dialog", None)
+        if dlg is None:
+            prefs = self._prefs_getter() if self._prefs_getter else None
+            dlg = DeviationMapsDialog(
+                folders=self._known_folders(),
+                start_dir=str(getattr(prefs, "default_workdir", "") or ""),
+                parent=self)
+            self._dev_maps_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
     def _open_working_dir(self):
         """Open the Preferences working directory in the file explorer."""
         prefs = self._prefs_getter() if self._prefs_getter else None
@@ -2036,7 +2184,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     def ms_settings(self):
         """(ms values, element size) of step 0; raises ValueError. A blank
         element size is the coarsest mesh of the step-1 plan."""
-        values = parse_ms_values(self.le_ms_values.text())
+        values = ((1.0,) if self.ms_search() == "bisection"
+                  else parse_ms_values(self.le_ms_values.text()))
         elem = self._float_or(self.le_ms_elem, None)
         if elem is None:
             elem = self._gci_plan_sizes()[-1]
@@ -2053,6 +2202,34 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "previous" if ref == "previous" else "first")
         if i >= 0 and i != self.cb_ms_reference.currentIndex():
             self.cb_ms_reference.setCurrentIndex(i)
+
+    def ms_search(self) -> str:
+        """"bisection" or "list": how the ms values are chosen."""
+        return self.cb_ms_search.currentData() or "bisection"
+
+    def set_ms_search(self, search) -> None:
+        i = self.cb_ms_search.findData(
+            "list" if search == "list" else "bisection")
+        if i >= 0 and i != self.cb_ms_search.currentIndex():
+            self.cb_ms_search.setCurrentIndex(i)
+        self._on_ms_search()
+
+    def _on_ms_search(self, *_):
+        """The values list and the reference only serve the list search."""
+        lst = self.ms_search() == "list"
+        self.le_ms_values.setEnabled(lst)
+        self.cb_ms_reference.setEnabled(lst)
+
+    def ms_search_settings(self):
+        """(factor, stop ratio, largest ms) of the bisection; raises
+        ValueError."""
+        f = self._float_or(self.le_ms_factor, 10.0)
+        r = self._float_or(self.le_ms_stop, 1.0201)
+        m = self._float_or(self.le_ms_max, 1e7)
+        if not (f > 1.0 and r > 1.0 and m > 1.0):
+            raise ValueError("bisection: the factor and the stop ratio must "
+                             "be > 1 and the largest ms > 1")
+        return float(f), float(r), float(m)
 
     def _study_base_cfg(self, spec, elem=None):
         """Config of a study's runs: the current model with what the study
@@ -2105,10 +2282,26 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "Enable the output filter (Step tab): the filter and "
                 "reverberation checks are safeguards of the ms study.")
             return None
+        shares = self._shares_or_warn("Mass-scaling study settings")
+        if shares is None:
+            return None
+        search = self.ms_search()
+        bis = {}
+        if search == "bisection":
+            try:
+                f, r, m = self.ms_search_settings()
+            except ValueError as e:
+                QMessageBox.warning(self, "Mass-scaling study settings",
+                                    str(e))
+                return None
+            bis = {"factor": f, "stop_ratio": r, "ms_max": m}
+            ms_values = (1.0,)
         return {
             "zoi": self._zoi_dict(self.zoi()),
             "elem_size": elem, "ms_values": list(ms_values),
-            "reference": self.ms_reference(),
+            "reference": ("first" if search == "bisection"
+                          else self.ms_reference()),
+            "search": search, **bis, "eps_shares": shares,
             "grid_step": self.grid_step(),
             "grid_step_set": self._grid_step_set(),
             "thresholds_abs": self.thresholds(),
@@ -2136,7 +2329,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # A study started before the reference choice compared successive
         # values.
         reference = spec.get("reference") or "previous"
-        thr = {k: float(v) for k, v in spec["thresholds_abs"].items()}
+        # A study started before the bisection search ran its list.
+        search = spec.get("search") or "list"
+        bis = {}
+        if search == "bisection":
+            reference = "first"
+            bis = {"factor": float(spec.get("factor", 10.0)),
+                   "stop_ratio": float(spec.get("stop_ratio", 1.0201)),
+                   "ms_max": float(spec.get("ms_max", 1e7))}
+        thr = _scaled(spec["thresholds_abs"], spec, 0)
         window = tuple(float(v) for v in spec["window"])
         grid = float(spec["grid_step"])
         guards = GuardSettings(rk_max=float(spec["rk_max"]),
@@ -2146,7 +2347,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         run_bundle = self._begin_study("ms", spec, run_dir, prefs, cpus, mode,
                                        then, **extra)
         self._pending_ms_dir = run_dir
-        self._ms_plan = ms_values
+        # The bisection chooses its values as it goes: no plan to predict.
+        self._ms_plan = ms_values if search == "list" else ()
         self._ms_cost_pts = []
 
         def cost_fn(bundle, d, host_wall_s):
@@ -2176,7 +2378,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("MASS-SCALING FACTOR BY INDEPENDENCE (mesh, domain fixed)")
         self._log_ui("  ms: %s | mesh %.4g mm | domain h_wp=%.4g h_void=%.4g "
                      "l_wp=%.4g l_void=%.4g | T [%.3g, %.3g]"
-                     % (", ".join("%g" % v for v in ms_values), elem,
+                     % ((", ".join("%g" % v for v in ms_values)
+                         if search == "list" else
+                         "from %g, x%g until a failure, then bisection "
+                         "until ms_hi/ms_lo <= %g (largest ms %g)"
+                         % (ms_values[0], bis["factor"], bis["stop_ratio"],
+                            bis["ms_max"])), elem,
                         dims.h_wp, dims.h_void, dims.l_wp, dims.l_void,
                         window[0], window[1]))
         self._log_ui("  each run compared with %s"
@@ -2195,7 +2402,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             domain_dims=dims, grid_step=grid, elem_size=elem,
             thresholds=thr, ms_values=ms_values, window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
-            guard_fn=guard_fn, cost_fn=cost_fn, reference=reference)
+            guard_fn=guard_fn, cost_fn=cost_fn, reference=reference,
+            search=search, **bis)
         self._ms_worker.progress.connect(self._on_ms_progress)
         self._ms_worker.finished_ok.connect(self._on_ms_done)
         self._ms_worker.failed.connect(self._on_fail)
@@ -2295,7 +2503,20 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                            "sequence lower (or, with the first value as "
                            "reference, bring the second value closer to it)",
             "cancelled": "cancelled (ms reached: %s)",
+            "run_failed": "a comparison could not be judged, one of its "
+                          "runs did not finish or misses outputs (last "
+                          "passing ms: %s); fix the run and resume",
+            "cap": "the largest number of runs was reached (last passing "
+                   "ms: %s)",
         }.get(res.status, res.status + " (%s)")
+        if res.status == "upper_end" and \
+                (res.settings or {}).get("search") == "bisection":
+            why = ("every value passed up to the largest ms tried (%s): ms* "
+                   "is not bracketed")
+        if res.status == "below_range" and \
+                (res.settings or {}).get("search") == "bisection":
+            why = ("no ms above the reference passed down to the stop ratio "
+                   "(%s)")
         why = why % ("n/a" if res.retained is None else "%g" % res.retained)
         if res.status in ("below_range", "converged") and \
                 failure_cause(res) == "run":
@@ -2347,6 +2568,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "Domain study settings", str(e))
             return None
+        shares = self._shares_or_warn("Domain study settings")
+        if shares is None:
+            return None
         margin = self._initial_margin()
         if not zoi_inside(dims0, self.zoi(),
                           margin * float(self.cfg.elem_size),
@@ -2385,6 +2609,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "caps": self.caps(),
             "initial_dims": self._dims_dict(dims0),
+            "eps_shares": shares,
             "base_ms": self._base_ms(),
             "filter_verify": bool(getattr(self.cfg.step,
                                           "output_filter_verify", True))}
@@ -2407,7 +2632,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dims0 = DomainDims(**{k: float(spec["initial_dims"][k])
                               for k in DIM_KEYS})
         caps = {k: float(v) for k, v in (spec.get("caps") or {}).items()}
-        thr = {k: float(v) for k, v in spec["thresholds_abs"].items()}
+        thr = _scaled(spec["thresholds_abs"], spec, 2)
         window = tuple(float(v) for v in spec["window"])
         grid = float(spec["grid_step"])
         guards = GuardSettings(rk_max=float(spec["rk_max"]),
@@ -2732,9 +2957,18 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if self._last_gci is not None:
             gres, gtol = self._last_gci[0], self._last_gci[2] or {}
             gci_pts = False
+            dev = getattr(gres, "deviation", None) or {}
             for q, g in gres.per_quantity.items():
                 ref = g.f_extrapolated if g.reliable else g.f_fine
                 eps = gtol.get(q)
+                if dev:     # pointwise E_q / eps_q against the finest mesh
+                    hs = [h for h in gres.sizes if q in dev.get(h, {})]
+                    ys = [dev[h][q] for h in hs]
+                    if hs and eps:
+                        axg.plot(hs, ys, marker="s", lw=1.0, label=q)
+                        gci_pts = gci_pts or any(math.isfinite(y)
+                                                 for y in ys)
+                    continue
                 hs = [h for h in gres.sizes if q in gres.scalars.get(h, {})]
                 ys = []
                 for h in hs:
@@ -2827,13 +3061,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "Set the six absolute tolerances eps_q of the common settings "
                 "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
             return None
+        shares = self._shares_or_warn("Interaction checks")
+        if shares is None:
+            return None
         h_star = float(study.settings["elem_size"])
         zoi = [float(v) for v in study.settings["zoi"]]
         plan = self._gci_plan_for_checks(h_star)
         gci_plan = dict(plan, zoi=zoi,
                         grid_step=float(study.settings["grid_step"]),
                         field_vars=["EVF", "TEMP", "V1", "V2"],
-                        window=window, evf_threshold=0.5)
+                        window=window, evf_threshold=0.5,
+                        selection="pointwise")
         d = study.final
         dspec = getattr(self, "_last_domain_spec", None)
         filter_on = bool(getattr(self.cfg.step, "output_filter_enabled",
@@ -2844,8 +3082,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                        float(d.l_void)],
             "gci_plan": gci_plan, "gci_tolerances": self._gci_tolerances(),
             "zoi": zoi,
-            "thresholds_abs": {k: float(v) for k, v in
-                               study.settings["thresholds"].items()},
+            # eps_q as set (the key of the result); each check takes its
+            # step's share of it.
+            "thresholds_abs": (self.thresholds() if shares else
+                               {k: float(v) for k, v in
+                                study.settings["thresholds"].items()}),
+            "eps_shares": shares,
             "window": window, "rk_max": guards.rk_max,
             "rhg_max": guards.rhg_max, "ms_lower": self.ms_lower_for_checks(),
             # As the step-2 study had it: the checks sample like it did.
@@ -2887,8 +3129,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "field_vars": tuple(p.get("field_vars")
                                 or ("EVF", "TEMP", "V1", "V2")),
             "window": tuple(float(v) for v in p.get("window") or window),
-            "evf_threshold": float(p.get("evf_threshold", 0.5))}
-        gci_tol = {k: float(v) for k, v in spec["gci_tolerances"].items()}
+            "evf_threshold": float(p.get("evf_threshold", 0.5)),
+            "selection": p.get("selection", "mean")}
+        gci_tol = _scaled(spec["gci_tolerances"], spec, 1)
+        # Check 4 (ms at the point) with the ms share; an older spec has
+        # no shares: the domain study's eps_q, as before.
+        ms_thr = (_scaled(spec["thresholds_abs"], spec, 0)
+                  if spec.get("eps_shares") else None)
         guards = GuardSettings(rk_max=float(spec["rk_max"]),
                                rhg_max=float(spec["rhg_max"]), window=window)
         ms_lower = spec.get("ms_lower")
@@ -2952,6 +3199,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             study=study, h_star=h_star, gci_plan=gci_plan,
             gci_tolerances=gci_tol, guard_fn=guard_core,
             cost_fn=cost_fn, ms_lower=ms_lower, ms_guard_fn=ms_guard_fn,
+            ms_thresholds=ms_thr,
             gci_runner_factory=lambda rb: RecordingRunner(
                 rb, n_cpu=cpus, guard_settings=guards))
         self._checks_worker.progress.connect(self._on_checks_progress)
@@ -3020,9 +3268,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "Safeguards", str(e))
             return None
+        shares = self._shares_or_warn("Mesh convergence settings")
+        if shares is None:
+            return None
         return {
             "zoi": self._zoi_dict(self.zoi()),
-            "window": list(window),
+            "window": list(window), "eps_shares": shares,
             "finest_elem_size": self._float_or(self.le_gci_finest,
                                                float(self.cfg.elem_size)),
             "ratio": self._float_or(self.le_gci_ratio, 2.0),
@@ -3033,6 +3284,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "tolerances": self._gci_tolerances(),
             "field_vars": ["EVF", "TEMP", "V1", "V2"],
             "evf_threshold": 0.5,
+            # h* from the pointwise E_q against the finest mesh (common
+            # metric of the three studies, 2026-10-20); an older folder
+            # without the key replays its space-time mean selection.
+            "selection": "pointwise",
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "domain_dims": self._dims_dict(self._dims_from_cfg()),
             "base_ms": self._base_ms(),
@@ -3057,7 +3312,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         nmesh = int(spec["n_meshes"])
         minh = spec.get("min_elem_size")
         minh = None if minh is None else float(minh)
-        gci_tol = {k: float(v) for k, v in spec["tolerances"].items()}
+        gci_tol = _scaled(spec["tolerances"], spec, 1)
         dims = DomainDims(**{k: float(spec["domain_dims"][k])
                              for k in DIM_KEYS})
         grid = float(spec["grid_step"])
@@ -3100,7 +3355,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                              or ("EVF", "TEMP", "V1", "V2")),
             window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
-            min_elem_size=minh)
+            min_elem_size=minh, selection=spec.get("selection", "mean"))
         self._mesh_worker.progress.connect(self._on_mesh_progress)
         self._mesh_worker.finished_ok.connect(self._on_mesh_done)
         self._mesh_worker.failed.connect(self._on_fail)
@@ -3131,6 +3386,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                    "" if g.reliable else "  [extrapolation unreliable "
                    "\u2014 converged/noisy or p < 0.5, ref = finest]"))
         self._log_ui("  in asymptotic range: %s" % res.in_asymptotic_range)
+        for h in sorted(getattr(res, "deviation", {}) or {}):
+            self._log_ui("  h=%.4g vs finest: %s" % (h, "  ".join(
+                "%s E/eps=%.3g" % (q, r)
+                for q, r in sorted(res.deviation[h].items()))))
         rec = res.recommended_size
         self._log_ui("  recommended element size: %s"
                      % ("none within tolerance" if rec is None

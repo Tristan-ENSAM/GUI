@@ -224,22 +224,36 @@ def mesh_domain_check(gci_result, h_star: float,
     # |f_q(h*) - f_q^ref| / eps_q with the absolute common tolerances (same
     # criterion as the GCI's recommended size, see mesh_gci).
     worst, crit, ratio = 0.0, None, {}
+    pointwise = getattr(gci_result, "selection", "mean") == "pointwise"
+    finest = min(sizes) if sizes else None
     for q, g in gci_result.per_quantity.items():
         tol = tolerances.get(q)
         if tol is None or tol <= 0:
             continue
-        fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
-        ref = g.f_extrapolated if g.reliable else g.f_fine
-        if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
-            r = float("inf")
+        if pointwise:
+            # E_q / eps_q against the finest mesh (the GCI's own metric).
+            # h* = finest mesh: only the next coarser mesh has a measured
+            # deviation; it is reported and h* passes only by the exit rule.
+            at = h
+            if finest is not None and math.isclose(h, finest, rel_tol=1e-9):
+                at = sorted(sizes)[1] if len(sizes) > 1 else h
+            r = gci_result.deviation.get(at, {}).get(q, float("inf"))
         else:
-            r = abs(fq - ref) / tol
+            fq = gci_result.scalars.get(h, {}).get(q, float("nan"))
+            ref = g.f_extrapolated if g.reliable else g.f_fine
+            if fq is None or not (math.isfinite(fq) and math.isfinite(ref)):
+                r = float("inf")
+            else:
+                r = abs(fq - ref) / tol
         ratio[q] = r
         if crit is None or r > worst:
             worst, crit = r, q
     res.e_max, res.q_crit = worst, crit
     res.details["dev_over_eps"] = ratio
     within = crit is not None and math.isfinite(worst) and worst <= 1.0
+    if pointwise and finest is not None and math.isclose(h, finest,
+                                                         rel_tol=1e-9):
+        within = False            # the reference cannot validate itself
     # Exit rule (decision of 2026-10-19): h* = h_min, the lower bound of the
     # plan, is admissible when no mesh is within tolerance on D*; the
     # deviations beyond eps_q are reported.
@@ -349,10 +363,15 @@ def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
                       ms_lower: Optional[float] = None,
                       guard_fn: Optional[Callable] = None,
                       cost_fn: Optional[Callable] = None,
-                      emit: Optional[Callable[[dict], None]] = None
+                      emit: Optional[Callable[[dict], None]] = None,
+                      thresholds: Optional[Dict[str, float]] = None
                       ) -> CheckResult:
-    """Check 4 (see module docstring). Adds its run to study.runs."""
-    s = study.settings
+    """Check 4 (see module docstring). Adds its run to study.runs.
+    `thresholds`: eps_q of this check (the share of eps_q given to ms);
+    default: those of the domain study."""
+    s = dict(study.settings)
+    if thresholds:
+        s["thresholds"] = dict(thresholds)
     elem = float(s["elem_size"])
     res = CheckResult("ms_at_point", CHECK_PURPOSES["ms_at_point"],
                       passed=None)
@@ -500,6 +519,7 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
                            gci_runner_factory: Optional[Callable] = None,
                            ms_lower: Optional[float] = None,
                            ms_guard_fn: Optional[Callable] = None,
+                           ms_thresholds: Optional[Dict[str, float]] = None,
                            should_cancel: Optional[Callable[[], bool]] = None,
                            progress_cb: Optional[Callable[[dict], None]] = None
                            ) -> ChecksResult:
@@ -509,6 +529,8 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
 
     ms_lower : ms compared with ms* in check 4 (default ms*/2).
     ms_guard_fn : safeguards of the check-4 run (default guard_fn).
+    ms_thresholds : eps_q of check 4 (default those of the domain study);
+        checks 1 and 2 use the domain study's and `gci_tolerances`.
 
     gci_plan : kwargs of mesh_gci.run_mesh_gci other than run_bundle,
         base_cfg, domain_dims, tolerances (finest_elem_size, ratio, n_meshes,
@@ -547,7 +569,8 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
 
     c4 = ms_at_point_check(run_bundle, base_cfg, study, ms_lower,
                            ms_guard_fn if ms_guard_fn is not None
-                           else guard_fn, cost_fn, emit)
+                           else guard_fn, cost_fn, emit,
+                           thresholds=ms_thresholds)
     out.checks.append(c4)
     emit({"phase": "check", "check": c4})
     if cancelled():

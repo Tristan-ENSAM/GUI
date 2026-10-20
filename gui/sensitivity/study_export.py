@@ -281,6 +281,10 @@ def gci_mesh_rows(gci_result, calls: Optional[Sequence] = None
                                     rel_tol=1e-9))}
         for q, v in gci_result.scalars.get(h, {}).items():
             row["f_" + q] = _num(v)
+        # Pointwise selection: E_q / eps_q against the finest mesh.
+        for q, v in (getattr(gci_result, "deviation", {}) or {}).get(
+                h, {}).items():
+            row["E_over_eps_" + q] = _num(v)
         c = by_h.get(round(h, 12))
         row.update(_cost(c) if c is not None else
                    {k: None for k in COST_FIELDS})

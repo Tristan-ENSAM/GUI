@@ -287,6 +287,44 @@ def zoi_scalars(bundle, zoi: Sequence[float], grid_step: float,
 
 
 # ---------------------------------------------------------------------------
+# Pointwise deviation (metric of the ms and domain studies)
+# ---------------------------------------------------------------------------
+def _pointwise_sample(bundle, zoi, grid_step, h, field_vars, force_channels,
+                      window, evf_threshold):
+    """ZoiSample of one mesh run, linear sampling, forces per unit width."""
+    from gui.sensitivity.deviation_maps import sample_run
+    from gui.sensitivity.study_specs import GCI_TO_EPS
+    q = ["EVF"] + [GCI_TO_EPS.get(v, v) for v in field_vars]
+    q += [GCI_TO_EPS.get(f, f) for f in force_channels]
+    q = tuple(dict.fromkeys(q))
+    return sample_run(bundle, zoi, grid_step, h, window=window,
+                      evf_threshold=evf_threshold, quantities=q, linear=True)
+
+
+def _pointwise_deviation(s_ref, s_h, zoi, grid_step, window, evf_threshold,
+                         tolerances, quantities) -> Dict[str, float]:
+    """E_q / eps_q of the mesh sample `s_h` against the reference sample,
+    keyed by the GCI names; inf when a quantity cannot be compared."""
+    from gui.sensitivity.deviation_maps import CompareSettings, compare_samples
+    from gui.sensitivity.study_specs import GCI_TO_EPS
+    thr = {GCI_TO_EPS.get(q, q): tolerances[q] for q in quantities
+           if q in tolerances}
+    settings = CompareSettings(step="elem_size", zoi=tuple(zoi),
+                               grid_step=float(grid_step),
+                               window=tuple(window), thresholds=thr,
+                               evf_threshold=float(evf_threshold))
+    pair = compare_samples(s_ref, s_h, settings, linear=True)
+    out = {}
+    for q in quantities:
+        if q not in tolerances:
+            continue
+        d = pair.quantities.get(GCI_TO_EPS.get(q, q))
+        e = d.e_inst if d is not None else float("nan")
+        out[q] = e if math.isfinite(e) else float("inf")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Study driver
 # ---------------------------------------------------------------------------
 @dataclass
@@ -303,6 +341,12 @@ class MeshGciResult:
     in_asymptotic_range: bool = False
     n_runs: int = 0
     stopped_by: str = ""       # "ok"|"cancelled"|"nan"
+    # How the recommended size is chosen: "pointwise" (E_q / eps_q of each
+    # mesh against the finest one, the metric of the ms and domain studies)
+    # or "mean" (one space-time mean per quantity against the Richardson or
+    # finest reference). `deviation[h][q]` is the E_q / eps_q used.
+    selection: str = "mean"
+    deviation: Dict[float, Dict[str, float]] = field(default_factory=dict)
 
 
 def _mesh_sizes(finest: float, ratio: float, n: int,
@@ -325,6 +369,7 @@ def run_mesh_gci(
         window: Tuple[float, float] = (0.3, 1.0), evf_threshold: float = 0.9,
         force_channels: Optional[Dict[str, str]] = None,
         min_elem_size: Optional[float] = None, safety: float = _SAFETY_3PLUS,
+        selection: str = "pointwise",
         should_cancel: Optional[Callable] = None,
         progress_cb: Optional[Callable] = None) -> MeshGciResult:
     """GCI/Richardson mesh convergence on a FIXED (large) domain.
@@ -341,6 +386,21 @@ def run_mesh_gci(
     quantities outside eps_q are listed in `exceeding`: the mesh cannot be
     refined further, so the remaining deviation is reported, not removed.
 
+    `selection` sets the deviation used for that choice:
+
+    * "pointwise" (default): E_q / eps_q of each mesh against the FINEST mesh,
+      i.e. the mean over the ZOI points and frames of |q_h - q_finest| / eps_q
+      (Vx, Vy, T masked by EVF of both runs; the metric of the ms and domain
+      studies, the coarser mesh sampled by linear interpolation of the
+      element centroids). The finest mesh is the reference, so it is only
+      retained through the h_min exit rule; its reported deviation is then
+      that of the next coarser mesh (the only measured one).
+    * "mean": the space-time mean of each quantity against the
+      Richardson-extrapolated value (finest value when not reliable).
+
+    In both cases p, the extrapolated value and the GCI are computed and
+    reported.
+
     The domain must be large enough that the ZOI is boundary-independent (run
     the domain study, or use a conservative domain); otherwise p/GCI describe a
     boundary-contaminated field, not mesh error.
@@ -349,8 +409,11 @@ def run_mesh_gci(
         force_channels = {"Fc": "RF1_RP", "Ff": "RF2_RP"}
     tolerances = {q: float(t) for q, t in (tolerances or {}).items()
                   if t is not None and float(t) > 0}
+    if selection not in ("pointwise", "mean"):
+        raise ValueError("selection must be 'pointwise' or 'mean'")
     sizes = _mesh_sizes(finest_elem_size, ratio, n_meshes, min_elem_size)
-    result = MeshGciResult(sizes=list(sizes))
+    result = MeshGciResult(sizes=list(sizes), selection=selection)
+    samples = {}
 
     for h in sizes:
         if should_cancel is not None and should_cancel():
@@ -367,6 +430,10 @@ def run_mesh_gci(
         result.scalars[h] = zoi_scalars(
             bundle, zoi, grid_step, field_vars, window=window,
             evf_threshold=evf_threshold, force_channels=force_channels)
+        if selection == "pointwise":
+            samples[h] = _pointwise_sample(
+                bundle, zoi, grid_step, h, field_vars, force_channels,
+                window, evf_threshold)
         # The RF at the tool RP is the reaction over the model WIDTH, and the
         # slab depth = elem_size (cel_model.py:283/289/314), so the raw force
         # scales with the mesh. Divide by the width (= h) to get force per unit
@@ -403,7 +470,15 @@ def run_mesh_gci(
     # is reliable, else the FINEST value (a quantity already converged below the
     # noise floor has a meaningless extrapolate -- see QuantityGci.reliable --
     # and must not block the recommendation with a garbage h->0 estimate).
+    if selection == "pointwise":
+        for h in sizes[1:]:
+            result.deviation[h] = _pointwise_deviation(
+                samples[sizes[0]], samples[h], zoi, grid_step, window,
+                evf_threshold, tolerances, quantities)
+
     def _dev_over_eps(h: float) -> Dict[str, float]:
+        if selection == "pointwise":
+            return dict(result.deviation.get(h, {}))
         out = {}
         for q in quantities:
             g = result.per_quantity.get(q)
@@ -422,7 +497,8 @@ def run_mesh_gci(
         return all(r <= 1.0 for r in _dev_over_eps(h).values())
 
     if any(q in tolerances for q in quantities):
-        for h in sorted(sizes, reverse=True):    # coarsest first
+        eligible = sizes[1:] if selection == "pointwise" else sizes
+        for h in sorted(eligible, reverse=True):    # coarsest first
             if _within_tol(h):
                 result.recommended_size = h
                 break
@@ -431,7 +507,10 @@ def run_mesh_gci(
                 and finest <= float(min_elem_size) * (1.0 + 1e-9)):
             result.recommended_size = finest
             result.at_lower_bound = True
-            result.exceeding = {q: r for q, r in _dev_over_eps(finest).items()
+            # Pointwise: the finest mesh is the reference; the deviation
+            # reported is that of the next coarser mesh.
+            at = sizes[1] if selection == "pointwise" else finest
+            result.exceeding = {q: r for q, r in _dev_over_eps(at).items()
                                 if not r <= 1.0}
 
     if any(not math.isfinite(g.p) for g in result.per_quantity.values()):

@@ -511,6 +511,22 @@ class OptimizationCfg:
     ms_values:      str  = "1, 250, 500, 1000, 2000, 4000"
     ms_elem_size:   str  = ""
     ms_reference:   str  = "first"
+    # How the factors are chosen (2026-10-20): "bisection" runs ms = 1, then
+    # brackets ms* by multiplying by ms_factor and bisects until
+    # ms_hi / ms_lo <= ms_stop_ratio (1.0201: ms_hi would save at most 1 %
+    # of run time, t ~ ms^-1/2); ms_max caps the bracket. "list": the
+    # ms_values in order.
+    # Weights of the steps in eps_q (Tristan, 2026-10-20): each step is
+    # judged against eps_q * weight / (sum of the weights). The three
+    # deviations add up, so shares summing to 1 keep the final model within
+    # eps_q of the exact one. Default 1, 1, 1: eps_q / 3 each.
+    eps_share_ms:     str  = "1"
+    eps_share_mesh:   str  = "1"
+    eps_share_domain: str  = "1"
+    ms_search:      str  = "bisection"
+    ms_factor:      str  = "10"
+    ms_stop_ratio:  str  = "1.0201"
+    ms_max:         str  = "1e7"
     # Reuse the finished runs of earlier studies whose parameters are
     # exactly those of a run to make (2026-10-20). Off: a new study launches
     # every run; a resumed study still reuses the runs of its own folder.

@@ -17,8 +17,15 @@ from gui.core.domain_sizing import DomainDims
 import gui.sensitivity.mesh_gci as mg
 from gui.sensitivity.mesh_gci import (
     observed_order, extrapolated_value, gci, asymptotic_ratio, quantity_gci,
-    bilinear_field, zoi_scalars, run_mesh_gci, MeshGciResult,
+    bilinear_field, zoi_scalars, MeshGciResult,
 )
+
+
+def run_mesh_gci(*a, **kw):
+    """The driver with the space-time mean selection (the analytic scalar
+    model below); the pointwise selection is tested in TestPointwise."""
+    kw.setdefault("selection", "mean")
+    return mg.run_mesh_gci(*a, **kw)
 
 
 def _power_law(f_exact, C, p, sizes):
@@ -371,3 +378,84 @@ class TestReliabilityGuard:
         assert res.per_quantity["Fc"].reliable is False
         assert res.per_quantity["Ff"].reliable is False
         assert res.recommended_size is not None
+
+
+# --- Pointwise selection (E_q against the finest mesh) -----------------------
+class TestPointwise:
+    """The pointwise selection with an analytic deviation model: E_q / eps_q
+    of mesh h against the finest = K_q (h - h_finest) / eps_q."""
+    ZOI = (-0.04, 0.04, -0.04, 0.04)
+    DIMS = DomainDims(0.255, 0.055, 0.255, 0.055)
+    K = {"EVF": 0.0, "TEMP": 1000.0, "V1": 2000.0, "V2": 0.0,
+         "Fc": 500.0, "Ff": 0.0}
+
+    @pytest.fixture(autouse=True)
+    def _patch_pointwise(self, monkeypatch):
+        monkeypatch.setattr(mg, "_pointwise_sample",
+                            lambda bundle, *a, **kw: bundle.elem_size)
+        k = self.K
+
+        def dev(h_ref, h, zoi, gs, window, evf, tol, quantities):
+            return {q: k[q] * (h - h_ref) / tol[q] for q in quantities
+                    if q in tol}
+        monkeypatch.setattr(mg, "_pointwise_deviation", dev)
+
+    def _run(self, tol, **kw):
+        return mg.run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.001, ratio=2.0, n_meshes=3,
+            tolerances=tol, **kw)
+
+    def test_default_is_pointwise(self):
+        res = self._run({q: 10.0 for q in _BASE})
+        assert res.selection == "pointwise"
+        assert set(res.deviation) == {0.002, 0.004}
+
+    def test_coarsest_mesh_within_eps_against_finest(self):
+        # E_V1(h) = 2000 (h - 0.001) / 10: 0.2 at 0.002, 0.6 at 0.004.
+        res = self._run({q: 10.0 for q in _BASE})
+        assert res.recommended_size == pytest.approx(0.004)
+        assert res.deviation[0.004]["V1"] == pytest.approx(0.6)
+
+    def test_middle_mesh_when_coarsest_fails(self):
+        # eps 4: E_V1 = 0.5 at 0.002, 1.5 at 0.004.
+        res = self._run({q: 4.0 for q in _BASE})
+        assert res.recommended_size == pytest.approx(0.002)
+
+    def test_finest_is_never_recommended_against_itself(self):
+        # eps 1: every coarser mesh fails; no lower bound -> no size.
+        res = self._run({q: 1.0 for q in _BASE})
+        assert res.recommended_size is None
+        assert not res.at_lower_bound
+
+    def test_lower_bound_reports_the_next_coarser_mesh(self):
+        res = self._run({q: 1.0 for q in _BASE}, min_elem_size=0.001)
+        assert res.recommended_size == pytest.approx(0.001)
+        assert res.at_lower_bound
+        # E at 0.002: V1 2.0, TEMP 1.0 (not > 1), Fc 0.5.
+        assert res.exceeding == {"V1": pytest.approx(2.0)}
+
+    def test_gci_scalars_still_reported(self):
+        res = self._run({q: 10.0 for q in _BASE})
+        assert res.per_quantity["V1"].p == pytest.approx(2.0, rel=1e-6)
+
+
+class TestPointwiseDeviation:
+    """`_pointwise_deviation` on real samples: E_q is the pointwise metric."""
+
+    def test_constant_offset_gives_offset_over_eps(self):
+        from gui.sensitivity.domain_independence import ZoiSample
+        t = np.linspace(0.3, 1.0, 8)
+        npts = 9 * 9            # roi_grid((-0.04, 0.04)^2, 0.01)
+        a = ZoiSample(field_times=t)
+        a.fields = {"EVF": np.ones((8, npts)),
+                    "Vx": np.full((8, npts), 100.0)}
+        b = ZoiSample(field_times=t)
+        b.fields = {"EVF": np.ones((8, npts)),
+                    "Vx": np.full((8, npts), 103.0)}
+        a.force_times = b.force_times = np.zeros(0)
+        out = mg._pointwise_deviation(
+            a, b, (-0.04, 0.04, -0.04, 0.04), 0.01, (0.3, 1.0), 0.5,
+            {"V1": 10.0, "TEMP": 10.0}, ["V1", "TEMP"])
+        assert out["V1"] == pytest.approx(0.3)
+        assert out["TEMP"] == float("inf")      # not in the samples
