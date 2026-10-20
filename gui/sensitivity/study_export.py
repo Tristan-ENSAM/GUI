@@ -433,13 +433,24 @@ _MS_GUARDS = ("outputs", "R_K", "R_HG", "filter", "reverb")
 
 def ms_run_rows(ms_result) -> List[Dict[str, object]]:
     """One row per ms run: factor, cost, safeguards (filter and
-    reverberation checks included)."""
+    reverberation checks included). The predicted solver time is the fit
+    t = a + b * N_inc over the runs of the study (gui.sensitivity.
+    cost_model); cost_in_fit False marks a run left out of it (slowed by
+    another process: its C_CPU is not representative)."""
+    from gui.sensitivity.cost_model import fit_cost
     rows = []
-    for r, ms in zip(ms_result.runs, ms_result.run_ms):
+    costs = [getattr(r, "cost", None) for r in ms_result.runs]
+    fit = fit_cost([getattr(c, "n_inc", None) for c in costs],
+                   [getattr(c, "t_wall_solver_s", None) for c in costs])
+    for i, (r, ms) in enumerate(zip(ms_result.runs, ms_result.run_ms)):
         row = {"run": r.index, "mass_scaling_factor": ms,
                "mesh_size_mm": ms_result.settings.get("elem_size")}
         row.update({n + "_mm": r.dims.get(n) for n in DIMENSIONS})
         row.update(_cost(r))
+        n = getattr(costs[i], "n_inc", None)
+        row["t_wall_solver_pred_s"] = (
+            _num(fit.predict(n)) if fit is not None and n else None)
+        row["cost_in_fit"] = (fit.kept[i] if fit is not None else None)
         for name in _MS_GUARDS:
             v, ok = r.guards.get(name, (None, None))
             row[name] = _num(v)

@@ -511,6 +511,10 @@ class OptimizationCfg:
     ms_values:      str  = "1, 250, 500, 1000, 2000, 4000"
     ms_elem_size:   str  = ""
     ms_reference:   str  = "first"
+    # Reuse the finished runs of earlier studies whose parameters are
+    # exactly those of a run to make (2026-10-20). Off: a new study launches
+    # every run; a resumed study still reuses the runs of its own folder.
+    reuse_runs:     bool = True
     # What each sizing step found for this model (ms, mesh, domain,
     # checks): one record per step, written when a study ends, so the tab
     # can tell which steps are done for the current model and in which

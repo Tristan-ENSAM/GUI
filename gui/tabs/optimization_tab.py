@@ -445,6 +445,19 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 ag.addWidget(le, i, 1)
         win_row.addStretch(1)
         ag.addLayout(win_row, 1, 1, 1, 2)
+        self.cb_reuse_runs = QCheckBox(
+            "Reuse the finished runs of earlier studies")
+        self.cb_reuse_runs.setChecked(OptimizationCfgDefaults.reuse_runs)
+        self.cb_reuse_runs.setToolTip(
+            "On: a run whose model parameters (geometry, materials, mesh,\n"
+            "step with ms and filters, outputs, domain) are EXACTLY those of\n"
+            "a finished run of an earlier study is not launched again: its\n"
+            "results are read back and copied into the new study folder.\n"
+            "The number of CPUs, the machine and the Abaqus version are not\n"
+            "compared.\n"
+            "Off: a new study launches every run. Resuming a study always\n"
+            "reuses the runs of its own folder.")
+        ag.addWidget(self.cb_reuse_runs, ag.rowCount(), 0, 1, 3)
         ag.setColumnStretch(3, 1)
         cv0.addWidget(sec)
 
@@ -776,7 +789,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.sim_progress = QProgressBar()
         self.sim_progress.setRange(0, 100)
         self.sim_progress.setFormat("current simulation: %p%")
-        self.sim_progress.setFixedWidth(220)
+        self.sim_progress.setFixedWidth(300)
         self.sim_progress.setVisible(False)
         bar.addWidget(self.sim_progress)
         self.lbl_status = QLabel("")
@@ -1005,6 +1018,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.sp_margin.valueChanged.connect(self._sync_opt_to_cfg)
         self.cb_ms_reference.currentIndexChanged.connect(
             self._sync_opt_to_cfg)
+        self.cb_reuse_runs.toggled.connect(self._sync_opt_to_cfg)
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
         for sp in self._dom_spins.values():
             sp.valueChanged.connect(self._sync_opt_to_cfg)
@@ -1062,6 +1076,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.ms_values = self.le_ms_values.text()
         o.ms_elem_size = self.le_ms_elem.text()
         o.ms_reference = self.ms_reference()
+        o.reuse_runs = bool(self.cb_reuse_runs.isChecked())
         self.changed.emit()
         self._refresh_step_status()
 
@@ -1104,6 +1119,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self.le_ms_elem.setText(str(getattr(o, "ms_elem_size", "")))
             self.set_ms_reference(getattr(
                 o, "ms_reference", OptimizationCfgDefaults.ms_reference))
+            self.cb_reuse_runs.setChecked(bool(getattr(
+                o, "reuse_runs", OptimizationCfgDefaults.reuse_runs)))
         finally:
             self._loading = False
 
@@ -1812,11 +1829,18 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             return
         frac = prog.fraction() if prog.is_ready() else None
         if frac is not None:
+            from gui.sensitivity.cost_model import (
+                fmt_duration, remaining_from_progress)
+            left = remaining_from_progress(prog.wall_time_seconds(), frac)
+            self.sim_progress.setFormat(
+                "current simulation: %p%" if left is None else
+                "current simulation: %%p%% · ~%s left" % fmt_duration(left))
             self.sim_progress.setVisible(True)
             self.sim_progress.setValue(int(max(0.0, min(1.0, frac)) * 100))
 
     def _start_progress(self):
         self._current_sta = None
+        self.sim_progress.setFormat("current simulation: %p%")
         self.sim_progress.setValue(0)
         self.sim_progress.setVisible(True)
         self._sim_timer.start()
@@ -2122,6 +2146,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         run_bundle = self._begin_study("ms", spec, run_dir, prefs, cpus, mode,
                                        then, **extra)
         self._pending_ms_dir = run_dir
+        self._ms_plan = ms_values
+        self._ms_cost_pts = []
 
         def cost_fn(bundle, d, host_wall_s):
             return cost_record(bundle, run_bundle.state.get("sta"),
@@ -2189,6 +2215,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                             "job ok" if r.job_ok
                             else "JOB FAILED: %s" % r.error,
                             g or "no safeguard", cpu))
+            self._log_ms_cost(ev.get("ms"), r.cost)
         elif phase == "comparison":
             c = ev["comparison"]
             errs = "  ".join("%s=%s" % (q, self._fmt(v))
@@ -2204,6 +2231,46 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                             % (100.0 * off)))
         elif phase == "warning":
             self._log_ui("  [WARNING] %s" % ev.get("message", ""))
+
+    def _log_ms_cost(self, ms, cost):
+        """Measured vs predicted solver time of the run just finished, and
+        the predicted time of the rest of the plan (cost_model: fit
+        t = a + b * N_inc over the earlier runs of the study)."""
+        from gui.sensitivity.cost_model import (
+            OUTLIER_TOL, fit_cost, fmt_duration, n_inc_at_ms)
+        pts = getattr(self, "_ms_cost_pts", None)
+        if pts is None or ms is None or cost is None:
+            return
+        n = getattr(cost, "n_inc", None)
+        t = getattr(cost, "t_wall_solver_s", None)
+        fit = fit_cost([p[1] for p in pts], [p[2] for p in pts])
+        if fit is not None and n and t:
+            pred = fit.predict(n)
+            if pred > 0:
+                ratio = t / pred
+                self._log_ui(
+                    "  [TIME] solver %s, predicted %s (x%.2f)%s"
+                    % (fmt_duration(t), fmt_duration(pred), ratio,
+                       "" if abs(ratio - 1.0) <= OUTLIER_TOL else
+                       ": far from the earlier runs, the machine was "
+                       "probably shared; this C_CPU is not representative"))
+        if n and t:
+            pts.append((float(ms), float(n), float(t)))
+        fit = fit_cost([p[1] for p in pts], [p[2] for p in pts])
+        plan = [m for m in (getattr(self, "_ms_plan", None) or ())
+                if m > float(ms)]
+        if fit is None or not plan:
+            return
+        times = []
+        for m in plan:
+            ni = n_inc_at_ms(m, [p[0] for p in pts], [p[1] for p in pts])
+            if ni is None:
+                return
+            times.append(max(0.0, fit.predict(ni)))
+        self._log_ui("  [TIME] next run (ms=%g): ~%s solver; rest of the "
+                     "plan (%d runs, if none fails): ~%s"
+                     % (plan[0], fmt_duration(times[0]), len(plan),
+                        fmt_duration(sum(times))))
 
     def _on_ms_done(self, res):
         self._stop_progress()
