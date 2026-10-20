@@ -35,6 +35,28 @@ from gui.widgets.time_series_viewer import TimeSeriesViewer, _is_energy
 from gui.core.logging_util import log_swallowed
 
 
+# Energy channels are written with their own time base (cel_results.py):
+# ALLKE/ALLIE on history__ENERGY_TIME, ALLAE on history__ALLAE_TIME, while
+# history__time is the RF one. The two are not sampled alike in general.
+_HISTORY_OWN_TIME = {"ALLKE": "ENERGY_TIME", "ALLIE": "ENERGY_TIME",
+                     "ALLAE": "ALLAE_TIME"}
+
+
+def _history_time_for(bundle, var, hist_t, n):
+    """Time vector of length n for history `var`: its own time base when the
+    bundle has one, else the generic history time; None if neither fits."""
+    own = _HISTORY_OWN_TIME.get(var)
+    if own is not None:
+        try:
+            t = np.asarray(bundle.history(own))
+            if t.size == n:
+                return t
+        except KeyError:
+            pass
+    t = np.asarray(hist_t)
+    return t if t.size == n else None
+
+
 # Eulerian cells with volume fraction below this are treated as empty and
 # hidden when rendering EULER fields (only show where material is present).
 _EVF_MIN = 1e-3
@@ -280,16 +302,27 @@ class ResultsTab(QWidget):
                 variables = list(bundle.history_info.variables)
             except Exception:
                 continue
-            for k, var in enumerate(variables):
+            k = 0
+            for var in variables:
+                if var.endswith("_TIME"):
+                    continue        # a time base, not a quantity to plot
                 try:
                     y = bundle.history(var)
                 except KeyError:
                     continue
+                t = _history_time_for(bundle, var, hist_t, len(y))
+                if t is None:
+                    logging.getLogger(__name__).warning(
+                        "Results: history %r of run %r has %d samples and "
+                        "no time base of that length; not plotted.",
+                        var, name, len(y))
+                    continue
                 label = ("%s\u00b7%s" % (name, var)) if multi else var
                 self.ts_viewer.add_series(
-                    label, hist_t, y, color=color,
+                    label, t, y, color=color,
                     linestyle=self._LINESTYLES[k % len(self._LINESTYLES)],
                     energy=_is_energy(var))
+                k += 1
 
     def _on_close_clicked(self):
         """Remove the active run from the comparison."""
