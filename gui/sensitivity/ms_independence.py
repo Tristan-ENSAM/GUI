@@ -85,6 +85,19 @@ DEFAULT_MS_VALUES = (250.0, 500.0, 1000.0, 2000.0, 4000.0)
 # reference run) or the previous value.
 MS_REFERENCES = ("first", "previous")
 
+# How the factors are chosen (2026-10-20): "list" runs the given values in
+# order; "bisection" brackets ms* from the reference by multiplying by a
+# factor, then bisects (geometric midpoint) until ms_hi / ms_lo <= the stop
+# ratio. Default stop ratio 1.0201 = 1.01^2: with a run time t ~ ms^-1/2,
+# t(ms_lo) / t(ms_hi) <= 1.01, i.e. ms_hi would save at most 1 % (Tristan,
+# 2026-10-20). From a x10 bracket: ceil(log2(ln 10 / ln 1.0201)) = 7
+# bisection runs.
+MS_SEARCHES = ("list", "bisection")
+DEFAULT_BRACKET_FACTOR = 10.0
+DEFAULT_STOP_RATIO = 1.0201
+DEFAULT_MS_MAX = 1.0e7
+DEFAULT_MAX_RUNS = 30
+
 
 def parse_ms_values(text: str) -> Tuple[float, ...]:
     """'250, 500 1000;2000' -> (250.0, 500.0, 1000.0, 2000.0).
@@ -230,7 +243,11 @@ def run_ms_independence(
         cost_fn: Optional[Callable] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
-        reference: str = "previous") -> MsStudyResult:
+        reference: str = "previous", search: str = "list",
+        factor: float = DEFAULT_BRACKET_FACTOR,
+        stop_ratio: float = DEFAULT_STOP_RATIO,
+        ms_max: float = DEFAULT_MS_MAX,
+        max_runs: int = DEFAULT_MAX_RUNS) -> MsStudyResult:
     """Run the ms sequence and retain the largest independent factor.
 
     run_bundle(cfg) -> ResultsBundle | None. Each config passed is a deep
@@ -240,9 +257,26 @@ def run_ms_independence(
         domain study). Only thresholded quantities enter E_max.
     cost_fn(bundle_or_None, dims, host_wall_s) -> CostRecord (optional).
     reference : "first" compares every run with the run of ms_values[0];
-        "previous" compares each run with the one before it."""
+        "previous" compares each run with the one before it.
+    search : "list" runs `ms_values` in order (above). "bisection" runs
+        ms_values[0] (the reference), then brackets ms* by multiplying by
+        `factor` and narrows it by bisection (see `MS_SEARCHES`); every run
+        is then compared with the reference whatever `reference` says, and
+        only ms_values[0] is used."""
+    if search not in MS_SEARCHES:
+        raise ValueError("search must be one of %s" % (MS_SEARCHES,))
     ms_values = [float(v) for v in ms_values]
-    if len(ms_values) < 2:
+    if search == "bisection":
+        if not ms_values:
+            raise ValueError("the reference ms is needed")
+        if not (factor > 1.0 and stop_ratio > 1.0 and max_runs >= 2
+                and ms_max > ms_values[0]):
+            raise ValueError("bisection needs factor > 1, stop ratio > 1, "
+                             "at least 2 runs and a largest ms above the "
+                             "reference")
+        ms_values = ms_values[:1]
+        reference = "first"
+    elif len(ms_values) < 2:
         raise ValueError("at least two ms values are needed")
     if any(b <= a for a, b in zip(ms_values[:-1], ms_values[1:])):
         raise ValueError("the ms values must be strictly increasing")
@@ -271,7 +305,7 @@ def run_ms_independence(
         "zoi": tuple(float(v) for v in zoi), "grid_step": float(grid_step),
         "elem_size": elem, "thresholds": dict(thr), "window": tuple(window),
         "evf_threshold": float(evf_threshold), "ms_values": list(ms_values),
-        "reference": reference,
+        "reference": reference, "search": search,
         "domain_dims": {"h_wp": float(domain_dims.h_wp),
                         "h_void": float(domain_dims.h_void),
                         "l_wp": float(domain_dims.l_wp),
@@ -298,6 +332,13 @@ def run_ms_independence(
         emit({"phase": "done", "result": result, "n_runs": 0})
         return result
     prev = simulate(ms_values[0])
+    if search == "bisection":
+        result.settings.update({"factor": float(factor),
+                                "stop_ratio": float(stop_ratio),
+                                "ms_max": float(ms_max),
+                                "max_runs": int(max_runs)})
+        return _bisection(result, prev, simulate, quantities, thr, factor,
+                          stop_ratio, ms_max, max_runs, cancelled, emit)
     i_prev = 0
     status = "upper_end"
     for k in range(1, len(ms_values)):
@@ -340,5 +381,134 @@ def run_ms_independence(
         if reference == "previous":
             prev, i_prev = cur, k
     result.status = status
+    emit({"phase": "done", "result": result, "n_runs": len(result.runs)})
+    return result
+
+
+def _compare(result: MsStudyResult, k: int, ref, cur, ms_ref: float,
+             ms: float, quantities, thr) -> MsComparison:
+    """Comparison k of run `cur` (factor ms) with run `ref` (factor ms_ref),
+    recorded in `result` (same rules as the list search)."""
+    (rec_a, s_a), (rec_b, s_b) = ref, cur
+    info: Dict[str, float] = {}
+    if s_a is None or s_b is None:
+        errs = {q: float("nan") for q in quantities}
+    else:
+        try:
+            a2, b2, info = align_samples(s_a, s_b)
+            errs = errors_between(b2, a2, quantities)
+        except AlignmentError as exc:
+            errs = {q: float("nan") for q in quantities}
+            result.warnings.append("ms comparison %d: %s" % (k, exc))
+    em, qc = e_max(errs, thr)
+    pair_ok = rec_a.guards_ok and rec_b.guards_ok
+    comp = MsComparison(
+        k=k, ms_from=ms_ref, ms_to=ms, errors=errs, e_max=em, q_crit=qc,
+        guards_ok=pair_ok,
+        success=bool(math.isfinite(em) and em < 1.0 and pair_ok),
+        run_from=rec_a.index, run_to=rec_b.index,
+        frame_offset_over_interval=float(info.get(
+            "frame_offset_over_interval", float("nan"))))
+    result.comparisons.append(comp)
+    return comp
+
+
+def _round_ms(v: float) -> float:
+    """4 significant digits: readable factors, far finer than any stop
+    ratio worth using (relative step 1e-3 at worst)."""
+    return float("%.4g" % v)
+
+
+def monotonicity_warnings(comparisons: Sequence[MsComparison],
+                          tol: float = 0.0) -> List[str]:
+    """E_max is expected to grow with ms; the search relies on it. Every
+    tested factor whose E_max is LOWER, by more than `tol`, than the E_max of
+    a smaller tested factor is reported (the search does not prove the
+    monotonicity: it only checks it at the tested points)."""
+    pts = sorted((c.ms_to, c.e_max) for c in comparisons
+                 if math.isfinite(c.e_max))
+    out = []
+    worst_ms, worst = None, -float("inf")
+    for ms, em in pts:
+        if worst_ms is not None and em < worst - tol:
+            out.append("E_max is not increasing with ms: %.3g at ms = %g "
+                       "but %.3g at ms = %g (smaller)" % (em, ms, worst,
+                                                          worst_ms))
+        if em > worst:
+            worst_ms, worst = ms, em
+    return out
+
+
+def _bisection(result, ref, simulate, quantities, thr, factor, stop_ratio,
+               ms_max, max_runs, cancelled, emit) -> MsStudyResult:
+    """Bracketing then bisection (search "bisection").
+
+    1. bracket: ms = ms_ref * factor^j, j = 1, 2, ... (capped at ms_max)
+       until the first comparison that fails; ms_lo = the last factor that
+       passed (ms_ref itself when the first one fails), ms_hi = the failed
+       one;
+    2. bisection at the geometric midpoint sqrt(ms_lo * ms_hi) (the
+       increment dt grows as sqrt(ms)) until ms_hi / ms_lo <= stop_ratio:
+       a pass moves ms_lo up, a failure moves ms_hi down;
+    3. ms* = ms_lo, the largest tested factor below which every tested
+       factor passed.
+
+    Statuses: "converged" (ms_lo > ms_ref), "below_range" (no factor above
+    the reference passed down to the stop ratio), "upper_end" (ms_max
+    passed: not bracketed), "run_failed" (a comparison could not be judged:
+    a run did not finish or misses outputs; ms_lo is kept as reached),
+    "cap" (max_runs reached), "cancelled"."""
+    ms_ref = result.run_ms[0]
+    lo, hi = ms_ref, None
+    status = None
+    k = 0
+
+    def step(ms):
+        nonlocal k
+        if len(result.runs) >= max_runs:
+            return "cap"
+        if cancelled():
+            return "cancelled"
+        result.ms_values.append(ms)
+        cur = simulate(ms)
+        if cancelled():
+            return "cancelled"
+        k += 1
+        comp = _compare(result, k, ref, cur, ms_ref, ms, quantities, thr)
+        emit({"phase": "comparison", "comparison": comp,
+              "n_runs": len(result.runs)})
+        if not comp.success and not comp.guards_ok:
+            return "run_failed"
+        return "pass" if comp.success else "fail"
+
+    ms = ms_ref
+    while status is None and hi is None:          # 1. bracket
+        ms = min(_round_ms(ms * factor), float(ms_max))
+        out = step(ms)
+        if out == "pass":
+            lo = ms
+            if ms >= ms_max:
+                status = "upper_end"
+        elif out == "fail":
+            hi = ms
+        else:
+            status = out
+    while status is None and hi / lo > stop_ratio:   # 2. bisection
+        mid = _round_ms(math.sqrt(lo * hi))
+        if not lo < mid < hi:
+            break
+        out = step(mid)
+        if out == "pass":
+            lo = mid
+        elif out == "fail":
+            hi = mid
+        else:
+            status = out
+    if status is None:
+        status = "converged" if lo > ms_ref else "below_range"
+    result.retained = lo if lo > ms_ref else None
+    result.status = status
+    result.settings["ms_hi"] = hi
+    result.warnings.extend(monotonicity_warnings(result.comparisons))
     emit({"phase": "done", "result": result, "n_runs": len(result.runs)})
     return result

@@ -47,7 +47,7 @@ def zoi_tuple(spec: dict) -> Tuple[float, float, float, float]:
 
 
 def comparison_settings(zoi, eps: Dict[str, float], window, rk_max: float,
-                        rhg_max: float, grid_step=None) -> dict:
+                        rhg_max: float, grid_step=None, shares=None) -> dict:
     """The shared comparison settings a step result depends on (the key of
     study_state.settings_key). An ε_q <= 0 is left out, as the studies
     ignore it. `grid_step` is the ZOI sampling step as SET in the tab (None
@@ -60,11 +60,16 @@ def comparison_settings(zoi, eps: Dict[str, float], window, rk_max: float,
             continue
         if math.isfinite(v) and v > 0:
             out_eps[str(k)] = _r(v)
-    return {"zoi": [_r(v) for v in zoi],
-            "eps": out_eps,
-            "window": [_r(v) for v in window],
-            "rk_max": _r(rk_max), "rhg_max": _r(rhg_max),
-            "grid": None if grid_step is None else _r(grid_step)}
+    out = {"zoi": [_r(v) for v in zoi],
+           "eps": out_eps,
+           "window": [_r(v) for v in window],
+           "rk_max": _r(rk_max), "rhg_max": _r(rhg_max),
+           "grid": None if grid_step is None else _r(grid_step)}
+    # Shares of eps_q per step [ms, h, D] (2026-10-20). Absent or all 1 (a
+    # result made before them) leaves the key as it was.
+    if shares and any(not math.isclose(float(v), 1.0) for v in shares):
+        out["shares"] = [_r(v) for v in shares]
+    return out
 
 
 def eps_of_spec(spec: dict) -> Dict[str, float]:
@@ -104,7 +109,8 @@ def grid_set_of_spec(spec: dict):
 def settings_of_spec(spec: dict) -> dict:
     return comparison_settings(zoi_tuple(spec), eps_of_spec(spec),
                                spec["window"], spec["rk_max"],
-                               spec["rhg_max"], grid_set_of_spec(spec))
+                               spec["rhg_max"], grid_set_of_spec(spec),
+                               spec.get("eps_shares"))
 
 
 def first_finished_params(folder, job_prefix: str) -> Optional[dict]:

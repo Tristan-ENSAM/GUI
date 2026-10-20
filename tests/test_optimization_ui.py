@@ -140,6 +140,13 @@ def _fill_thresholds(tab):
         tab._q_eps[q].setText(v)
 
 
+def _whole_eps_to(tab, step):
+    """Weights giving (nearly) all of eps_q to one step, as before the
+    split of eps_q between the steps."""
+    for st, le in tab._eps_share.items():
+        le.setText("1" if st == step else "1e-12")
+
+
 class _CaptureWorker:
     """Stands in for a QThread worker: records its kwargs, never runs."""
     last = None
@@ -221,7 +228,7 @@ class TestDomainIndependenceWiring:
         assert kw["step_elems"] == 12 and kw["n_max"] == 8
         assert kw["n_hold"] == 1 and kw["m_ratios"] == 2
         assert kw["window"] == (0.3, 1.0)
-        assert kw["thresholds"]["Ff"] == pytest.approx(0.5)
+        assert kw["thresholds"]["Ff"] == pytest.approx(0.5 / 3)   # ε_q/3
         assert kw["caps"] == {"h_void": 0.4}
         assert kw["initial_dims"] == tab.compute_initial_dims()
         # a deep copy with the needed history outputs forced on
@@ -242,7 +249,8 @@ class TestDomainIndependenceWiring:
         assert kw["window"] == (0.5, 1.0)
         assert kw["base_cfg"] is not tab.cfg
         # the GCI selects with the absolute step-2 eps_q
-        assert kw["tolerances"]["TEMP"] == 10.0 and kw["tolerances"]["V2"] == 10.0
+        assert kw["tolerances"]["TEMP"] == pytest.approx(10.0 / 3)
+        assert kw["tolerances"]["V2"] == pytest.approx(10.0 / 3)
 
     def test_progress_and_result_are_logged(self, tab):
         from gui.core.domain_sizing import DomainDims
@@ -333,6 +341,7 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
         tab.le_zoi[k].setText(v)
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
+    _whole_eps_to(tab, "domain")
     tab._dom_spins["dom_step_elems"].setValue(4)
     monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
@@ -370,6 +379,7 @@ def _analytic_tab(qapp, monkeypatch, tmp_path):
         tab.le_zoi[k].setText(v)
     tab.sp_margin.setValue(1)
     _fill_thresholds(tab)
+    _whole_eps_to(tab, "domain")
     tab._dom_spins["dom_step_elems"].setValue(4)
     monkeypatch.setattr(tab, "_validate_launch", lambda *a: ("p", tmp_path, 2))
     monkeypatch.setattr(tab, "_start_progress", lambda: None)
@@ -513,6 +523,13 @@ class TestMsStudyWiring:
         return launch
 
     def test_defaults(self, tab):
+        # Default search (2026-10-20): from ms = 1, x10, then bisection.
+        assert tab.ms_search() == "bisection"
+        assert tab.ms_search_settings() == (10.0, 1.0201, 1e7)
+        assert not tab.le_ms_values.isEnabled()
+        assert tab.ms_settings()[0] == (1.0,)
+        tab.set_ms_search("list")
+        assert tab.le_ms_values.isEnabled()
         values, elem = tab.ms_settings()
         assert values == (1.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0)
         assert tab.ms_reference() == "first"
@@ -541,21 +558,36 @@ class TestMsStudyWiring:
 
     def test_rejects_bad_ms_values(self, ms_launch, warnings):
         _fill_thresholds(ms_launch)
+        ms_launch.set_ms_search("list")
         ms_launch.le_ms_values.setText("1000, 500")
         ms_launch._on_run_ms_independence()
         assert warnings and "increasing" in warnings[0]
         assert _CaptureWorker.last is None
 
+    def test_launch_passes_the_bisection_settings(self, ms_launch):
+        tab = ms_launch
+        _fill_thresholds(tab)
+        tab.le_ms_factor.setText("8")
+        tab.le_ms_stop.setText("1.05")
+        tab._on_run_ms_independence()
+        kw = _CaptureWorker.last
+        assert kw["search"] == "bisection"
+        assert kw["ms_values"] == (1.0,)
+        assert kw["reference"] == "first"
+        assert kw["factor"] == 8.0 and kw["stop_ratio"] == 1.05
+        assert kw["ms_max"] == 1e7
+
     def test_launch_passes_the_study_settings(self, ms_launch):
         tab = ms_launch
         _fill_thresholds(tab)
+        tab.set_ms_search("list")
         tab.le_ms_values.setText("500 1000 2000")
         tab.le_ms_elem.setText("0.004")
         tab._on_run_ms_independence()
         kw = _CaptureWorker.last
         assert kw["ms_values"] == (500.0, 1000.0, 2000.0)
         assert kw["elem_size"] == pytest.approx(0.004)
-        assert kw["thresholds"]["Ff"] == pytest.approx(0.5)
+        assert kw["thresholds"]["Ff"] == pytest.approx(0.5 / 3)   # ε_q/3
         assert kw["domain_dims"] == tab._dims_from_cfg()
         assert kw["base_cfg"] is not tab.cfg
         assert kw["base_cfg"].step.output_filter_verify is True
@@ -806,3 +838,17 @@ def test_launch_refuses_a_manual_start_without_the_tool_nose(launch,
     assert any("tool nose" in w for w in warnings)
     tab._draw_preview()
     assert "tool nose" in tab._init_note.text()
+
+
+def test_eps_weights_are_normalised(qapp):
+    tab = OptimizationTab(ModelConfig())
+    assert tab.eps_shares() == pytest.approx(
+        {"ms": 1 / 3, "mesh": 1 / 3, "domain": 1 / 3})
+    for st, w in (("ms", "2"), ("mesh", "1"), ("domain", "1")):
+        tab._eps_share[st].setText(w)
+    assert tab.eps_shares() == pytest.approx(
+        {"ms": 0.5, "mesh": 0.25, "domain": 0.25})
+    assert tab.cfg.optimization.eps_share_ms == "2"
+    tab._eps_share["mesh"].setText("0")
+    with pytest.raises(ValueError):
+        tab.eps_shares()
