@@ -726,6 +726,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "final checks. An unfinished study can then be resumed.")
         self.btn_open.clicked.connect(self._on_open_study)
         top.addWidget(self.btn_open)
+        self.btn_dev_maps = QPushButton("Deviation maps…")
+        self.btn_dev_maps.setToolTip(
+            "Maps of the deviation between two finished runs of a study\n"
+            "(ms, mesh or domain), frame by frame or over the time window,\n"
+            "and the two time curves at a clicked ZOI point. Reads the saved\n"
+            "results only: no Abaqus run.")
+        self.btn_dev_maps.clicked.connect(self._on_deviation_maps)
+        top.addWidget(self.btn_dev_maps)
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.setToolTip("Show the grey explanations under each step.")
@@ -1916,6 +1924,21 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # ===================================================================
     # Shared launch helpers (preserved verbatim)
     # ===================================================================
+    def _on_deviation_maps(self):
+        """Open (or bring back) the deviation-maps window on the study
+        folders recorded for this model."""
+        from gui.widgets.deviation_maps_dialog import DeviationMapsDialog
+        dlg = getattr(self, "_dev_maps_dialog", None)
+        if dlg is None:
+            prefs = self._prefs_getter() if self._prefs_getter else None
+            dlg = DeviationMapsDialog(
+                folders=self._known_folders(),
+                start_dir=str(getattr(prefs, "default_workdir", "") or ""),
+                parent=self)
+            self._dev_maps_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
     def _open_working_dir(self):
         """Open the Preferences working directory in the file explorer."""
         prefs = self._prefs_getter() if self._prefs_getter else None
