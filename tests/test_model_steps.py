@@ -579,6 +579,7 @@ def test_run_all_steps_chains_the_results(qapp, world, answers,
     tab.le_zoi["ymin"].setText("-0.09")
     tab.le_zoi["ymax"].setText("-0.01")
     tab.sp_gci_n.setValue(3)
+    tab.set_ms_search("list")          # its ms* (1000) is from the list
     tab._on_run_all()
     assert answers.asked[-1][0] == "Run all steps"
     _wait(qapp, tab, lambda: not tab._pipeline and not tab._is_busy
@@ -655,6 +656,7 @@ def test_run_all_steps_chains_the_results(qapp, world, answers,
 
 def test_ms_study_extends_the_values_until_one_fails(qapp, world):
     tab = world.tab
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("125, 250")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -670,6 +672,31 @@ def test_ms_study_extends_the_values_until_one_fails(qapp, world):
     assert len(ms_jobs) == 5
 
 
+def test_ms_bisection_brackets_then_bisects(qapp, world):
+    # The analytic model jumps at ms = 2000: x10 gives 10, 100, 1000 (pass)
+    # and 10000 (fail), the bisection ends at ms_hi / ms_lo <= 1.0201.
+    tab = world.tab
+    assert tab.ms_search() == "bisection"
+    tab.le_ms_elem.setText("0.02")
+    tab._on_run_ms_independence()
+    _wait(qapp, tab, _idle(tab))
+    rec = tab.cfg.optimization.steps["ms"]
+    assert rec["status"] == "done", tab.log.toPlainText()[-3000:]
+    assert 2000.0 / 1.0201 <= rec["value"] < 2000.0
+    assert rec["values"][:5] == [1.0, 10.0, 100.0, 1000.0, 10000.0]
+    cfg = json.loads((Path(rec["folder"]) / "config.json").read_text())
+    assert cfg["parameters"]["search"] == "bisection"
+    assert cfg["parameters"]["stop_ratio"] == 1.0201
+    n = len([j for j in world.launched if j.startswith("ms_")])
+    assert n == len(rec["values"])
+    # Read back: the same values are replayed from the folder, no run.
+    value = rec["value"]
+    assert tab.open_study(rec["folder"])
+    _wait(qapp, tab, _idle(tab))
+    assert tab.cfg.optimization.steps["ms"]["value"] == value
+    assert len([j for j in world.launched if j.startswith("ms_")]) == n
+
+
 # ---------------------------------------------------------------------------
 # Failures, cancels and guards
 # ---------------------------------------------------------------------------
@@ -682,6 +709,7 @@ def _ms_of(params):
 def test_a_run_that_cannot_start_is_not_a_result(qapp, world, answers):
     tab = world.tab
     world.behaviour["fn"] = lambda p: "raise" if _ms_of(p) >= 2000 else "ok"
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000, 2000, 4000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -705,6 +733,7 @@ def test_an_analysis_abaqus_stopped_is_replayed_as_failed(qapp, world,
                                                           answers):
     tab = world.tab
     world.behaviour["fn"] = lambda p: "abort" if _ms_of(p) >= 2000 else "ok"
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000, 2000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -731,6 +760,7 @@ def test_a_folder_is_judged_on_its_own_runs(qapp, world, answers):
     _wait(qapp, tab, _idle(tab))
     assert tab.cfg.optimization.steps["domain"]["status"] == "done"
     tab.cfg.interaction.friction_coeff += 0.1            # model A
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000, 2000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()                        # folder Y
@@ -750,6 +780,7 @@ def test_a_folder_is_judged_on_its_own_runs(qapp, world, answers):
 def test_a_cancel_at_the_end_never_extends_the_ms_values(qapp, world,
                                                          monkeypatch):
     tab = world.tab
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("125, 250")
     tab.le_ms_elem.setText("0.02")
     extended = []
@@ -939,6 +970,7 @@ def test_a_resume_that_does_not_start_puts_the_panel_back(
 def test_a_folder_of_failed_runs_is_judged_on_them(qapp, world, answers):
     tab = world.tab
     world.behaviour["fn"] = lambda p: "abort"
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -1032,6 +1064,7 @@ def test_shutdown_stops_the_study_without_recording_it(qapp, world):
 
 def test_a_cancelled_rerun_keeps_the_done_result(qapp, world, answers):
     tab = world.tab
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000, 2000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -1040,6 +1073,7 @@ def test_a_cancelled_rerun_keeps_the_done_result(qapp, world, answers):
     assert (rec["status"], rec["value"]) == ("done", 1000.0)
     _record(tab, "mesh", 0.01, {"ms": 1000.0})
     # Step 0 again with one more value, cancelled at its first new run.
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("250, 500, 1000, 2000")
 
     def cancel(params):                  # what the Cancel button sets
@@ -1160,6 +1194,7 @@ def test_an_extended_resume_of_a_read_back_keeps_the_result(qapp, world,
     # An ms folder made with T eps = 2, its ms = 250 run missing.
     tab._q_eps["T"].setText("2")
     world.behaviour["fn"] = lambda p: "raise" if _ms_of(p) >= 250 else "ok"
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("125, 250")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()
@@ -1342,6 +1377,7 @@ def test_dims_shown_rounded_down_are_not_the_result(tab):
 
 def test_reuse_of_earlier_runs_can_be_switched_off(qapp, world, answers):
     tab = world.tab
+    tab.set_ms_search("list")
     tab.le_ms_values.setText("500, 1000")
     tab.le_ms_elem.setText("0.02")
     tab._on_run_ms_independence()

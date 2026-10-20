@@ -318,3 +318,75 @@ class TestFailureCause:
                      guard_fn=lambda b: {"R_HG": (0.0574, b.ms > 1.0),
                                          "outputs": (0.0, True)})
         assert res.status == "upper_end" and res.retained == 400.0
+
+
+class TestBisection:
+    """search="bisection": bracket from ms = 1 by a factor, then bisect.
+    With T = 300 + slope*ms, E_T/eps vs ms = 1 is slope*(ms - 1)/10: with
+    slope 1e-3 the limit E = 1 sits at ms = 10001."""
+
+    def test_brackets_then_bisects_to_the_stop_ratio(self):
+        res = _study(1e-3, ms_values=(1.0,), reference="first",
+                     search="bisection")
+        assert res.status == "converged"
+        assert res.run_ms[:6] == [1.0, 10.0, 100.0, 1000.0, 10000.0,
+                                  100000.0]
+        hi = res.settings["ms_hi"]
+        assert res.retained < 10001.0 < hi
+        assert hi / res.retained <= 1.0201
+        # 7 bisection runs after a x10 bracket (ceil(log2(ln10/ln1.0201)))
+        assert len(res.run_ms) - 6 <= 7
+        assert all(c.ms_from == 1.0 for c in res.comparisons)
+        assert res.ms_values == res.run_ms
+        assert not res.warnings
+
+    def test_ignores_the_list_and_compares_with_the_reference(self):
+        res = _study(1e-3, ms_values=(1.0, 250.0, 500.0),
+                     reference="previous", search="bisection")
+        assert res.settings["reference"] == "first"
+        assert 250.0 not in res.run_ms
+
+    def test_upper_end_when_ms_max_passes(self):
+        res = _study(1e-9, ms_values=(1.0,), search="bisection",
+                     ms_max=1e4)
+        assert res.status == "upper_end"
+        assert res.run_ms[-1] == 1e4
+        assert res.retained == 1e4
+
+    def test_below_range_when_nothing_passes(self):
+        res = _study(100.0, ms_values=(1.0,), search="bisection",
+                     factor=10.0, stop_ratio=1.5)
+        assert res.status == "below_range"
+        assert res.retained is None
+
+    def test_cap_on_the_number_of_runs(self):
+        res = _study(1e-3, ms_values=(1.0,), search="bisection",
+                     max_runs=7)
+        assert res.status == "cap"
+        assert len(res.runs) == 7
+        assert res.retained == 10000.0
+
+    def test_failed_run_stops_the_search(self):
+        res = _study(1e-3, ms_values=(1.0,), search="bisection",
+                     run_bundle=_runner(1e-3, fail_ms=1000.0))
+        assert res.status == "run_failed"
+        assert res.retained == 100.0
+
+    def test_monotonicity_warning(self):
+        from gui.sensitivity.ms_independence import (
+            MsComparison, monotonicity_warnings)
+
+        def c(ms, em):
+            return MsComparison(k=0, ms_from=1.0, ms_to=ms, errors={},
+                                e_max=em, q_crit="T", guards_ok=True,
+                                success=em < 1)
+        w = monotonicity_warnings([c(10, 0.3), c(100, 0.2), c(1000, 0.5)])
+        assert len(w) == 1 and "ms = 100" in w[0]
+        assert monotonicity_warnings([c(10, 0.3), c(100, 0.25)],
+                                     tol=0.1) == []
+
+    def test_bad_settings(self):
+        with pytest.raises(ValueError):
+            _study(1e-3, ms_values=(1.0,), search="bisection", factor=1.0)
+        with pytest.raises(ValueError):
+            _study(1e-3, ms_values=(1.0,), search="dichotomy")

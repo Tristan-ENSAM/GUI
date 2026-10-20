@@ -349,10 +349,15 @@ def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
                       ms_lower: Optional[float] = None,
                       guard_fn: Optional[Callable] = None,
                       cost_fn: Optional[Callable] = None,
-                      emit: Optional[Callable[[dict], None]] = None
+                      emit: Optional[Callable[[dict], None]] = None,
+                      thresholds: Optional[Dict[str, float]] = None
                       ) -> CheckResult:
-    """Check 4 (see module docstring). Adds its run to study.runs."""
-    s = study.settings
+    """Check 4 (see module docstring). Adds its run to study.runs.
+    `thresholds`: eps_q of this check (the share of eps_q given to ms);
+    default: those of the domain study."""
+    s = dict(study.settings)
+    if thresholds:
+        s["thresholds"] = dict(thresholds)
     elem = float(s["elem_size"])
     res = CheckResult("ms_at_point", CHECK_PURPOSES["ms_at_point"],
                       passed=None)
@@ -500,6 +505,7 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
                            gci_runner_factory: Optional[Callable] = None,
                            ms_lower: Optional[float] = None,
                            ms_guard_fn: Optional[Callable] = None,
+                           ms_thresholds: Optional[Dict[str, float]] = None,
                            should_cancel: Optional[Callable[[], bool]] = None,
                            progress_cb: Optional[Callable[[dict], None]] = None
                            ) -> ChecksResult:
@@ -509,6 +515,8 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
 
     ms_lower : ms compared with ms* in check 4 (default ms*/2).
     ms_guard_fn : safeguards of the check-4 run (default guard_fn).
+    ms_thresholds : eps_q of check 4 (default those of the domain study);
+        checks 1 and 2 use the domain study's and `gci_tolerances`.
 
     gci_plan : kwargs of mesh_gci.run_mesh_gci other than run_bundle,
         base_cfg, domain_dims, tolerances (finest_elem_size, ratio, n_meshes,
@@ -547,7 +555,8 @@ def run_interaction_checks(run_bundle: Callable, base_cfg, study: StudyResult,
 
     c4 = ms_at_point_check(run_bundle, base_cfg, study, ms_lower,
                            ms_guard_fn if ms_guard_fn is not None
-                           else guard_fn, cost_fn, emit)
+                           else guard_fn, cost_fn, emit,
+                           thresholds=ms_thresholds)
     out.checks.append(c4)
     emit({"phase": "check", "check": c4})
     if cancelled():
