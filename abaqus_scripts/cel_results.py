@@ -26,7 +26,8 @@ def _vprint(msg):
 class _FrameProgress(object):
     """Print 'frame i/N, elapsed, remaining' about every 10 % of the frames.
 
-    The frame loops below read every value of the instance in Python and can
+    The frame loops below read every value of the instance (through
+    bulkDataBlocks when available, else value by value in Python) and can
     run for hours on a fine mesh without printing anything, which reads as a
     frozen GUI. These lines show the extraction is moving and how long the
     current field still needs (remaining = linear extrapolation)."""
@@ -196,6 +197,57 @@ def _read_data(v):
         return v.dataDouble
 
 
+def _bulk_arrays(fo, label_attr):
+    """Return [(labels, data)] numpy pairs from ``fo.bulkDataBlocks``, or
+    None if the bulk interface is unavailable or fails on this field.
+
+    ``fo.values`` builds one Python FieldValue object per value and every
+    ``.elementLabel`` / ``.data`` access crosses the Abaqus Python binding,
+    so the frame loops spent their time on all the values of the instance,
+    including the ones the ROI drops afterwards. ``bulkDataBlocks`` hands
+    back the labels and the data of each block as numpy arrays in one call.
+    `label_attr` is 'elementLabels' or 'nodeLabels'. The caller falls back
+    to the per-value loop when this returns None."""
+    try:
+        blocks = fo.bulkDataBlocks
+    except Exception:
+        return None
+    out = []
+    try:
+        for blk in blocks:
+            labels = _np.asarray(getattr(blk, label_attr), dtype=_np.int64)
+            try:
+                data = blk.data
+            except Exception:
+                # Double-precision ODB: same fallback as _read_data.
+                data = blk.dataDouble
+            data = _np.asarray(data, dtype=_np.float64)
+            if labels.size == 0:
+                continue
+            data = data.reshape(labels.shape[0], -1)
+            out.append((labels.ravel(), data))
+    except Exception:
+        return None
+    return out
+
+
+def _label_lut(labels):
+    """Lookup array label -> position (or -1) for the kept labels."""
+    labels = _np.asarray(labels, dtype=_np.int64)
+    lut = _np.full(int(labels.max()) + 1 if labels.size else 1, -1,
+                   dtype=_np.int64)
+    lut[labels] = _np.arange(labels.shape[0], dtype=_np.int64)
+    return lut
+
+
+def _lut_positions(lut, labels):
+    """Positions of `labels` in `lut` (-1 for labels not kept)."""
+    pos = _np.full(labels.shape[0], -1, dtype=_np.int64)
+    ok = (labels >= 0) & (labels < lut.shape[0])
+    pos[ok] = lut[labels[ok]]
+    return pos
+
+
 # Filter names created by cel_model.create_step. Abaqus upper-cases them when
 # it suffixes an output series: 'CameraBand' -> V_CAMERABAND.
 _FIELD_FILTER_SUFFIX = "CAMERABAND"
@@ -270,6 +322,7 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
     elem_id_to_pos = {}
     for pos, lbl in enumerate(kept_elem_ids):
         elem_id_to_pos[lbl] = pos
+    elem_lut = _label_lut(kept_elem_ids)
     n_elems = len(kept_elem_ids)
     n_frames = len(step.frames)
     # NaN so cells never written by the ODB (frame missing the variable,
@@ -306,6 +359,16 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
             src = src.getSubset(position=_CENTROID)
         except Exception:
             pass
+        bulk = _bulk_arrays(src, "elementLabels")
+        if bulk is not None:
+            for labels, data in bulk:
+                if data.shape[1] != 1:
+                    raise ValueError("field %s has %d components, a scalar "
+                                     "was expected" % (key, data.shape[1]))
+                pos = _lut_positions(elem_lut, labels)
+                ok = pos >= 0
+                out[fi, pos[ok]] = data[ok, 0].astype(_np.float32)
+            continue
         comp_labels = list(src.componentLabels) if src.componentLabels else []
         vals_list = []
         labels_list = []
@@ -380,6 +443,7 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
     label_to_local = {}
     for i, lbl in enumerate(kept_node_ids):
         label_to_local[int(lbl)] = i
+    node_lut = _label_lut([int(l) for l in kept_node_ids])
     n_nodes = len(kept_node_ids)
     elements = _np.asarray(elements)
     n_elem = elements.shape[0]
@@ -405,6 +469,19 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
                 pass
         nodal_v1 = _np.full(n_nodes, _np.nan, dtype=_np.float32)
         nodal_v2 = _np.full(n_nodes, _np.nan, dtype=_np.float32)
+        bulk = _bulk_arrays(sub, "nodeLabels")
+        if bulk is not None:
+            for labels, data in bulk:
+                pos = _lut_positions(node_lut, labels)
+                ok = pos >= 0
+                nodal_v1[pos[ok]] = data[ok, 0]
+                if data.shape[1] > 1:
+                    nodal_v2[pos[ok]] = data[ok, 1]
+                else:
+                    nodal_v2[pos[ok]] = 0.0
+            v1_out[fi] = nodal_v1[elements].mean(axis=1)
+            v2_out[fi] = nodal_v2[elements].mean(axis=1)
+            continue
         for v in sub.values:
             j = label_to_local.get(int(v.nodeLabel))
             if j is not None:
