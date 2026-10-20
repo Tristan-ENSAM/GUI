@@ -2957,9 +2957,18 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if self._last_gci is not None:
             gres, gtol = self._last_gci[0], self._last_gci[2] or {}
             gci_pts = False
+            dev = getattr(gres, "deviation", None) or {}
             for q, g in gres.per_quantity.items():
                 ref = g.f_extrapolated if g.reliable else g.f_fine
                 eps = gtol.get(q)
+                if dev:     # pointwise E_q / eps_q against the finest mesh
+                    hs = [h for h in gres.sizes if q in dev.get(h, {})]
+                    ys = [dev[h][q] for h in hs]
+                    if hs and eps:
+                        axg.plot(hs, ys, marker="s", lw=1.0, label=q)
+                        gci_pts = gci_pts or any(math.isfinite(y)
+                                                 for y in ys)
+                    continue
                 hs = [h for h in gres.sizes if q in gres.scalars.get(h, {})]
                 ys = []
                 for h in hs:
@@ -3061,7 +3070,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         gci_plan = dict(plan, zoi=zoi,
                         grid_step=float(study.settings["grid_step"]),
                         field_vars=["EVF", "TEMP", "V1", "V2"],
-                        window=window, evf_threshold=0.5)
+                        window=window, evf_threshold=0.5,
+                        selection="pointwise")
         d = study.final
         dspec = getattr(self, "_last_domain_spec", None)
         filter_on = bool(getattr(self.cfg.step, "output_filter_enabled",
@@ -3119,7 +3129,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "field_vars": tuple(p.get("field_vars")
                                 or ("EVF", "TEMP", "V1", "V2")),
             "window": tuple(float(v) for v in p.get("window") or window),
-            "evf_threshold": float(p.get("evf_threshold", 0.5))}
+            "evf_threshold": float(p.get("evf_threshold", 0.5)),
+            "selection": p.get("selection", "mean")}
         gci_tol = _scaled(spec["gci_tolerances"], spec, 1)
         # Check 4 (ms at the point) with the ms share; an older spec has
         # no shares: the domain study's eps_q, as before.
@@ -3273,6 +3284,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "tolerances": self._gci_tolerances(),
             "field_vars": ["EVF", "TEMP", "V1", "V2"],
             "evf_threshold": 0.5,
+            # h* from the pointwise E_q against the finest mesh (common
+            # metric of the three studies, 2026-10-20); an older folder
+            # without the key replays its space-time mean selection.
+            "selection": "pointwise",
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "domain_dims": self._dims_dict(self._dims_from_cfg()),
             "base_ms": self._base_ms(),
@@ -3340,7 +3355,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                              or ("EVF", "TEMP", "V1", "V2")),
             window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
-            min_elem_size=minh)
+            min_elem_size=minh, selection=spec.get("selection", "mean"))
         self._mesh_worker.progress.connect(self._on_mesh_progress)
         self._mesh_worker.finished_ok.connect(self._on_mesh_done)
         self._mesh_worker.failed.connect(self._on_fail)
@@ -3371,6 +3386,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                    "" if g.reliable else "  [extrapolation unreliable "
                    "\u2014 converged/noisy or p < 0.5, ref = finest]"))
         self._log_ui("  in asymptotic range: %s" % res.in_asymptotic_range)
+        for h in sorted(getattr(res, "deviation", {}) or {}):
+            self._log_ui("  h=%.4g vs finest: %s" % (h, "  ".join(
+                "%s E/eps=%.3g" % (q, r)
+                for q, r in sorted(res.deviation[h].items()))))
         rec = res.recommended_size
         self._log_ui("  recommended element size: %s"
                      % ("none within tolerance" if rec is None
