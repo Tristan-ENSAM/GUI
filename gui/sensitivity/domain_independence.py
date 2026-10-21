@@ -103,7 +103,7 @@ import numpy as np
 
 from gui.core.domain_sizing import DomainDims, diagonal
 from gui.sensitivity.zoi_sampling import (
-    roi_grid, nearest_samples, window_mask)
+    roi_grid, nearest_samples, window_mask, zoi_area_means)
 from gui.sensitivity.runner_core import eulerian_instance
 from gui.sensitivity.run_record import blocking_ok
 
@@ -240,11 +240,32 @@ class ZoiSample:
     forces[q] : (Nh_w,) force per unit width F/h for the history samples of
         the window, or absent when the channel is missing.
     force_times : (Nh_w,) history times of the window.
+    scalars[q] : one scalar per field for the metric "mean": the area mean
+        over the ZOI rectangle (zoi_sampling.zoi_area_means), read from the
+        elements, not from the grid.
     """
     fields: Dict[str, np.ndarray] = field(default_factory=dict)
     field_times: np.ndarray = field(default_factory=lambda: np.zeros(0))
     forces: Dict[str, np.ndarray] = field(default_factory=dict)
     force_times: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    scalars: Dict[str, float] = field(default_factory=dict)
+
+
+def field_scalars(bundle, inst, zoi, quantities, tmask, evf_threshold,
+                  elem_size) -> Dict[str, float]:
+    """ZoiSample.scalars of the field quantities (labels) of one run."""
+    want = [q for q in quantities if q in FIELD_QUANTITIES]
+    if not want or not hasattr(bundle, "element_centroids_init"):
+        # A bundle without element geometry (test doubles): run_scalar then
+        # reduces the grid samples the same way.
+        return {}
+    var = {q: FIELD_QUANTITIES[q] for q in want}
+    means = zoi_area_means(
+        bundle, inst, zoi, [var[q] for q in want],
+        masked=[var[q] for q in want if q in MASKED_QUANTITIES],
+        tmask=tmask, evf_var=FIELD_QUANTITIES["EVF"],
+        evf_threshold=evf_threshold, elem_size=elem_size)
+    return {q: means[var[q]] for q in want}
 
 
 def sample_zoi(bundle, zoi: Sequence[float], grid_step: float,
@@ -296,6 +317,8 @@ def sample_zoi(bundle, zoi: Sequence[float], grid_step: float,
         if q in MASKED_QUANTITIES:
             arr = np.where(material, arr, np.nan)
         out.fields[q] = arr
+    out.scalars = field_scalars(bundle, inst, zoi, want_fields, tmask,
+                                evf_threshold, elem_size)
 
     want_forces = [q for q in quantities if q in FORCE_QUANTITIES]
     if want_forces:
@@ -364,6 +387,71 @@ def errors_between(sa: ZoiSample, sb: ZoiSample,
             else:
                 out[q] = float("nan")
     return out
+
+
+# Deviation metrics between two runs (decision of 2026-10-21: "mean").
+#   "mean"      : |m_q(a) - m_q(b)|, m_q one scalar per run and quantity
+#                 (`run_scalar`, the scalar of the mesh study and of its
+#                 Richardson extrapolation). Each run is reduced on its own
+#                 material samples, so the deviation is a distance between two
+#                 numbers: the triangle inequality holds exactly along any
+#                 chain of runs.
+#   "pointwise" : mean over the (point, frame) samples of |a - b|
+#                 (`errors_between`), reported by the deviation maps.
+METRICS = ("mean", "pointwise")
+
+
+def run_scalar(sample: ZoiSample, q: str) -> float:
+    """One scalar per run for quantity q. Fields -> `sample.scalars[q]`, the
+    area mean over the ZOI (time mean per element over its material frames,
+    then area-weighted over the elements; the scalar of the mesh study).
+    A sample without it (built elsewhere) falls back to the same reduction on
+    its grid points. Forces -> mean over the window history samples (F/h).
+    NaN when the quantity is missing or has no valid sample."""
+    if q in FIELD_QUANTITIES and q in sample.scalars:
+        return float(sample.scalars[q])
+    if q in FIELD_QUANTITIES:
+        arr = sample.fields.get(q)
+        if arr is None:
+            return float("nan")
+        arr = np.asarray(arr, dtype=float)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        ok = np.isfinite(arr)
+        cnt = ok.sum(axis=0)
+        s = np.where(ok, arr, 0.0).sum(axis=0)
+        per_pt = s[cnt > 0] / cnt[cnt > 0]
+        return float(np.mean(per_pt)) if per_pt.size else float("nan")
+    f = sample.forces.get(q)
+    if f is None:
+        return float("nan")
+    f = np.asarray(f, dtype=float)
+    f = f[np.isfinite(f)]
+    return float(np.mean(f)) if f.size else float("nan")
+
+
+def mean_errors(sa: ZoiSample, sb: ZoiSample,
+                quantities: Sequence[str] = ALL_QUANTITIES
+                ) -> Dict[str, float]:
+    """|m_q(a) - m_q(b)| per quantity (metric "mean"); NaN when either
+    scalar is NaN. The two runs need not share their sample times."""
+    out: Dict[str, float] = {}
+    for q in quantities:
+        a, b = run_scalar(sa, q), run_scalar(sb, q)
+        out[q] = (abs(a - b) if math.isfinite(a) and math.isfinite(b)
+                  else float("nan"))
+    return out
+
+
+def errors_by(sa: ZoiSample, sb: ZoiSample, quantities: Sequence[str],
+              metric: str = "pointwise") -> Dict[str, float]:
+    """E_q of the chosen metric (see METRICS); "pointwise" needs the same
+    sample times (AlignmentError otherwise)."""
+    if metric == "mean":
+        return mean_errors(sa, sb, quantities)
+    if metric == "pointwise":
+        return errors_between(sa, sb, quantities)
+    raise ValueError("metric must be one of %s" % (METRICS,))
 
 
 def e_max(errors: Dict[str, float], thresholds: Dict[str, float]
@@ -612,7 +700,8 @@ def run_domain_independence(
         guard_fn: Optional[Callable] = None,
         cost_fn: Optional[Callable] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
-        progress_cb: Optional[Callable[[dict], None]] = None) -> StudyResult:
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        metric: str = "pointwise") -> StudyResult:
     """Size the four Eulerian-domain dimensions one after the other.
 
     run_bundle(cfg) -> ResultsBundle | None. The config passed is a deep copy
@@ -631,6 +720,7 @@ def run_domain_independence(
     cost_fn(bundle_or_None, dims, host_wall_s) -> CostRecord : run cost
         (optional; see gui.sensitivity.run_record.cost_record). The host wall
         time of each run is measured here around run_bundle.
+    metric : deviation between two runs, "mean" or "pointwise" (METRICS).
 
     Every run is cached by its dimensions (whole elements): a domain already
     simulated is never run again."""
@@ -643,6 +733,8 @@ def run_domain_independence(
                          "hypothesis needs m_ratios + 1 comparisons)")
     if n_hold < 1:
         raise ValueError("n_hold must be >= 1")
+    if metric not in METRICS:
+        raise ValueError("metric must be one of %s" % (METRICS,))
     if elem_size <= 0 or grid_step <= 0:
         raise ValueError("elem_size and grid_step must be > 0")
     unknown = set(order) - set(DIMENSIONS)
@@ -672,7 +764,8 @@ def run_domain_independence(
         "n_max": int(n_max), "n_hold": int(n_hold),
         "m_ratios": int(m_ratios), "caps": dict(caps),
         "order": tuple(order), "margin_elems": int(margin_elems),
-        "offset": tuple(offset), "diagonal_coeff": float(diagonal_coeff)}
+        "offset": tuple(offset), "diagonal_coeff": float(diagonal_coeff),
+        "metric": metric}
     if not zoi_inside(initial_dims, zoi, margin_elems * elem, offset):
         result.status = "zoi_outside"
         return result
@@ -730,7 +823,7 @@ def run_domain_independence(
                 errs = {q: float("nan") for q in quantities}
             else:
                 try:
-                    errs = errors_between(s_b, s_a, quantities)
+                    errs = errors_by(s_b, s_a, quantities, metric)
                 except AlignmentError as exc:
                     errs = {q: float("nan") for q in quantities}
                     result.warnings.append("%s comparison %d: %s"

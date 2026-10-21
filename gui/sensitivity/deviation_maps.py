@@ -63,7 +63,7 @@ import numpy as np
 
 from gui.sensitivity.domain_independence import (
     ALL_QUANTITIES, FIELD_QUANTITIES, FORCE_QUANTITIES, MASKED_QUANTITIES,
-    ZoiSample, zoi_within_crop)
+    ZoiSample, field_scalars, run_scalar, zoi_within_crop)
 from gui.sensitivity.ms_independence import align_samples
 from gui.sensitivity.run_cache import RunCache, CachedRun
 from gui.sensitivity.runner_core import eulerian_instance
@@ -242,6 +242,10 @@ def sample_run(bundle, zoi, grid_step: float, elem_size: float,
             if q in MASKED_QUANTITIES:
                 arr = np.where(material, arr, np.nan)
             out.fields[q] = arr
+        sc = field_scalars(bundle, inst, zoi, [q for q in want
+                                               if q in out.fields],
+                           tmask, evf_threshold, elem_size)
+        out.scalars = {q: v for q, v in sc.items()}
     forces = [q for q in quantities if q in FORCE_QUANTITIES]
     if forces:
         try:
@@ -274,7 +278,9 @@ class QuantityDeviation:
     times: np.ndarray                     # (Nt,) frame or history times
     a: np.ndarray                         # (Nt, Np) fields, (Nt,) forces
     b: np.ndarray
-    e_inst: float = float("nan")          # E_q / eps_q of the studies
+    e_inst: float = float("nan")          # pointwise E_q / eps_q
+    e_mean: float = float("nan")          # |m_q(b) - m_q(a)| / eps_q: the
+                                          # metric that decides the studies
     e_bias: float = float("nan")
     e_frame: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
@@ -321,6 +327,7 @@ class PairDeviation:
         rows = []
         for q, d in self.quantities.items():
             rows.append({"quantity": q, "eps": d.eps,
+                         "E_mean_over_eps": d.e_mean,
                          "E_inst_over_eps": d.e_inst,
                          "E_bias_over_eps": d.e_bias,
                          "bias_share": (d.e_bias / d.e_inst
@@ -385,6 +392,9 @@ def compare_samples(sa: ZoiSample, sb: ZoiSample, settings: CompareSettings,
             d.e_frame = np.abs(b - a) / eps
         else:
             continue
+        ma, mb = run_scalar(sa, q), run_scalar(sb, q)
+        d.e_mean = (abs(mb - ma) / eps if math.isfinite(ma)
+                    and math.isfinite(mb) else float("nan"))
         out.quantities[q] = d
     return out
 

@@ -47,7 +47,8 @@ def zoi_tuple(spec: dict) -> Tuple[float, float, float, float]:
 
 
 def comparison_settings(zoi, eps: Dict[str, float], window, rk_max: float,
-                        rhg_max: float, grid_step=None, shares=None) -> dict:
+                        rhg_max: float, grid_step=None, shares=None,
+                        metric=None) -> dict:
     """The shared comparison settings a step result depends on (the key of
     study_state.settings_key). An ε_q <= 0 is left out, as the studies
     ignore it. `grid_step` is the ZOI sampling step as SET in the tab (None
@@ -69,7 +70,22 @@ def comparison_settings(zoi, eps: Dict[str, float], window, rk_max: float,
     # result made before them) leaves the key as it was.
     if shares and any(not math.isclose(float(v), 1.0) for v in shares):
         out["shares"] = [_r(v) for v in shares]
+    # Deviation metric (2026-10-21). Absent: a result made with the
+    # pointwise metric, as before.
+    if metric and metric != "pointwise":
+        out["metric"] = str(metric)
     return out
+
+
+def metric_of_spec(spec: dict) -> Optional[str]:
+    """The deviation metric a study spec was run with: "metric" (ms,
+    domain, checks), or "mean" for a mesh study reduced by area means;
+    None for an older spec (pointwise metric, grid scalars)."""
+    if spec.get("metric"):
+        return spec["metric"]
+    if spec.get("reduction") == "area":
+        return "mean"
+    return None
 
 
 def eps_of_spec(spec: dict) -> Dict[str, float]:
@@ -110,7 +126,7 @@ def settings_of_spec(spec: dict) -> dict:
     return comparison_settings(zoi_tuple(spec), eps_of_spec(spec),
                                spec["window"], spec["rk_max"],
                                spec["rhg_max"], grid_set_of_spec(spec),
-                               spec.get("eps_shares"))
+                               spec.get("eps_shares"), metric_of_spec(spec))
 
 
 def first_finished_params(folder, job_prefix: str) -> Optional[dict]:

@@ -282,11 +282,13 @@ class DeviationMapsDialog(QDialog):
 
     def _write_summary(self):
         p = self._pair
-        cells = ["%s %s / %s" % (q, _fmt(d.e_inst), _fmt(d.e_bias))
+        cells = ["%s %s / %s / %s" % (q, _fmt(d.e_mean), _fmt(d.e_inst),
+                                      _fmt(d.e_bias))
                  for q, d in p.quantities.items()]
         s = p.settings
         self.lbl_summary.setText(
-            "<b>E/ε (all samples) / bias E/ε (time means):</b> %s<br>"
+            "<b>E/ε of the means (decides the studies) / E/ε (all samples)"
+            " / bias E/ε (time means per point):</b> %s<br>"
             "a = %s<br>b = %s<br>ZOI x[%g, %g] y[%g, %g] mm, step %g mm, "
             "T = %g–%g of the simulated time, sampling %s, largest frame "
             "offset %s of a frame interval."

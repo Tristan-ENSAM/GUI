@@ -404,9 +404,16 @@ class TestPointwise:
         return mg.run_mesh_gci(
             _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
             finest_elem_size=0.001, ratio=2.0, n_meshes=3,
-            tolerances=tol, **kw)
+            tolerances=tol, **dict({"selection": "pointwise"}, **kw))
 
-    def test_default_is_pointwise(self):
+    def test_default_is_mean(self):
+        res = mg.run_mesh_gci(
+            _runner(), _Cfg(), self.ZOI, self.DIMS, grid_step=0.01,
+            finest_elem_size=0.001, ratio=2.0, n_meshes=3,
+            tolerances={q: 10.0 for q in _BASE})
+        assert res.selection == "mean" and not res.deviation
+
+    def test_pointwise_selection(self):
         res = self._run({q: 10.0 for q in _BASE})
         assert res.selection == "pointwise"
         assert set(res.deviation) == {0.002, 0.004}

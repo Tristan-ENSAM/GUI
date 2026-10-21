@@ -379,8 +379,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         lab.setToolTip(
             "Largest difference between two runs that you treat as\n"
             "negligible, one value per quantity, in its own unit (absolute,\n"
-            "not a percentage). A run pair passes when every quantity\n"
-            "differs by less than its ε_q in the ZOI (E_max < 1).\n"
+            "not a percentage). A run pair passes when, for every\n"
+            "quantity, the means over the ZOI and the time window T of the\n"
+            "two runs differ by less than its ε_q (E_max < 1).\n"
             "Defaults: values used on the reference case (Ti6Al4V\n"
             "orthogonal cutting).")
         cg0.addWidget(lab, 1, 0)
@@ -450,10 +451,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         ag.addWidget(QLabel("ZOI sampling step [mm]"), 0, 0)
         self.le_grid_step = num_edit(
             placeholder="= elem",
-            tip="Spacing of the points where the ZOI is sampled [mm].\n"
-                "Default (empty): the element size of the Mesh tab (the\n"
-                "coarser meshes of steps 0 and 1 then have several points\n"
-                "per element).")
+            tip="Spacing of the points where the ZOI is sampled for the\n"
+                "deviation maps [mm]. The studies decide on the means over\n"
+                "the ZOI, which are taken from the elements (each weighted\n"
+                "by its area inside the ZOI), not from these points.\n"
+                "Default (empty): the element size of the Mesh tab.")
         ag.addWidget(self.le_grid_step, 0, 1)
         lab = QLabel("Time window T (fraction of the simulated time)")
         lab.setToolTip(
@@ -2306,6 +2308,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "grid_step_set": self._grid_step_set(),
             "thresholds_abs": self.thresholds(),
             "window": list(window), "evf_threshold": 0.5,
+            # Deviation = difference of the area means over the ZOI
+            # (2026-10-21); an older folder without it replays pointwise.
+            "metric": "mean",
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "domain_dims": self._dims_dict(self._dims_from_cfg()),
             "filter_verify": True, "base_ms": self._base_ms()}
@@ -2403,7 +2408,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             thresholds=thr, ms_values=ms_values, window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
             guard_fn=guard_fn, cost_fn=cost_fn, reference=reference,
-            search=search, **bis)
+            search=search, metric=spec.get("metric", "pointwise"), **bis)
         self._ms_worker.progress.connect(self._on_ms_progress)
         self._ms_worker.finished_ok.connect(self._on_ms_done)
         self._ms_worker.failed.connect(self._on_fail)
@@ -2604,6 +2609,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "grid_step_set": self._grid_step_set(),
             "thresholds_abs": self.thresholds(),
             "window": list(window), "evf_threshold": 0.5,
+            "metric": "mean",
             "step_elems": ds["dom_step_elems"], "n_max": ds["dom_n_max"],
             "n_hold": ds["dom_n_hold"], "m_ratios": ds["dom_m_ratios"],
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
@@ -2698,7 +2704,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             step_elems=ds["dom_step_elems"], n_max=ds["dom_n_max"],
             n_hold=ds["dom_n_hold"], m_ratios=ds["dom_m_ratios"],
             caps=caps, margin_elems=margin, offset=offset,
-            guard_fn=guard_fn, cost_fn=cost_fn)
+            guard_fn=guard_fn, cost_fn=cost_fn,
+            metric=spec.get("metric", "pointwise"))
         self._di_worker.progress.connect(self._on_di_progress)
         self._di_worker.finished_ok.connect(self._on_di_done)
         self._di_worker.failed.connect(self._on_fail)
@@ -3071,7 +3078,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                         grid_step=float(study.settings["grid_step"]),
                         field_vars=["EVF", "TEMP", "V1", "V2"],
                         window=window, evf_threshold=0.5,
-                        selection="pointwise")
+                        selection="mean", reduction="area")
         d = study.final
         dspec = getattr(self, "_last_domain_spec", None)
         filter_on = bool(getattr(self.cfg.step, "output_filter_enabled",
@@ -3082,6 +3089,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                        float(d.l_void)],
             "gci_plan": gci_plan, "gci_tolerances": self._gci_tolerances(),
             "zoi": zoi,
+            # The checks compare with the domain study's own metric.
+            "metric": study.settings.get("metric", "pointwise"),
             # eps_q as set (the key of the result); each check takes its
             # step's share of it.
             "thresholds_abs": (self.thresholds() if shares else
@@ -3130,7 +3139,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                                 or ("EVF", "TEMP", "V1", "V2")),
             "window": tuple(float(v) for v in p.get("window") or window),
             "evf_threshold": float(p.get("evf_threshold", 0.5)),
-            "selection": p.get("selection", "mean")}
+            "selection": p.get("selection", "mean"),
+            "reduction": p.get("reduction", "grid")}
         gci_tol = _scaled(spec["gci_tolerances"], spec, 1)
         # Check 4 (ms at the point) with the ms share; an older spec has
         # no shares: the domain study's eps_q, as before.
@@ -3284,10 +3294,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "tolerances": self._gci_tolerances(),
             "field_vars": ["EVF", "TEMP", "V1", "V2"],
             "evf_threshold": 0.5,
-            # h* from the pointwise E_q against the finest mesh (common
-            # metric of the three studies, 2026-10-20); an older folder
-            # without the key replays its space-time mean selection.
-            "selection": "pointwise",
+            # h* from the area means over the ZOI against the Richardson
+            # (or finest) reference: the metric of the three studies
+            # (2026-10-21). An older folder without "reduction" replays its
+            # grid scalars, one without "selection" the mean selection.
+            "selection": "mean", "reduction": "area",
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "domain_dims": self._dims_dict(self._dims_from_cfg()),
             "base_ms": self._base_ms(),
@@ -3355,7 +3366,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                              or ("EVF", "TEMP", "V1", "V2")),
             window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
-            min_elem_size=minh, selection=spec.get("selection", "mean"))
+            min_elem_size=minh, selection=spec.get("selection", "mean"),
+            reduction=spec.get("reduction", "grid"))
         self._mesh_worker.progress.connect(self._on_mesh_progress)
         self._mesh_worker.finished_ok.connect(self._on_mesh_done)
         self._mesh_worker.failed.connect(self._on_fail)
