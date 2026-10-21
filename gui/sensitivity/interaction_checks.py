@@ -72,9 +72,9 @@ from typing import Callable, Dict, List, Optional
 from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.domain_independence import (
     AlignmentError, DIMENSIONS, StudyResult, domain_key, e_max,
-    errors_between, run_candidate,
+    errors_by, run_candidate,
 )
-from gui.sensitivity.ms_independence import align_samples, with_mass_scaling
+from gui.sensitivity.ms_independence import pair_errors, with_mass_scaling
 
 # Action attached to a failed combined-domain check (decision D11-a).
 REDO_DOMAIN_ACTION = (
@@ -174,7 +174,8 @@ def combined_domain_check(run_bundle: Callable, base_cfg, study: StudyResult,
     if s_a is None or s_b is None:
         res.conclusion = "not evaluable: %s" % (rec_a.error or rec_b.error)
         return res
-    errs = errors_between(s_b, s_a, tuple(s["thresholds"].keys()))
+    errs = errors_by(s_b, s_a, tuple(s["thresholds"].keys()),
+                     s.get("metric", "pointwise"))
     res.e_max, res.q_crit = e_max(errs, s["thresholds"])
     res.details["errors"] = errs
     res.passed = bool(math.isfinite(res.e_max) and res.e_max < 1.0
@@ -409,8 +410,8 @@ def ms_at_point_check(run_bundle: Callable, base_cfg, study: StudyResult,
         res.conclusion = "not evaluable: %s" % (rec_b.error or "no bundle")
         return res
     try:
-        b2, a2, info = align_samples(s_b, s_a)
-        errs = errors_between(a2, b2, quantities)
+        errs, info = pair_errors(s_b, s_a, quantities,
+                                 s.get("metric", "pointwise"))
     except AlignmentError as exc:
         res.conclusion = "not evaluable: %s" % exc
         return res
@@ -479,8 +480,8 @@ def _ms_recovery(run_bundle, base_cfg, study, s, d_star, elem, quantities,
                                  "passed": None})
             return out
         try:
-            b2, a2, _info = align_samples(s_lower, s_c)
-            errs = errors_between(a2, b2, quantities)
+            errs, _info = pair_errors(s_lower, s_c, quantities,
+                                      s.get("metric", "pointwise"))
         except AlignmentError:
             out["tried"].append({"ms": ms, "e_max": None, "q_crit": None,
                                  "passed": None})

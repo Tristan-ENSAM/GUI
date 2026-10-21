@@ -48,7 +48,7 @@ import numpy as np
 
 from gui.core.domain_sizing import DomainDims
 from gui.sensitivity.zoi_sampling import (
-    roi_grid, element_centroids_xy, window_mask,
+    roi_grid, element_centroids_xy, window_mask, zoi_area_means,
     history_window_mean as _history_window_mean)
 from gui.sensitivity.runner_core import eulerian_instance
 
@@ -257,19 +257,39 @@ def zoi_scalars(bundle, zoi: Sequence[float], grid_step: float,
                 window: Tuple[float, float] = (0.3, 1.0),
                 evf_threshold: float = 0.9, evf_var: str = "EVF",
                 force_channels: Optional[Dict[str, str]] = None,
-                instance: Optional[str] = None) -> Dict[str, float]:
+                instance: Optional[str] = None,
+                reduction: str = "grid",
+                elem_size: Optional[float] = None) -> Dict[str, float]:
     """One representative scalar per monitored quantity for a single run.
 
     Field vars other than `evf_var` are EVF-masked (material only); `evf_var` is
     reduced unmasked (fill fraction everywhere). Forces come from the windowed
-    mean of their history channel. All on a FIXED grid via bilinear sampling,
-    with the Delaunay triangulation built ONCE and reused across variables.
+    mean of their history channel.
+
+    reduction "area": the area mean over the ZOI rectangle, each element
+    weighted by its area inside it (zoi_sampling.zoi_area_means; the scalar
+    of the ms and domain studies, no grid). "grid": on a FIXED grid via
+    bilinear sampling, with the Delaunay triangulation built ONCE and reused
+    across variables.
     """
     inst = instance or eulerian_instance(bundle)
     if not inst:
         raise RuntimeError("No Eulerian instance (EVF carrier) found.")
-    points = roi_grid(zoi, grid_step)
     tmask = window_mask(bundle.times, *window)
+    if reduction == "area":
+        out = zoi_area_means(
+            bundle, inst, zoi, list(field_vars),
+            masked=[v for v in field_vars if v != evf_var], tmask=tmask,
+            evf_var=evf_var, evf_threshold=evf_threshold,
+            elem_size=elem_size)
+        if not tmask.any():
+            out = {v: float("nan") for v in field_vars}
+        for label, channel in dict(force_channels or {}).items():
+            out[label] = _history_window_mean(bundle, channel, *window)
+        return out
+    if reduction != "grid":
+        raise ValueError("reduction must be 'area' or 'grid'")
+    points = roi_grid(zoi, grid_step)
     weights = interp_weights(element_centroids_xy(bundle, inst), points)
     evf = bilinear_field(bundle, evf_var, inst, points, weights=weights)
     matmask = evf >= evf_threshold
@@ -369,7 +389,7 @@ def run_mesh_gci(
         window: Tuple[float, float] = (0.3, 1.0), evf_threshold: float = 0.9,
         force_channels: Optional[Dict[str, str]] = None,
         min_elem_size: Optional[float] = None, safety: float = _SAFETY_3PLUS,
-        selection: str = "pointwise",
+        selection: str = "mean", reduction: str = "area",
         should_cancel: Optional[Callable] = None,
         progress_cb: Optional[Callable] = None) -> MeshGciResult:
     """GCI/Richardson mesh convergence on a FIXED (large) domain.
@@ -388,15 +408,19 @@ def run_mesh_gci(
 
     `selection` sets the deviation used for that choice:
 
-    * "pointwise" (default): E_q / eps_q of each mesh against the FINEST mesh,
+    * "pointwise": E_q / eps_q of each mesh against the FINEST mesh,
       i.e. the mean over the ZOI points and frames of |q_h - q_finest| / eps_q
       (Vx, Vy, T masked by EVF of both runs; the metric of the ms and domain
       studies, the coarser mesh sampled by linear interpolation of the
       element centroids). The finest mesh is the reference, so it is only
       retained through the h_min exit rule; its reported deviation is then
       that of the next coarser mesh (the only measured one).
-    * "mean": the space-time mean of each quantity against the
-      Richardson-extrapolated value (finest value when not reliable).
+    * "mean" (default, decision of 2026-10-21): the scalar of each quantity
+      against the Richardson-extrapolated value (finest value when not
+      reliable). `reduction` sets that scalar: "area" (default) the area
+      mean over the ZOI rectangle, the scalar of the ms and domain studies;
+      "grid" the mean over the bilinear grid points (studies before
+      2026-10-21).
 
     In both cases p, the extrapolated value and the GCI are computed and
     reported.
@@ -429,7 +453,8 @@ def run_mesh_gci(
             raise RuntimeError("mesh run produced no bundle (elem_size=%.4g)" % h)
         result.scalars[h] = zoi_scalars(
             bundle, zoi, grid_step, field_vars, window=window,
-            evf_threshold=evf_threshold, force_channels=force_channels)
+            evf_threshold=evf_threshold, force_channels=force_channels,
+            reduction=reduction, elem_size=h)
         if selection == "pointwise":
             samples[h] = _pointwise_sample(
                 bundle, zoi, grid_step, h, field_vars, force_channels,

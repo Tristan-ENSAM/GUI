@@ -20,7 +20,7 @@ class MeshGciWorker(QThread):
                  finest_elem_size, ratio=2.0, n_meshes=3, tolerances=None,
                  field_vars=("EVF", "TEMP", "V1", "V2"), window=(0.3, 1.0),
                  evf_threshold=0.5, force_channels=None, min_elem_size=None,
-                 selection="pointwise", parent=None):
+                 selection="mean", reduction="area", parent=None):
         super().__init__(parent)
         self._kw = dict(
             run_bundle=run_bundle, base_cfg=base_cfg, zoi=tuple(zoi),
@@ -30,7 +30,7 @@ class MeshGciWorker(QThread):
             field_vars=tuple(field_vars), window=tuple(window),
             evf_threshold=float(evf_threshold), force_channels=force_channels,
             min_elem_size=(None if min_elem_size is None else float(min_elem_size)),
-            selection=selection)
+            selection=selection, reduction=reduction)
         self._cancel = False
 
     def cancel(self):

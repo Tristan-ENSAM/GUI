@@ -10,7 +10,9 @@ unchanged; only the location moved.
 * nearest_samples    - element field resampled on points by nearest centroid;
 * element_centroids_xy - initial (x, y) centroids of an instance;
 * window_mask        - frames inside the settled time window T;
-* history_window_mean - windowed mean of a history channel.
+* history_window_mean - windowed mean of a history channel;
+* zoi_area_means     - one scalar per field: the area mean over the ZOI
+  rectangle, each element weighted by its area inside it (no grid).
 
 Pure host-side Python (CPython 3.x).
 """
@@ -71,6 +73,94 @@ def nearest_samples(bundle, var, inst, points, frames=None) -> np.ndarray:
     if f.ndim == 1:
         f = f[None, :]
     return f[:, idx]
+
+
+# ---------------------------------------------------------------------------
+# Area mean over the ZOI (metric "mean", decision of 2026-10-21)
+# ---------------------------------------------------------------------------
+def _spacing(coords: np.ndarray) -> float:
+    """Median spacing of the distinct sorted coordinates (NaN if < 2)."""
+    u = np.unique(np.round(np.asarray(coords, dtype=float), 12))
+    d = np.diff(u)
+    d = d[d > 1e-12]
+    return float(np.median(d)) if d.size else float("nan")
+
+
+def zoi_area_weights(centroids: np.ndarray, zoi, elem_size=None):
+    """(idx, w): elements overlapping the ZOI rectangle and their area inside
+    it. The Eulerian mesh is structured: each element is taken as the
+    rectangle centred on its centroid, of the median centroid spacing in x
+    and y (`elem_size` when a direction has a single column/row)."""
+    c = np.asarray(centroids, dtype=float)
+    xmin, xmax, ymin, ymax = (float(v) for v in zoi)
+    dx, dy = _spacing(c[:, 0]), _spacing(c[:, 1])
+    if not math.isfinite(dx):
+        dx = float(elem_size) if elem_size else 0.0
+    if not math.isfinite(dy):
+        dy = float(elem_size) if elem_size else 0.0
+    ox = (np.minimum(c[:, 0] + dx / 2, xmax)
+          - np.maximum(c[:, 0] - dx / 2, xmin))
+    oy = (np.minimum(c[:, 1] + dy / 2, ymax)
+          - np.maximum(c[:, 1] - dy / 2, ymin))
+    w = np.clip(ox, 0.0, None) * np.clip(oy, 0.0, None)
+    idx = np.nonzero(w > 0)[0]
+    return idx, w[idx]
+
+
+def area_mean(values: np.ndarray, weights: np.ndarray,
+              material: Optional[np.ndarray] = None) -> float:
+    """One scalar from element values (Nt, Ne) over the window frames: the
+    time mean per element (over its material frames when `material` is
+    given), then the area-weighted mean over the elements with at least one
+    such frame. NaN when nothing is valid."""
+    v = np.asarray(values, dtype=float)
+    if v.ndim == 1:
+        v = v[None, :]
+    ok = np.isfinite(v)
+    if material is not None:
+        ok &= np.asarray(material, dtype=bool)
+    cnt = ok.sum(axis=0)
+    per = np.where(cnt > 0, np.where(ok, v, 0.0).sum(axis=0)
+                   / np.maximum(cnt, 1), np.nan)
+    keep = np.isfinite(per)
+    w = np.asarray(weights, dtype=float)[keep]
+    if not keep.any() or w.sum() <= 0:
+        return float("nan")
+    return float(np.sum(w * per[keep]) / w.sum())
+
+
+def zoi_area_means(bundle, inst, zoi, variables, masked=(), tmask=None,
+                   evf_var: str = "EVF", evf_threshold: float = 0.5,
+                   elem_size=None) -> dict:
+    """{variable: area mean over the ZOI} for element fields `variables`
+    (bundle names). Those in `masked` count only where the element is
+    material (evf_var >= evf_threshold) at that frame; `tmask` selects the
+    window frames."""
+    idx, w = zoi_area_weights(element_centroids_xy(bundle, inst), zoi,
+                              elem_size)
+    out = {}
+    if idx.size == 0:
+        return {v: float("nan") for v in variables}
+
+    def get(var):
+        f = np.asarray(bundle.field(inst, var), dtype=float)
+        if f.ndim == 1:
+            f = f[None, :]
+        if tmask is not None:
+            f = f[np.asarray(tmask, dtype=bool)]
+        return f[:, idx]
+
+    material = None
+    if any(v in masked for v in variables):
+        material = get(evf_var) >= float(evf_threshold)
+    for var in variables:
+        try:
+            vals = get(var)
+        except KeyError:
+            out[var] = float("nan")
+            continue
+        out[var] = area_mean(vals, w, material if var in masked else None)
+    return out
 
 
 # ---------------------------------------------------------------------------

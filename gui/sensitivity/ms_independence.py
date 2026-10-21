@@ -74,8 +74,8 @@ from gui.core.domain_sizing import DomainDims
 import numpy as np
 
 from gui.sensitivity.domain_independence import (
-    ALL_QUANTITIES, AlignmentError, RunRecord, ZoiSample, e_max,
-    errors_between, run_candidate)
+    ALL_QUANTITIES, METRICS, AlignmentError, RunRecord, ZoiSample, e_max,
+    errors_between, errors_by, mean_errors, run_candidate)
 
 # Default sequence (decision of 2026-10-07): factor 2 between values, around
 # the ms = 1000 used so far.
@@ -182,6 +182,18 @@ def align_samples(sa: ZoiSample, sb: ZoiSample
     return a2, b2, info
 
 
+def pair_errors(s_ref: ZoiSample, s_cur: ZoiSample,
+                quantities: Sequence[str], metric: str = "pointwise"
+                ) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """(E_q of run `s_cur` against `s_ref`, alignment info). "mean" compares
+    one scalar per run (no alignment: each run keeps its own sample times);
+    "pointwise" aligns the two runs first (`align_samples`)."""
+    if metric == "mean":
+        return mean_errors(s_cur, s_ref, quantities), {}
+    a2, b2, info = align_samples(s_ref, s_cur)
+    return errors_by(b2, a2, quantities, metric), info
+
+
 @dataclass
 class MsComparison:
     """Comparison k: S(ms_k) against S(ms_0) ("first" reference) or
@@ -247,7 +259,8 @@ def run_ms_independence(
         factor: float = DEFAULT_BRACKET_FACTOR,
         stop_ratio: float = DEFAULT_STOP_RATIO,
         ms_max: float = DEFAULT_MS_MAX,
-        max_runs: int = DEFAULT_MAX_RUNS) -> MsStudyResult:
+        max_runs: int = DEFAULT_MAX_RUNS,
+        metric: str = "pointwise") -> MsStudyResult:
     """Run the ms sequence and retain the largest independent factor.
 
     run_bundle(cfg) -> ResultsBundle | None. Each config passed is a deep
@@ -262,7 +275,9 @@ def run_ms_independence(
         ms_values[0] (the reference), then brackets ms* by multiplying by
         `factor` and narrows it by bisection (see `MS_SEARCHES`); every run
         is then compared with the reference whatever `reference` says, and
-        only ms_values[0] is used."""
+        only ms_values[0] is used.
+    metric : deviation between two runs, "mean" or "pointwise"
+        (domain_independence.METRICS)."""
     if search not in MS_SEARCHES:
         raise ValueError("search must be one of %s" % (MS_SEARCHES,))
     ms_values = [float(v) for v in ms_values]
@@ -284,6 +299,8 @@ def run_ms_independence(
         raise ValueError("every ms value must be >= 1")
     if reference not in MS_REFERENCES:
         raise ValueError("reference must be one of %s" % (MS_REFERENCES,))
+    if metric not in METRICS:
+        raise ValueError("metric must be one of %s" % (METRICS,))
     if elem_size <= 0 or grid_step <= 0:
         raise ValueError("elem_size and grid_step must be > 0")
     thr = {q: float(v) for q, v in thresholds.items()
@@ -305,7 +322,7 @@ def run_ms_independence(
         "zoi": tuple(float(v) for v in zoi), "grid_step": float(grid_step),
         "elem_size": elem, "thresholds": dict(thr), "window": tuple(window),
         "evf_threshold": float(evf_threshold), "ms_values": list(ms_values),
-        "reference": reference, "search": search,
+        "reference": reference, "search": search, "metric": metric,
         "domain_dims": {"h_wp": float(domain_dims.h_wp),
                         "h_void": float(domain_dims.h_void),
                         "l_wp": float(domain_dims.l_wp),
@@ -356,8 +373,7 @@ def run_ms_independence(
             errs = {q: float("nan") for q in quantities}
         else:
             try:
-                a2, b2, info = align_samples(s_a, s_b)
-                errs = errors_between(b2, a2, quantities)
+                errs, info = pair_errors(s_a, s_b, quantities, metric)
             except AlignmentError as exc:
                 errs = {q: float("nan") for q in quantities}
                 result.warnings.append("ms comparison %d: %s" % (k, exc))
@@ -395,8 +411,9 @@ def _compare(result: MsStudyResult, k: int, ref, cur, ms_ref: float,
         errs = {q: float("nan") for q in quantities}
     else:
         try:
-            a2, b2, info = align_samples(s_a, s_b)
-            errs = errors_between(b2, a2, quantities)
+            errs, info = pair_errors(s_a, s_b, quantities,
+                                     result.settings.get("metric",
+                                                         "pointwise"))
         except AlignmentError as exc:
             errs = {q: float("nan") for q in quantities}
             result.warnings.append("ms comparison %d: %s" % (k, exc))

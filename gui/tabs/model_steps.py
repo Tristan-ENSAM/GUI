@@ -126,7 +126,7 @@ class ModelStepsMixin:
         return comparison_settings(self.zoi(), self.thresholds(),
                                    self.window(), g.rk_max, g.rhg_max,
                                    self._grid_step_set(),
-                                   self._eps_shares_list())
+                                   self._eps_shares_list(), "mean")
 
     def _keys(self):
         mkey = model_key(self._model_params())
