@@ -82,6 +82,7 @@ from gui.sensitivity.study_state import STEPS, in_model
 from gui.tabs.model_steps import ModelStepsMixin
 from gui.widgets.collapsible import CollapsibleSection
 from gui.widgets.geometry_preview import GeometryPreview
+from gui.widgets.machine_combo import MachineCombo
 
 
 # Quantity -> bundle element-field name (velocity components V1/V2 are written
@@ -484,6 +485,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 ag.addWidget(le, i, 1)
         win_row.addStretch(1)
         ag.addLayout(win_row, 1, 1, 1, 2)
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("Machine:"))
+        self.cmb_machine = MachineCombo(self._prefs_getter)
+        mrow.addWidget(self.cmb_machine)
+        mrow.addStretch(1)
+        ag.addLayout(mrow, ag.rowCount(), 0, 1, 3)
         self.cb_reuse_runs = QCheckBox(
             "Reuse the finished runs of earlier studies")
         self.cb_reuse_runs.setChecked(OptimizationCfgDefaults.reuse_runs)
@@ -1111,6 +1118,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self._sync_opt_to_cfg)
         self.cb_ms_search.currentIndexChanged.connect(self._sync_opt_to_cfg)
         self.cb_reuse_runs.toggled.connect(self._sync_opt_to_cfg)
+        self.cmb_machine.machineChanged.connect(self._sync_opt_to_cfg)
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
         for sp in self._dom_spins.values():
             sp.valueChanged.connect(self._sync_opt_to_cfg)
@@ -1175,6 +1183,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.ms_stop_ratio = self.le_ms_stop.text()
         o.ms_max = self.le_ms_max.text()
         o.reuse_runs = bool(self.cb_reuse_runs.isChecked())
+        o.machine = self.cmb_machine.machine()
         self.changed.emit()
         self._refresh_step_status()
 
@@ -1230,8 +1239,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                     OptimizationCfgDefaults, attr))))
             self.cb_reuse_runs.setChecked(bool(getattr(
                 o, "reuse_runs", OptimizationCfgDefaults.reuse_runs)))
+            self.cmb_machine.set_machine(str(getattr(o, "machine", "") or ""))
         finally:
             self._loading = False
+
+    def refresh_machines(self):
+        """The machine list of the Preferences changed."""
+        self.cmb_machine.refresh()
 
     def refresh_inputs(self):
         """Reload the panel from cfg.optimization and redraw (called after
@@ -2089,11 +2103,18 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         (after showing a warning). `folder`: the study folder the runs go
         to, when it is not a new one in the working directory (a resumed
         study, the final checks): in remote mode it must be reachable by
-        the compute PC too."""
-        prefs = self._prefs_getter() if self._prefs_getter else None
-        if prefs is None:
+        the compute PC too. The returned preferences are set for the
+        machine chosen in the tab (gui.core.machines)."""
+        if (self._prefs_getter() if self._prefs_getter else None) is None:
             QMessageBox.warning(self, "Preferences",
                                 "No preferences (Abaqus command/script).")
+            return None
+        prefs = self.cmb_machine.run_prefs()
+        if prefs is None:
+            QMessageBox.warning(
+                self, "Machine",
+                "Machine \"%s\" is not in Preferences - Settings - Machines "
+                "any more: choose another one." % self.cmb_machine.machine())
             return None
         problems = launch_problems(prefs, folder or prefs.default_workdir)
         wd = Path(prefs.default_workdir)

@@ -187,6 +187,26 @@ def rewrite_study_config(folder, spec: dict) -> bool:
         return False
 
 
+def record_study_machine(folder, name: str):
+    """Add machine `name` to the ``machines`` of the folder's config.json
+    (the machines its runs went to, in order; a study resumed elsewhere
+    gets a second entry). Returns the machines recorded before, or None
+    when config.json cannot be read or written (best effort)."""
+    path = Path(folder) / "config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        before = [str(m) for m in (data.get("machines") or [])]
+        if not before or before[-1] != name:
+            data["machines"] = before + [name]
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False,
+                                       default=str), encoding="utf-8")
+        return before
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def write_checks_config(folder, spec: dict, when=None) -> bool:
     """Settings of the final checks, next to the domain study they check
     (the checks runs live in that folder); best effort."""

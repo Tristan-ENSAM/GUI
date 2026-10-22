@@ -23,6 +23,7 @@ import os
 import sys
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
+from typing import Optional
 
 
 # ----------------------------------------------------------------------------
@@ -83,6 +84,14 @@ class Preferences:
     remote_queue_dir: str = ""
     # abaqus.bat of the COMPUTE PC (written into start_agent.bat).
     remote_abaqus_cmd: str = r"C:\SIMULIA\Commands\abaqus.bat"
+
+    # ---- Machines a study can run on (gui.core.machines): the queue
+    #      machines as dicts (name, kind, queue_dir, abaqus_cmd), and the
+    #      name of the default one. None = preferences older than the list:
+    #      it is built from the execution fields above. Those fields keep
+    #      the default machine's values, for the code that reads them. ----
+    machines: Optional[list] = None
+    default_machine: str = ""
 
 
 # ----------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from gui.sensitivity import zoi_proposal as zp
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
+from gui.widgets.machine_combo import MachineCombo
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
@@ -273,6 +274,9 @@ class SensitivityTab(QWidget):
         self.lbl_cpus.setToolTip("CPU cores used per run — synchronised with "
                                  "the Job tab (set it there).")
         ctrl.addWidget(self.lbl_cpus)
+        ctrl.addWidget(QLabel("Machine:"))
+        self.cmb_machine = MachineCombo(self._prefs_getter)
+        ctrl.addWidget(self.cmb_machine)
         self.btn_run = QPushButton("Run plan")
         self.btn_run.setToolTip("Launch every profile through Abaqus, "
                                 "sequentially, then analyse.")
@@ -942,9 +946,14 @@ class SensitivityTab(QWidget):
         if self._plan_units_stale():
             self._invalidate_plan_if_units_changed()
             return
-        prefs = self._prefs_getter() if self._prefs_getter else None
-        if prefs is None:
+        if (self._prefs_getter() if self._prefs_getter else None) is None:
             self._warn("No preferences available (Abaqus command/script).")
+            return
+        prefs = self.cmb_machine.run_prefs()
+        if prefs is None:
+            self._warn("Machine \"%s\" is not in Preferences - Settings - "
+                       "Machines any more: choose another one."
+                       % self.cmb_machine.machine())
             return
         from pathlib import Path
         problems = launch_problems(prefs, prefs.default_workdir)
@@ -1060,6 +1069,7 @@ class SensitivityTab(QWidget):
                "extract_full_domain": bool(field_vars)
                                       and self.chk_full_domain.isChecked(),
                "cpus": int(cpus),
+               "machine": self.cmb_machine.machine_label(),
                "warmup_frac": float(self.spin_warmup.value()),
                "temp_unit": tu,
                "unit_system": (system.to_dict()
@@ -1296,6 +1306,10 @@ class SensitivityTab(QWidget):
             w.setEnabled(on)
         self.sld_map_frame.setEnabled(
             on and not self.chk_map_aggregate.isChecked())
+
+    def refresh_machines(self):
+        """The machine list of the Preferences changed."""
+        self.cmb_machine.refresh()
 
     def _build_field_maps(self, result):
         """Compute per-element sensitivity maps from the kept run bundles and

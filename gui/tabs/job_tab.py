@@ -29,6 +29,7 @@ from gui.core.async_call import run_async
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
+from gui.widgets.machine_combo import MachineCombo
 from gui.core.remote_exec import (is_remote, launch_problems,
                                   request_cancel_by_job, submit_command)
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
@@ -172,6 +173,11 @@ class JobTab(QWidget):
         self.spin_cpus.setMaximumWidth(100)
         self.spin_cpus.setToolTip("Number of CPU cores for the Abaqus solver.")
         form.addRow("CPUs:", self.spin_cpus)
+
+        self.cmb_machine = MachineCombo(self._get_prefs)
+        self.cmb_machine.set_machine(getattr(self.cfg.job, "machine", ""))
+        self.cmb_machine.machineChanged.connect(self._on_change)
+        form.addRow("Machine:", self.cmb_machine)
 
         # Parallelisation: we only expose `cpus` for now. Abaqus offers
         # several parallelisation strategies (domain decomposition, loop
@@ -323,6 +329,7 @@ class JobTab(QWidget):
         # machine-specific and is not stored in the project file).
         self.cfg.job.job_name = self.fld_job_name.text().strip() or "Cutting_job"
         self.cfg.job.cpus = int(self.spin_cpus.value())
+        self.cfg.job.machine = self.cmb_machine.machine()
         self.jobChanged.emit()
 
     def _copy_output(self):
@@ -457,7 +464,14 @@ class JobTab(QWidget):
             )
             return
 
-        prefs = self._get_prefs()
+        prefs = self.cmb_machine.run_prefs()
+        if prefs is None:
+            QMessageBox.warning(
+                self, "Machine",
+                f"Machine \"{self.cmb_machine.machine()}\" is not in "
+                "Preferences - Settings - Machines any more: choose another "
+                "one.")
+            return
         job_name = self.fld_job_name.text().strip() or "Cutting_job"
         cpus     = int(self.spin_cpus.value())
         workdir  = prefs.default_workdir
@@ -560,6 +574,7 @@ class JobTab(QWidget):
             "=" * 72,
             f"Working directory:  {workdir}",
             f"CPUs:               {cpus}",
+            f"Machine:            {self.cmb_machine.machine_label()}",
             f"Abaqus command:     {prefs.abaqus_cmd}",
             f"Script:             {prefs.abaqus_script}",
         ] + ([f"Execution:          remote agent, queue "
@@ -619,6 +634,7 @@ class JobTab(QWidget):
 
         # Launch
         self._pipeline["remote"] = remote
+        self._pipeline["remote_queue"] = prefs.remote_queue_dir
         if remote:
             # A small client process submits the run to the agent of the
             # compute PC and waits for it; the agent mirrors .sta, .gui.log and
@@ -825,7 +841,7 @@ class JobTab(QWidget):
         if ctx.get("remote"):
             # The agent runs `abaqus terminate` (then the tree kill) on the
             # compute PC; the client process exits once it has reported.
-            queue = self._get_prefs().remote_queue_dir
+            queue = ctx.get("remote_queue") or self._get_prefs().remote_queue_dir
             self._append_output(
                 "\n[CANCEL] asking the remote agent to stop job %s\n"
                 % job_name)
@@ -1022,10 +1038,17 @@ class JobTab(QWidget):
         try:
             self.fld_job_name.setText(self.cfg.job.job_name)
             self.spin_cpus.setValue(int(self.cfg.job.cpus))
+            self.cmb_machine.blockSignals(True)
+            self.cmb_machine.set_machine(getattr(self.cfg.job, "machine", ""))
+            self.cmb_machine.blockSignals(False)
             self.lbl_workdir.setText(self._get_prefs().default_workdir)
         finally:
             for w in (self.fld_job_name, self.spin_cpus):
                 w.blockSignals(False)
+
+    def refresh_machines(self):
+        """The machine list of the Preferences changed."""
+        self.cmb_machine.refresh()
 
     # CPU count chosen here is the single source of truth for any Abaqus
     # launch (Job run, and the sensitivity runner).

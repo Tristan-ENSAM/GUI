@@ -14,8 +14,11 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QLabel, QLineEdit, QPushButton,
     QHBoxLayout, QDialogButtonBox, QFileDialog, QCheckBox, QGroupBox,
+    QComboBox, QHeaderView, QMessageBox, QTableWidget, QTableWidgetItem,
 )
 
+from gui.core.machines import (
+    LOCAL_NAME, QUEUE, Machine, default_name, machines)
 from gui.core.preferences import Preferences
 
 
@@ -66,7 +69,7 @@ class PreferencesDialog(QDialog):
     def __init__(self, parent, prefs: Preferences):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(720)
         self._initial = prefs
 
         outer = QVBoxLayout(self)
@@ -86,8 +89,8 @@ class PreferencesDialog(QDialog):
 
         note = QLabel(
             "Paths are stored in your user profile, not in the project file.\n"
-            "In remote mode the model-generator script above is still the one\n"
-            "used: it is copied to the queue folder for the compute PC."
+            "On the other machines the model-generator script above is still\n"
+            "the one used: it is copied to their queue folder."
         )
         note.setStyleSheet("color: #888; font-style: italic;")
         note.setWordWrap(True)
@@ -100,26 +103,54 @@ class PreferencesDialog(QDialog):
         f_wd.addRow("Default workdir:", self.fld_workdir)
         outer.addWidget(g_wd)
 
-        # ---- Execution group ----
-        g_exec = QGroupBox("Execution")
-        f_exec = QFormLayout(g_exec)
-        self.cb_remote = QCheckBox(
-            "Run Abaqus on the compute PC (remote agent through a shared folder)")
-        self.cb_remote.setChecked(prefs.execution_mode == "remote")
-        self.cb_remote.setToolTip(
-            "Runs are queued in the folder below and executed by the agent\n"
-            "started on the compute PC (start_agent.bat, written in that\n"
-            "folder when you click OK). Results come back to the working\n"
-            "directory on this PC; the shared folder only holds runs in\n"
-            "progress.")
-        f_exec.addRow(self.cb_remote)
-        self.fld_queue = _PathField(prefs.remote_queue_dir, "dir")
-        f_exec.addRow("Queue folder (shared drive):", self.fld_queue)
-        self.fld_remote_abq = QLineEdit(prefs.remote_abaqus_cmd)
-        self.fld_remote_abq.setToolTip(
-            "Path of abaqus.bat ON THE COMPUTE PC (not browsable from here).\n"
-            "Written into start_agent.bat in the queue folder.")
-        f_exec.addRow("Abaqus command on the compute PC:", self.fld_remote_abq)
+        # ---- Machines group ----
+        g_exec = QGroupBox("Machines")
+        v_exec = QVBoxLayout(g_exec)
+        lbl = QLabel(
+            "\"%s\" runs Abaqus here with the command above. The other "
+            "machines are PCs reached through a queue folder on a shared "
+            "drive, where their agent (start_agent.bat, written in that "
+            "folder when you click OK) runs the queued jobs. Each study "
+            "chooses its machine; the default one is used otherwise."
+            % LOCAL_NAME)
+        lbl.setWordWrap(True)
+        v_exec.addWidget(lbl)
+        self.tbl_machines = QTableWidget(0, 3)
+        self.tbl_machines.setHorizontalHeaderLabels(
+            ["Name", "Queue folder (shared drive)",
+             "Abaqus command on that PC"])
+        hdr = self.tbl_machines.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_machines.setColumnWidth(0, 120)
+        self.tbl_machines.setColumnWidth(2, 250)
+        self.tbl_machines.verticalHeader().setVisible(False)
+        self.tbl_machines.setMinimumHeight(110)
+        for m in machines(prefs)[1:]:
+            self._add_machine_row(m.name, m.queue_dir, m.abaqus_cmd)
+        v_exec.addWidget(self.tbl_machines)
+        row = QHBoxLayout()
+        btn_add = QPushButton("Add a machine")
+        btn_add.clicked.connect(self._on_add_machine)
+        btn_folder = QPushButton("Queue folder\u2026")
+        btn_folder.setToolTip("Pick the queue folder of the selected machine.")
+        btn_folder.clicked.connect(self._on_pick_queue)
+        btn_rm = QPushButton("Remove")
+        btn_rm.clicked.connect(self._on_remove_machine)
+        row.addWidget(btn_add)
+        row.addWidget(btn_folder)
+        row.addWidget(btn_rm)
+        row.addStretch(1)
+        v_exec.addLayout(row)
+        f_def = QFormLayout()
+        self.cmb_default_machine = QComboBox()
+        self.cmb_default_machine.setToolTip(
+            "Machine used by a study that has not chosen one.")
+        self._default_wanted = default_name(prefs)
+        self._refresh_default_combo()
+        self.tbl_machines.itemChanged.connect(
+            lambda _i: self._refresh_default_combo())
+        f_def.addRow("Default machine:", self.cmb_default_machine)
+        v_exec.addLayout(f_def)
         outer.addWidget(g_exec)
 
         # ---- Display group ----
@@ -145,15 +176,101 @@ class PreferencesDialog(QDialog):
         btns.rejected.connect(self.reject)
         outer.addWidget(btns)
 
+    # ---- machines ------------------------------------------------------
+    def _add_machine_row(self, name="", queue_dir="", abaqus_cmd=""):
+        r = self.tbl_machines.rowCount()
+        self.tbl_machines.insertRow(r)
+        for c, text in enumerate((name, _native_path(queue_dir), abaqus_cmd)):
+            self.tbl_machines.setItem(r, c, QTableWidgetItem(text))
+        return r
+
+    def _on_add_machine(self):
+        taken = set(self._machine_names()) | {LOCAL_NAME}
+        n = 1
+        while "Machine %d" % n in taken:
+            n += 1
+        r = self._add_machine_row("Machine %d" % n, "",
+                                  r"C:\SIMULIA\Commands\abaqus.bat")
+        self.tbl_machines.setCurrentCell(r, 0)
+        self._refresh_default_combo()
+
+    def _on_remove_machine(self):
+        r = self.tbl_machines.currentRow()
+        if r >= 0:
+            self.tbl_machines.removeRow(r)
+            self._refresh_default_combo()
+
+    def _on_pick_queue(self):
+        r = self.tbl_machines.currentRow()
+        if r < 0:
+            return
+        item = self.tbl_machines.item(r, 1)
+        path = QFileDialog.getExistingDirectory(
+            self, "Queue folder", (item.text() if item else "")
+            or str(Path.home()))
+        if path:
+            self.tbl_machines.setItem(r, 1, QTableWidgetItem(_native_path(path)))
+
+    def _cell(self, r, c) -> str:
+        item = self.tbl_machines.item(r, c)
+        return item.text().strip() if item else ""
+
+    def _machine_names(self):
+        return [self._cell(r, 0) for r in range(self.tbl_machines.rowCount())]
+
+    def _machines(self):
+        return [Machine(self._cell(r, 0), QUEUE, _native_path(self._cell(r, 1)),
+                        self._cell(r, 2))
+                for r in range(self.tbl_machines.rowCount())]
+
+    def _refresh_default_combo(self):
+        cur = self.cmb_default_machine.currentText() or self._default_wanted
+        self.cmb_default_machine.blockSignals(True)
+        self.cmb_default_machine.clear()
+        self.cmb_default_machine.addItems(
+            [LOCAL_NAME] + [n for n in self._machine_names() if n])
+        i = self.cmb_default_machine.findText(cur)
+        self.cmb_default_machine.setCurrentIndex(max(i, 0))
+        self.cmb_default_machine.blockSignals(False)
+
+    def machine_problems(self) -> list:
+        """What keeps the machine list from being saved."""
+        out, seen = [], {LOCAL_NAME}
+        for m in self._machines():
+            if not m.name:
+                out.append("A machine has no name.")
+            elif m.name in seen:
+                out.append("Two machines are named \"%s\"." % m.name)
+            seen.add(m.name)
+            if m.name and not m.queue_dir:
+                out.append("Machine \"%s\" has no queue folder." % m.name)
+        return out
+
+    def accept(self):
+        problems = self.machine_problems()
+        if problems:
+            QMessageBox.warning(self, "Machines",
+                                "\u2022 " + "\n\u2022 ".join(problems))
+            return
+        super().accept()
+
     def result_prefs(self) -> Preferences:
-        """Build a new Preferences instance from the dialog field values."""
+        """Build a new Preferences instance from the dialog field values.
+        The execution fields get the default machine's values."""
+        ms = self._machines()
+        default = self.cmb_default_machine.currentText() or LOCAL_NAME
+        dm = next((m for m in ms if m.name == default), None)
         return replace(
             self._initial,
             abaqus_cmd            = self.fld_cmd.value(),
             abaqus_script         = self.fld_script.value(),
             default_workdir       = self.fld_workdir.value(),
             temp_unit_default     = "K" if self.cb_kelvin_default.isChecked() else "C",
-            execution_mode        = "remote" if self.cb_remote.isChecked() else "local",
-            remote_queue_dir      = self.fld_queue.value(),
-            remote_abaqus_cmd     = self.fld_remote_abq.text().strip(),
+            machines              = [m.to_dict() for m in ms],
+            default_machine       = default,
+            execution_mode        = "remote" if dm is not None else "local",
+            remote_queue_dir      = (dm.queue_dir if dm is not None
+                                     else self._initial.remote_queue_dir),
+            remote_abaqus_cmd     = (dm.abaqus_cmd if dm is not None
+                                     else self._initial.remote_abaqus_cmd),
         )
