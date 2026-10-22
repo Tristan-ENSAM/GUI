@@ -280,3 +280,52 @@ def test_job_tab_client_command_round_trip(setup, running_agent):
     assert out.returncode == 0, out.stdout + out.stderr
     assert b"licence banner" in out.stdout
     assert (run_dir / "Cutting_job.results.npz").is_file()
+
+
+def test_redirected_path_for_remote_desktop():
+    assert rx.redirected_path(r"C:\TEMP\ABQ_wd\study") \
+        == r"\\tsclient\C\TEMP\ABQ_wd\study"
+    assert rx.redirected_path("d:/x/y") == r"\\tsclient\D\x\y"
+    assert rx.redirected_path(r"\\server\share\x") == ""
+    assert rx.redirected_path("/tmp/x") == ""
+    assert rx.token_name("abc") == ra.token_name("abc")
+
+
+def test_results_and_odb_delivered_straight_to_the_gui_pc(setup,
+                                                          running_agent):
+    """The agent sees the GUI PC's run folder (as \\\\tsclient\\C\\... in a
+    Remote Desktop session; here the folder itself) and the token there:
+    everything, .odb included, is written into it, nothing goes through Z:."""
+    run_dir = setup["gui_wd"] / "study"
+    proc = rx.RemoteProcess(setup["queue"], run_dir, {},
+                            {"cpus": 1, "job_name": "job1"}, setup["scripts"],
+                            remote_abaqus_cmd=setup["abaqus"],
+                            check_agent=False, client_dir=str(run_dir))
+    assert proc.token.is_file()
+    assert proc.wait(timeout=30) == 0
+    assert proc.delivered_to == str(run_dir)
+    assert (run_dir / "job1.odb").read_bytes() == b"x" * 1000
+    assert (run_dir / "job1.results.npz").read_bytes() == b"npz"
+    assert not proc.transit.exists()
+    assert sorted(p.name for p in run_dir.iterdir()
+                  if p.name.startswith(".")) == []      # token removed
+    out = proc.stdout.read()
+    assert b"written to the run folder through Remote Desktop" in out
+
+
+def test_falls_back_to_the_shared_drive_without_the_token(setup,
+                                                          running_agent):
+    """\\\\tsclient not there (window closed) or another PC's C: (no token):
+    the old transit through Z:, .odb kept on the compute PC."""
+    run_dir = setup["gui_wd"] / "study"
+    proc = rx.RemoteProcess(setup["queue"], run_dir, {},
+                            {"cpus": 1, "job_name": "job1"}, setup["scripts"],
+                            remote_abaqus_cmd=setup["abaqus"],
+                            check_agent=False,
+                            client_dir=str(setup["gui_wd"] / "elsewhere"))
+    assert proc.wait(timeout=30) == 0
+    assert proc.delivered_to == ""
+    assert (run_dir / "job1.results.npz").read_bytes() == b"npz"
+    assert not (run_dir / "job1.odb").exists()
+    assert not proc.token.exists() if proc.token else True
+    assert b"not delivered through Remote Desktop" in proc.stdout.read()

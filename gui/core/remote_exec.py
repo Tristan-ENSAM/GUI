@@ -49,6 +49,14 @@ What comes back (RESULT_SUFFIXES, the same list as in remote_agent.py): the resu
 bundle, its metadata, the .sta, the script log, and the small Abaqus text
 files. The .odb and the restart/scratch files stay on the compute PC, in the
 local folder named in the outcome and in the run log.
+
+Except when the agent can reach the GUI PC's run folder directly: a Remote
+Desktop session with the GUI PC's drive redirected shows it as
+\\\\tsclient\\C\\... (`redirected_path`). The request names that path, the
+client leaves a token file in the run folder (remote_agent.token_name), and
+when the agent sees the token there it writes the results and the .odb
+straight into the run folder, without the shared drive. The token makes sure
+\\\\tsclient is this PC and not another one connected to the session.
 """
 from __future__ import annotations
 
@@ -56,6 +64,7 @@ import ast
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import shutil
 import socket
@@ -79,6 +88,21 @@ LIVE_PERIOD = 2.0               # s, live copy transit -> local run folder
 LIVE_SUFFIXES = (".sta", ".gui.log")
 RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
                    ".msg", ".dat", ".log", ".inp")
+
+
+def redirected_path(run_dir) -> str:
+    r"""The run folder as a Remote Desktop session started from this PC sees
+    it when the drive is redirected: C:\TEMP\wd -> \\tsclient\C\TEMP\wd.
+    "" when the path has no drive letter (UNC, POSIX)."""
+    drive, rest = ntpath.splitdrive(str(run_dir))
+    if len(drive) != 2 or drive[1] != ":" or not drive[0].isalpha():
+        return ""
+    return "\\\\tsclient\\" + drive[0].upper() + rest.replace("/", "\\")
+
+
+def token_name(rid: str) -> str:
+    """Same as remote_agent.token_name (the agent imports nothing)."""
+    return ".remote-%s.token" % rid
 
 
 class RemoteError(RuntimeError):
@@ -264,7 +288,7 @@ class RemoteProcess:
 
     def __init__(self, queue, run_dir, model_params: dict, run_params: dict,
                  scripts_dir, remote_abaqus_cmd: Optional[str] = None,
-                 check_agent: bool = True):
+                 check_agent: bool = True, client_dir: Optional[str] = None):
         self.queue = Path(queue)
         self.dirs = _queue_dirs(self.queue)
         if remote_abaqus_cmd is not None:
@@ -287,6 +311,7 @@ class RemoteProcess:
         self.cancelled = False
         self.error = ""
         self.local_run_dir = ""
+        self.delivered_to = ""
         self.launcher_output = b""
         self.stdout = _RemoteStdout(self)
         self._lock = threading.Lock()
@@ -298,6 +323,19 @@ class RemoteProcess:
         self.transit = self.queue / "runs" / self.id
         self._seen = {}
         self._last_live = 0.0
+        # Direct delivery (results + .odb) through Remote Desktop drive
+        # redirection when the agent can see this token; else Z: transit.
+        if client_dir is None:
+            client_dir = redirected_path(self.run_dir)
+        self.token = None
+        if client_dir:
+            try:
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                self.token = self.run_dir / token_name(self.id)
+                self.token.write_text(socket.gethostname())
+            except OSError:
+                log.warning("no delivery token in %s", self.run_dir)
+                self.token, client_dir = None, ""
         request = {
             "id": self.id,
             "job_name": self.job_name,
@@ -305,6 +343,7 @@ class RemoteProcess:
             "model_params": repr(model_params),
             "run_params": repr(run_params),
             "scripts_dir": staged,
+            "client_dir": client_dir or "",
             "client_host": socket.gethostname(),
             "submitted": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -344,17 +383,29 @@ class RemoteProcess:
                     self._last_live = now
                     self._bring_back(LIVE_SUFFIXES, only_changed=True)
                 return None
-            self._bring_back(RESULT_SUFFIXES, only_changed=False)
+            self.delivered_to = out.get("delivered_to") or ""
+            if not self.delivered_to:
+                self._bring_back(RESULT_SUFFIXES, only_changed=False)
             shutil.rmtree(str(self.transit), ignore_errors=True)
+            self._drop_token()
             self.cancelled = bool(out.get("cancelled"))
             self.error = out.get("error") or ""
             self.local_run_dir = out.get("local_run_dir") or ""
             text = out.get("launcher_output") or ""
             if self.error:
                 text += "\n[REMOTE] %s\n" % self.error
+            if self.delivered_to:
+                text += ("\n[REMOTE] results and .odb written to the run "
+                         "folder through Remote Desktop (%s)\n"
+                         % self.delivered_to)
+            elif out.get("delivery_note"):
+                text += ("\n[REMOTE] not delivered through Remote Desktop: "
+                         "%s\n" % out["delivery_note"])
             if self.local_run_dir:
-                text += ("\n[REMOTE] job files (.odb ...) kept on %s in %s\n"
-                         % (out.get("agent_host", "the compute PC"),
+                text += ("\n[REMOTE] job files (%s) kept on %s in %s\n"
+                         % ("restart, scratch" if self.delivered_to
+                            else ".odb ...",
+                            out.get("agent_host", "the compute PC"),
                             self.local_run_dir))
             self.launcher_output = text.encode("cp1252", errors="replace")
             rc = out.get("returncode")
@@ -364,6 +415,14 @@ class RemoteProcess:
             except OSError:
                 pass
             return self.returncode
+
+    def _drop_token(self) -> None:
+        if self.token is not None:
+            try:
+                self.token.unlink()
+            except OSError:
+                pass
+            self.token = None
 
     def wait(self, timeout: Optional[float] = None):
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -389,6 +448,7 @@ class RemoteProcess:
         except OSError:
             return
         with self._lock:        # withdrawn before the claim
+            self._drop_token()
             self.cancelled = True
             self.returncode = 1
             self.launcher_output = b"[REMOTE] cancelled before it started\n"
