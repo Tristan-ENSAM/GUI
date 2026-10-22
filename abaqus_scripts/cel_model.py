@@ -24,8 +24,8 @@ from mesh import *
 from interaction import *
 from regionToolset import *
 
-from cel_common import (cfg_get, discretize, resolve_mapping,
-                        resolve_tool_translation)
+from cel_common import (cfg_get, discretize, is_replay_file,
+                        resolve_mapping, resolve_tool_translation)
 
 _resolve_tool_translation = resolve_tool_translation
 _resolve_mapping = resolve_mapping
@@ -974,6 +974,18 @@ def cleanup_working_directory(job_name, keep_diagnostics=None, verbose=True):
         sys.stdout.flush()
         return
     for name in entries:
+        # The CAE replay journals (abaqus.rpy, abaqus.rpy.N) are not named
+        # after the job; the one of the running session may be held open by
+        # CAE, in which case removing it fails and it goes with a later run.
+        if is_replay_file(name):
+            try:
+                size = os.path.getsize(name)
+                os.remove(name)
+                removed += 1
+                freed += size
+            except Exception:
+                failed += 1
+            continue
         if not name.startswith(job_name):
             continue
         ext = os.path.splitext(name)[1].lower()

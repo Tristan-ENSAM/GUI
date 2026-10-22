@@ -38,6 +38,8 @@ FAKE_ABAQUS = textwrap.dedent('''\
     model = ast.literal_eval(a[a.index("--model_cfg") + 1])
     job = ast.literal_eval(a[a.index("--run_cfg") + 1])["job_name"]
     open(job + ".gui.log", "w").write("building model with %%s\\n" %% script)
+    open("abaqus.rpy", "w").write("# replay")
+    open("abaqus.rpy.1", "w").write("# replay")
     open(job + ".sta", "w").write("STEP TOTAL\\n")
     open(job + ".odb", "wb").write(b"x" * 1000)
     time.sleep(float(model.get("duration", 0.3)))
@@ -103,6 +105,9 @@ def test_round_trip_copies_results_back_and_keeps_odb_local(setup,
     assert not (run_dir / "job1.odb").exists()
     local = Path(ra.local_run_dir(setup["local_root"], str(proc.transit)))
     assert (local / "job1.odb").is_file()
+    # CAE replay journals are removed once Abaqus has exited.
+    assert not (local / "abaqus.rpy").exists()
+    assert not (local / "abaqus.rpy.1").exists()
     # Z: was only a transit area: nothing of the run is left on it.
     assert not proc.transit.exists()
     assert list((setup["queue"] / "runs").iterdir()) == []
