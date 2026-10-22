@@ -18,9 +18,20 @@ What it does: takes the oldest request in pending/, runs Abaqus in a LOCAL
 folder of the compute PC (the solver's scratch and .odb I/O never go over the
 network), copies <job>.sta and <job>.gui.log to the shared run folder every
 couple of seconds, then copies the result files back and writes the outcome
-in done/. One run at a time, in submission order. The model generator
-(run_simul.py and its modules) is the copy the GUI put in the queue folder
-for this request, so both PCs always run the same scripts.
+in done/. One run at a time, in submission order.
+
+Delivery through Remote Desktop: when the request names the GUI PC's run
+folder as seen from this session (client_dir, e.g. \\\\tsclient\\C\\TEMP\\...,
+which exists while the user's Remote Desktop window is open with the C:
+drive redirected) and the token file the GUI left there is visible, the
+results AND the .odb are written straight into that folder, so they never
+use the small shared drive. Otherwise (window closed, drive not redirected,
+another PC connected) the shared-drive transit is used as before and the
+.odb stays here.
+
+The model generator (run_simul.py and its modules) is the copy the GUI put
+in the queue folder for this request, so both PCs always run the same
+scripts.
 
 Protocol: see gui/core/remote_exec.py (client side).
 """
@@ -49,7 +60,16 @@ DEFAULT_LOCAL_ROOT = r"C:\TEMP\ABQ_remote"
 LIVE_SUFFIXES = (".sta", ".gui.log")
 RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
                    ".msg", ".dat", ".log", ".inp")
+# Also delivered when the GUI PC's folder is reachable (not through Z:).
+DELIVERY_EXTRA_SUFFIXES = (".odb",)
 SUBDIRS = ("pending", "running", "cancel", "done")
+
+
+def token_name(rid):
+    """File the client leaves in its run folder: seeing it through
+    client_dir proves that folder is the submitting PC's, not the C: of
+    whichever PC is connected to this session."""
+    return ".remote-%s.token" % rid
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +133,12 @@ def local_run_dir(local_root, shared_run_dir):
 
 def _copy_atomic(src, dst):
     tmp = _tmp_name(dst)
-    shutil.copyfile(src, tmp)
-    _replace(tmp, dst)
+    try:
+        shutil.copyfile(src, tmp)
+        _replace(tmp, dst)
+    except Exception:
+        _remove(tmp)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +276,8 @@ class Agent(object):
         self.say("Abaqus %s, local runs in %s" % (self.abaqus_cmd,
                                                    self.local_root))
         self.say("leave this window open; close Remote Desktop with the cross")
+        self.say("results and .odb go straight to the GUI PC when a run ends "
+                 "while Remote Desktop is open with its drive C: redirected")
         while True:
             try:
                 self.step()
@@ -320,7 +346,8 @@ class Agent(object):
         reader.daemon = True
         reader.start()
         self.job = {"id": rid, "name": job, "proc": proc, "local": local,
-                    "shared": shared, "chunks": chunks, "reader": reader,
+                    "shared": shared, "client_dir": req.get("client_dir") or "",
+                    "delivery": None, "chunks": chunks, "reader": reader,
                     "seen": {}, "last_mirror": 0.0, "cancel_at": None,
                     "killed": False}
         self.say("started %s (from %s) in %s"
@@ -361,7 +388,16 @@ class Agent(object):
                     and now - j["cancel_at"] > CANCEL_GRACE:
                 self._do_kill(j)
             return
-        self._finish()
+        if j["delivery"] is None:
+            # Copying a multi-GB .odb takes a while: a thread does it so the
+            # heartbeat keeps going (other GUIs would think the agent dead).
+            j["delivery"] = {"done": False}
+            th = threading.Thread(target=self._deliver, args=(j,))
+            th.daemon = True
+            th.start()
+            return
+        if j["delivery"]["done"]:
+            self._finish()
 
     def _do_terminate(self, j):
         if self._terminate is not None:
@@ -375,20 +411,56 @@ class Agent(object):
         else:
             kill_tree(j["proc"])
 
-    def _finish(self):
-        j = self.job
-        j["reader"].join(5.0)
+    def _copy_results(self, j, dest, suffixes):
         copied = []
-        for suf in RESULT_SUFFIXES:
+        for suf in suffixes:
             src = os.path.join(j["local"], j["name"] + suf)
             if os.path.isfile(src):
-                try:
-                    _copy_atomic(src, os.path.join(j["shared"],
-                                                   j["name"] + suf))
-                    copied.append(j["name"] + suf)
-                except (IOError, OSError) as e:
-                    self.say("could not copy back %s: %s"
-                             % (j["name"] + suf, e))
+                _copy_atomic(src, os.path.join(dest, j["name"] + suf))
+                copied.append(j["name"] + suf)
+        return copied
+
+    def _deliver(self, j):
+        d = j["delivery"]
+        d.update(copied=[], delivered_to="", note="")
+        try:
+            client = j["client_dir"]
+            if client:
+                if os.path.isfile(os.path.join(client, token_name(j["id"]))):
+                    self.say("writing results and .odb of %s to %s"
+                             % (j["name"], client))
+                    try:
+                        d["copied"] = self._copy_results(
+                            j, client,
+                            RESULT_SUFFIXES + DELIVERY_EXTRA_SUFFIXES)
+                        d["delivered_to"] = client
+                    except Exception as e:
+                        d["note"] = "copy to %s failed (%s)" % (client, e)
+                else:
+                    d["note"] = ("%s not reachable from this session (Remote "
+                                 "Desktop window closed, drive C: not "
+                                 "redirected, or another PC connected)"
+                                 % client)
+                if d["note"]:
+                    self.say("%s: %s; using the shared drive"
+                             % (j["name"], d["note"]))
+            if not d["delivered_to"]:
+                for suf in RESULT_SUFFIXES:
+                    try:
+                        d["copied"] += self._copy_results(j, j["shared"],
+                                                          (suf,))
+                    except (IOError, OSError) as e:
+                        self.say("could not copy back %s: %s"
+                                 % (j["name"] + suf, e))
+        except Exception as e:      # never leave the run unanswered
+            d["note"] = (d["note"] + "; " if d["note"] else "") + repr(e)
+        finally:
+            d["done"] = True
+
+    def _finish(self):
+        j = self.job
+        d = j["delivery"]
+        j["reader"].join(5.0)
         rc = j["proc"].returncode
         cancelled = j["cancel_at"] is not None
         self.publish(j["id"], {
@@ -397,10 +469,14 @@ class Agent(object):
             "launcher_output": b"".join(j["chunks"]).decode(
                 "cp1252", "replace"),
             "local_run_dir": j["local"],
-            "copied": copied})
-        self.say("%s %s (rc=%s), copied back: %s"
+            "copied": d["copied"],
+            "delivered_to": d["delivered_to"],
+            "delivery_note": d["note"]})
+        self.say("%s %s (rc=%s), %s: %s"
                  % ("cancelled" if cancelled else "finished", j["name"], rc,
-                    ", ".join(copied) or "nothing"))
+                    ("written to " + d["delivered_to"]) if d["delivered_to"]
+                    else "copied back",
+                    ", ".join(d["copied"]) or "nothing"))
         self.job = None
 
 
