@@ -24,10 +24,14 @@ Delivery through Remote Desktop: when the request names the GUI PC's run
 folder as seen from this session (client_dir, e.g. \\\\tsclient\\C\\TEMP\\...,
 which exists while the user's Remote Desktop window is open with the C:
 drive redirected) and the token file the GUI left there is visible, the
-results AND the .odb are written straight into that folder, so they never
-use the small shared drive. Otherwise (window closed, drive not redirected,
-another PC connected) the shared-drive transit is used as before and the
-.odb stays here.
+results AND the .odb are moved straight into that folder (copied, size
+checked, then deleted here), so they never use the small shared drive.
+Otherwise (window closed, drive not redirected, another PC connected, copy
+cut by a lost connection) the results go through the shared drive as before,
+so a study keeps going, and the .odb waits here in a backlog
+(<local_root>/pending_deliveries.json, kept across agent restarts): every
+BACKLOG_PERIOD the agent retries it, and moves it as soon as the GUI PC's
+folder and token are visible again, i.e. when the user reconnects.
 
 The model generator (run_simul.py and its modules) is the copy the GUI put
 in the queue folder for this request, so both PCs always run the same
@@ -53,6 +57,7 @@ import time
 import uuid
 
 HEARTBEAT_PERIOD = 2.0          # s
+BACKLOG_PERIOD = 30.0           # s, retry of the .odb not yet delivered
 MIRROR_PERIOD = 2.0             # s, live copy of .sta / .gui.log
 CANCEL_GRACE = 10.0             # s, after `abaqus terminate` before a tree kill
 DEFAULT_LOCAL_ROOT = r"C:\TEMP\ABQ_remote"
@@ -133,6 +138,24 @@ def local_run_dir(local_root, shared_run_dir):
     rest = os.path.splitdrive(shared_run_dir)[1]
     parts = [p for p in re.split(r"[\\/]", rest) if p]
     return os.path.join(local_root, *parts) if parts else local_root
+
+
+def move_files(src_dir, names, dest_dir):
+    """Copy each file to dest_dir, check its size there, and only once ALL of
+    them are copied delete the sources. Raises (sources untouched) if any
+    copy fails or comes out with the wrong size."""
+    for name in names:
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dest_dir, name)
+        _copy_atomic(src, dst)
+        if os.path.getsize(dst) != os.path.getsize(src):
+            raise IOError("size mismatch after copying %s" % name)
+    for name in names:
+        _remove(os.path.join(src_dir, name))
+    try:
+        os.rmdir(src_dir)           # only if nothing else is left
+    except OSError:
+        pass
 
 
 def _copy_atomic(src, dst):
@@ -224,6 +247,12 @@ class Agent(object):
         self.job = None
         for d in SUBDIRS:
             _makedirs(self.sub(d))
+        self._backlog_lock = threading.Lock()
+        self._backlog_path = os.path.join(local_root,
+                                          "pending_deliveries.json")
+        self.backlog = read_json(self._backlog_path) or []
+        self._last_backlog = 0.0
+        self._backlog_thread = None
 
     def sub(self, name, *rest):
         return os.path.join(self.queue, name, *rest)
@@ -266,6 +295,14 @@ class Agent(object):
 
     def step(self):
         self.heartbeat()
+        now = time.time()
+        if self.backlog and now - self._last_backlog >= BACKLOG_PERIOD \
+                and not (self._backlog_thread
+                         and self._backlog_thread.is_alive()):
+            self._last_backlog = now
+            self._backlog_thread = threading.Thread(target=self.retry_backlog)
+            self._backlog_thread.daemon = True
+            self._backlog_thread.start()
         if self.job is None:
             self._start_next()
         else:
@@ -282,6 +319,9 @@ class Agent(object):
         self.say("leave this window open; close Remote Desktop with the cross")
         self.say("results and .odb go straight to the GUI PC when a run ends "
                  "while Remote Desktop is open with its drive C: redirected")
+        if self.backlog:
+            self.say("%d .odb waiting for the GUI PC (delivered when Remote "
+                     "Desktop is open again)" % len(self.backlog))
         while True:
             try:
                 self.step()
@@ -415,14 +455,67 @@ class Agent(object):
         else:
             kill_tree(j["proc"])
 
+    def _present(self, j, suffixes):
+        return [j["name"] + suf for suf in suffixes
+                if os.path.isfile(os.path.join(j["local"], j["name"] + suf))]
+
     def _copy_results(self, j, dest, suffixes):
         copied = []
-        for suf in suffixes:
-            src = os.path.join(j["local"], j["name"] + suf)
-            if os.path.isfile(src):
-                _copy_atomic(src, os.path.join(dest, j["name"] + suf))
-                copied.append(j["name"] + suf)
+        for name in self._present(j, suffixes):
+            _copy_atomic(os.path.join(j["local"], name),
+                         os.path.join(dest, name))
+            copied.append(name)
         return copied
+
+    # -- backlog of .odb not delivered yet -------------------------------
+    def _save_backlog(self):
+        try:
+            _makedirs(self.local_root)
+            write_json_atomic(self._backlog_path, self.backlog)
+        except (IOError, OSError) as e:
+            self.say("WARNING: backlog not saved (%s)" % e)
+
+    def _add_backlog(self, entry):
+        with self._backlog_lock:
+            self.backlog.append(entry)
+            self._save_backlog()
+
+    def retry_backlog(self):
+        """Move every waiting .odb whose GUI PC folder and token are visible.
+        Never overwrites a file already there (a later run of the same job
+        may have written it): such an entry stays and is reported."""
+        with self._backlog_lock:
+            todo = list(self.backlog)
+        for e in todo:
+            names = [n for n in e["files"]
+                     if os.path.isfile(os.path.join(e["local"], n))]
+            done = not names
+            token = os.path.join(e["client_dir"], token_name(e["id"]))
+            if names and os.path.isfile(token):
+                clash = [n for n in names if os.path.exists(
+                    os.path.join(e["client_dir"], n))]
+                if clash:
+                    if not e.get("clash_reported"):
+                        e["clash_reported"] = True
+                        self.say("%s already exists in %s: kept here in %s"
+                                 % (", ".join(clash), e["client_dir"],
+                                    e["local"]))
+                    continue
+                try:
+                    self.say("moving waiting %s to %s"
+                             % (", ".join(names), e["client_dir"]))
+                    move_files(e["local"], names, e["client_dir"])
+                    done = True
+                    self.say("delivered %s" % ", ".join(names))
+                except Exception as ex:
+                    self.say("waiting %s not delivered yet (%s)"
+                             % (", ".join(names), ex))
+            if done:
+                _remove(token)      # the client left it for this delivery
+                with self._backlog_lock:
+                    self.backlog = [b for b in self.backlog
+                                    if b["id"] != e["id"]]
+                    self._save_backlog()
 
     def _remove_replay_files(self, j):
         try:
@@ -435,18 +528,19 @@ class Agent(object):
 
     def _deliver(self, j):
         d = j["delivery"]
-        d.update(copied=[], delivered_to="", note="")
+        d.update(copied=[], delivered_to="", note="", pending=[])
         self._remove_replay_files(j)
         try:
             client = j["client_dir"]
             if client:
                 if os.path.isfile(os.path.join(client, token_name(j["id"]))):
-                    self.say("writing results and .odb of %s to %s"
+                    self.say("moving results and .odb of %s to %s"
                              % (j["name"], client))
                     try:
-                        d["copied"] = self._copy_results(
-                            j, client,
-                            RESULT_SUFFIXES + DELIVERY_EXTRA_SUFFIXES)
+                        names = self._present(
+                            j, RESULT_SUFFIXES + DELIVERY_EXTRA_SUFFIXES)
+                        move_files(j["local"], names, client)
+                        d["copied"] = names
                         d["delivered_to"] = client
                     except Exception as e:
                         d["note"] = "copy to %s failed (%s)" % (client, e)
@@ -466,6 +560,15 @@ class Agent(object):
                     except (IOError, OSError) as e:
                         self.say("could not copy back %s: %s"
                                  % (j["name"] + suf, e))
+                if client:
+                    d["pending"] = self._present(j, DELIVERY_EXTRA_SUFFIXES)
+                    if d["pending"]:
+                        self._add_backlog({
+                            "id": j["id"], "name": j["name"],
+                            "local": j["local"], "client_dir": client,
+                            "files": d["pending"]})
+                        self.say("%s waits here until Remote Desktop is open "
+                                 "again" % ", ".join(d["pending"]))
         except Exception as e:      # never leave the run unanswered
             d["note"] = (d["note"] + "; " if d["note"] else "") + repr(e)
         finally:
@@ -485,10 +588,11 @@ class Agent(object):
             "local_run_dir": j["local"],
             "copied": d["copied"],
             "delivered_to": d["delivered_to"],
-            "delivery_note": d["note"]})
+            "delivery_note": d["note"],
+            "pending_delivery": d["pending"]})
         self.say("%s %s (rc=%s), %s: %s"
                  % ("cancelled" if cancelled else "finished", j["name"], rc,
-                    ("written to " + d["delivered_to"]) if d["delivered_to"]
+                    ("moved to " + d["delivered_to"]) if d["delivered_to"]
                     else "copied back",
                     ", ".join(d["copied"]) or "nothing"))
         self.job = None
