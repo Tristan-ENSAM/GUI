@@ -99,3 +99,12 @@ class TestRunSimulImportsShared:
         # cel_model.py. Confirmed by real Abaqus runs under `abaqus cae
         # noGUI=`. This test just pins the files being colocated.
         assert _SHARED.parent == _CEL_MODEL.parent
+
+
+def test_replay_file_names():
+    from abaqus_scripts.cel_common import is_replay_file
+    for name in ("abaqus.rpy", "abaqus.rpy.1", "abaqus.rpy.12", "ABAQUS.RPY"):
+        assert is_replay_file(name), name
+    for name in ("abaqus.rpy.bak", "job.rpy", "abaqus.rec", "abaqus.rpyx",
+                 "sensitivity_run000.odb"):
+        assert not is_replay_file(name), name

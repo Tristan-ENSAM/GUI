@@ -31,6 +31,22 @@ class ToolGeometryError(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# Abaqus/CAE replay files
+# ---------------------------------------------------------------------------
+# Every `abaqus cae noGUI=...` writes a journal of its session in the working
+# directory: abaqus.rpy, then abaqus.rpy.1, .2 ... when one already exists.
+# Not named after the job, so the per-job cleanup never matched them. The
+# pipeline never reads them back.
+def is_replay_file(name):
+    """True for abaqus.rpy and abaqus.rpy.<n> (any case)."""
+    low = name.lower()
+    if low == "abaqus.rpy":
+        return True
+    rest = low[len("abaqus.rpy."):]
+    return low.startswith("abaqus.rpy.") and rest.isdigit()
+
+
+# ---------------------------------------------------------------------------
 # Config access
 # ---------------------------------------------------------------------------
 def cfg_get(cfg, path, default=None):

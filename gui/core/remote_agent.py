@@ -63,6 +63,10 @@ RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
 # Also delivered when the GUI PC's folder is reachable (not through Z:).
 DELIVERY_EXTRA_SUFFIXES = (".odb",)
 SUBDIRS = ("pending", "running", "cancel", "done")
+# CAE session journals (abaqus.rpy, abaqus.rpy.N): useless, removed from the
+# run's local folder once Abaqus has exited (same rule as
+# cel_common.is_replay_file; this agent imports nothing).
+REPLAY_FILE = re.compile(r"^abaqus\.rpy(\.\d+)?$", re.IGNORECASE)
 
 
 def token_name(rid):
@@ -420,9 +424,19 @@ class Agent(object):
                 copied.append(j["name"] + suf)
         return copied
 
+    def _remove_replay_files(self, j):
+        try:
+            names = os.listdir(j["local"])
+        except OSError:
+            return
+        for name in names:
+            if REPLAY_FILE.match(name):
+                _remove(os.path.join(j["local"], name))
+
     def _deliver(self, j):
         d = j["delivery"]
         d.update(copied=[], delivered_to="", note="")
+        self._remove_replay_files(j)
         try:
             client = j["client_dir"]
             if client:
