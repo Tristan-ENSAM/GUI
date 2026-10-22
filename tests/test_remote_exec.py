@@ -312,10 +312,13 @@ def test_results_and_odb_delivered_straight_to_the_gui_pc(setup,
     assert (run_dir / "job1.odb").read_bytes() == b"x" * 1000
     assert (run_dir / "job1.results.npz").read_bytes() == b"npz"
     assert not proc.transit.exists()
+    # Moved, not copied: nothing of the run is left on the compute PC.
+    local = Path(ra.local_run_dir(setup["local_root"], str(proc.transit)))
+    assert not local.exists()
     assert sorted(p.name for p in run_dir.iterdir()
                   if p.name.startswith(".")) == []      # token removed
     out = proc.stdout.read()
-    assert b"written to the run folder through Remote Desktop" in out
+    assert b"moved to the run folder through Remote Desktop" in out
 
 
 def test_falls_back_to_the_shared_drive_without_the_token(setup,
@@ -332,5 +335,73 @@ def test_falls_back_to_the_shared_drive_without_the_token(setup,
     assert proc.delivered_to == ""
     assert (run_dir / "job1.results.npz").read_bytes() == b"npz"
     assert not (run_dir / "job1.odb").exists()
-    assert not proc.token.exists() if proc.token else True
-    assert b"not delivered through Remote Desktop" in proc.stdout.read()
+    out = proc.stdout.read()
+    assert b"not delivered through Remote Desktop" in out
+    assert b"once Remote Desktop is open again" in out
+    # The .odb waits on the compute PC, the token stays for the agent.
+    assert proc.token.is_file()
+    assert [e["files"] for e in running_agent.backlog] == [["job1.odb"]]
+
+
+def test_waiting_odb_is_moved_when_the_session_is_back(setup, tmp_path):
+    """Connection lost at the end of the run: the study goes on with the
+    results from Z:, the .odb waits; once the GUI PC's folder and token are
+    visible again, the agent moves it there."""
+    agent = _agent(setup)
+    stop = threading.Event()
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
+    th.start()
+    seen = tmp_path / "seen_from_compute_pc"    # empty: session closed
+    seen.mkdir()
+    try:
+        run_dir = setup["gui_wd"] / "study"
+        proc = rx.RemoteProcess(setup["queue"], run_dir, {},
+                                {"cpus": 1, "job_name": "job1"},
+                                setup["scripts"],
+                                remote_abaqus_cmd=setup["abaqus"],
+                                check_agent=False, client_dir=str(seen))
+        assert proc.wait(timeout=30) == 0
+    finally:
+        stop.set()
+        th.join(timeout=5)
+    local = Path(ra.local_run_dir(setup["local_root"], str(proc.transit)))
+    assert (local / "job1.odb").is_file()
+    # A restarted agent finds the backlog again.
+    agent = _agent(setup)
+    assert len(agent.backlog) == 1
+    agent.retry_backlog()                       # still closed: waits
+    assert len(agent.backlog) == 1 and (local / "job1.odb").is_file()
+    # Session open again: the folder (here `seen`) shows the token.
+    (seen / proc.token.name).write_text("x")
+    agent.retry_backlog()
+    assert (seen / "job1.odb").read_bytes() == b"x" * 1000
+    assert not (local / "job1.odb").exists()
+    assert not (seen / proc.token.name).exists()
+    assert agent.backlog == []
+    assert _agent(setup).backlog == []
+
+
+def test_waiting_odb_never_overwrites_a_newer_file(setup, tmp_path):
+    agent = _agent(setup)
+    local = tmp_path / "loc"
+    local.mkdir()
+    (local / "j.odb").write_bytes(b"old")
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "j.odb").write_bytes(b"newer run")
+    (client / ra.token_name("r1")).write_text("x")
+    agent.backlog = [{"id": "r1", "name": "j", "local": str(local),
+                      "client_dir": str(client), "files": ["j.odb"]}]
+    agent.retry_backlog()
+    assert (client / "j.odb").read_bytes() == b"newer run"
+    assert (local / "j.odb").read_bytes() == b"old"
+    assert len(agent.backlog) == 1
+
+
+def test_move_files_keeps_sources_when_a_copy_fails(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.odb").write_bytes(b"a")
+    with pytest.raises(Exception):
+        ra.move_files(str(src), ["a.odb"], str(tmp_path / "missing_dir"))
+    assert (src / "a.odb").read_bytes() == b"a"

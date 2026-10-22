@@ -55,7 +55,12 @@ Desktop session with the GUI PC's drive redirected shows it as
 \\\\tsclient\\C\\... (`redirected_path`). The request names that path, the
 client leaves a token file in the run folder (remote_agent.token_name), and
 when the agent sees the token there it writes the results and the .odb
-straight into the run folder, without the shared drive. The token makes sure
+straight into the run folder, without the shared drive (and deletes its own
+copies). When it cannot (window closed, connection lost), the results come
+through the shared drive so the study goes on, and the .odb waits on the
+compute PC until the session is open again: the token is then left in the
+run folder for the agent, which removes it once the .odb is there
+("pending_delivery" in the outcome). The token makes sure
 \\\\tsclient is this PC and not another one connected to the session.
 """
 from __future__ import annotations
@@ -387,7 +392,9 @@ class RemoteProcess:
             if not self.delivered_to:
                 self._bring_back(RESULT_SUFFIXES, only_changed=False)
             shutil.rmtree(str(self.transit), ignore_errors=True)
-            self._drop_token()
+            pending = out.get("pending_delivery") or []
+            if not pending:
+                self._drop_token()      # else the agent still needs it
             self.cancelled = bool(out.get("cancelled"))
             self.error = out.get("error") or ""
             self.local_run_dir = out.get("local_run_dir") or ""
@@ -395,12 +402,16 @@ class RemoteProcess:
             if self.error:
                 text += "\n[REMOTE] %s\n" % self.error
             if self.delivered_to:
-                text += ("\n[REMOTE] results and .odb written to the run "
+                text += ("\n[REMOTE] results and .odb moved to the run "
                          "folder through Remote Desktop (%s)\n"
                          % self.delivered_to)
             elif out.get("delivery_note"):
                 text += ("\n[REMOTE] not delivered through Remote Desktop: "
                          "%s\n" % out["delivery_note"])
+            if pending:
+                text += ("\n[REMOTE] %s will be moved to the run folder by "
+                         "the agent once Remote Desktop is open again with "
+                         "drive C: redirected\n" % ", ".join(pending))
             if self.local_run_dir:
                 text += ("\n[REMOTE] job files (%s) kept on %s in %s\n"
                          % ("restart, scratch" if self.delivered_to
