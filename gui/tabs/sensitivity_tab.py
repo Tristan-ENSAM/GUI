@@ -42,6 +42,7 @@ from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
 from gui.sensitivity import map_export as mx
 from gui.sensitivity import zoi_proposal as zp
+from gui.sensitivity import model_qoi as mq
 from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
@@ -51,9 +52,14 @@ from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
 import logging
 
-# QoI ticked by default — the ones we can also measure on the planing rig
-# (cutting/feed forces and peak temperature).
+# "Other" QoI ticked by default when the tab runs without the Model tab
+# (standalone): the ones we can also measure on the planing rig (cutting/feed
+# forces and peak temperature). In the main window the Model-tab QoI are
+# ticked instead.
 _DEFAULT_QOIS = ("Fx_mean", "Fy_mean", "T_max")
+# Registry QoI not offered under "Other": Fc / Ff are the Model-tab QoI
+# (window T of the Model tab, not the warm-up fraction).
+_HIDDEN_LEGACY_QOIS = ("Fc", "Ff")
 
 # Geometric / mesh parameters are excluded from sensitivity: changing them
 # re-runs `discretize` (re-meshing), which can stall the identification.
@@ -83,6 +89,9 @@ class SensitivityTab(QWidget):
         self.plan_kind = "jacobian"
         self.selected_qois = []          # list[QoISpec]
         self.plan_field_vars = []        # ROI fields chosen with the plan
+        # Model-tab settings (ZOI, window T, EVF threshold, eps_q) frozen
+        # with the plan when a Model-tab QoI is ticked, else None.
+        self._plan_model_qoi = None
         self._thread = None              # QThread for the run worker
         self._worker = None              # SensitivityRunWorker
         self._last_result = None         # rc.RunResult
@@ -211,10 +220,39 @@ class SensitivityTab(QWidget):
         bl.addLayout(method_row)
         self._on_method_changed()   # set initial visibility
 
-        qoi_box = QGroupBox("Quantities of interest (QoI) to screen")
+        # QoI of the Model tab (same reduction, same eps_q) + other QoI.
+        qoi_row = QHBoxLayout()
+        model_box = QGroupBox("QoI of the Model tab (judged against \u03b5_q)")
+        mg = QGridLayout(model_box)
+        self._model_qoi_checks = {}
+        for i, q in enumerate(mq.MODEL_QOIS):
+            cb = QCheckBox("%s  [%s]" % (mq.LABELS[q], mq.UNITS[q]))
+            cb.setChecked(False)
+            cb.setEnabled(False)          # until the Model tab is connected
+            cb.setToolTip(
+                "Computed exactly as the ms / mesh / domain studies of "
+                "Optimization > Model: ZOI, window T and EVF threshold of that "
+                "tab. Fields: area mean over the ZOI of the time mean of each "
+                "element over its material frames in T. Forces: mean of F/w "
+                "over T. A \"/\u03b5_q\" column is added to the results.")
+            cb.toggled.connect(self._mark_plan_stale)
+            self._model_qoi_checks[q] = cb
+            mg.addWidget(cb, i // 2, i % 2)
+        self.lbl_model_qoi = QLabel(
+            "Settings read from Optimization > Model when the plan is "
+            "generated.")
+        self.lbl_model_qoi.setWordWrap(True)
+        self.lbl_model_qoi.setStyleSheet("color: #6b7280;")
+        mg.addWidget(self.lbl_model_qoi, (len(mq.MODEL_QOIS) + 1) // 2, 0,
+                     1, 2)
+        qoi_row.addWidget(model_box, 1)
+
+        qoi_box = QGroupBox("Other QoI (no \u03b5_q)")
         qg = QGridLayout(qoi_box)
         self._qoi_checks = {}
-        for i, q in enumerate(qoi_mod.REGISTRY):
+        legacy = [q for q in qoi_mod.REGISTRY
+                  if q.id not in _HIDDEN_LEGACY_QOIS]
+        for i, q in enumerate(legacy):
             cb = QCheckBox("%s  [%s]" % (q.label, q.unit))
             cb.setChecked(q.id in _DEFAULT_QOIS)
             self._qoi_checks[q.id] = cb
@@ -229,13 +267,14 @@ class SensitivityTab(QWidget):
         self.spin_warmup.setValue(0.0)
         self.spin_warmup.setToolTip(
             "Fraction of the RF1/RF2 history ignored at the start (tool\n"
-            "entering the material) before the force QoI are computed\n"
-            "(mean AND max). 0 = use the whole signal. Field QoI (T_max,\n"
-            "PEEQ_max) are not affected. Applied when the run is analysed.")
+            "entering the material) before the force QoI of this group are\n"
+            "computed (mean AND max). 0 = use the whole signal. T_max and\n"
+            "PEEQ_max, and the Model-tab QoI (window T), are not affected.")
         wrow.addWidget(self.spin_warmup)
         wrow.addStretch(1)
-        qg.addLayout(wrow, (len(qoi_mod.REGISTRY) + 1) // 2, 0, 1, 2)
-        bl.addWidget(qoi_box)
+        qg.addLayout(wrow, (len(legacy) + 1) // 2, 0, 1, 2)
+        qoi_row.addWidget(qoi_box, 1)
+        bl.addLayout(qoi_row)
 
         # Field QoI: screen how much each parameter moves whole Eulerian
         # fields in the ROI (SSD vs the base run). Jacobian only. Vx, Vy,
@@ -842,8 +881,60 @@ class SensitivityTab(QWidget):
         return bad
 
     def _selected_qoi_specs(self):
-        return [q for q in qoi_mod.REGISTRY
-                if self._qoi_checks[q.id].isChecked()]
+        """Ticked QoI: the Model-tab ones (built with the Model tab settings,
+        frozen in self._plan_model_qoi), then the other ones. Raises
+        ValueError when a Model-tab QoI is ticked and those settings are
+        missing."""
+        specs = []
+        self._plan_model_qoi = None
+        model = [q for q in mq.MODEL_QOIS
+                 if self._model_qoi_checks[q].isChecked()]
+        if model:
+            st = self._model_qoi_settings(model)
+            specs += mq.make_specs(st["zoi"], st["window"],
+                                   st["evf_threshold"], qois=model)
+            self._plan_model_qoi = st
+        specs += [q for q in qoi_mod.REGISTRY
+                  if q.id in self._qoi_checks
+                  and self._qoi_checks[q.id].isChecked()]
+        return specs
+
+    def _model_qoi_settings(self, qois) -> dict:
+        """ZOI, window T, EVF threshold and eps_q of the Model tab for the
+        Model-tab QoI `qois`; ValueError when one is missing or the ZOI
+        leaves the zone the runs extract."""
+        if self._model_settings_getter is None:
+            raise ValueError("the Model-tab QoI need the Optimization > "
+                             "Model tab")
+        try:
+            st = self._model_settings_getter()
+            window = tuple(float(v) for v in st["window"])
+            zoi = tuple(float(v) for v in st["zoi"])
+        except Exception as e:
+            raise ValueError("Set the ZOI and the window T in Optimization "
+                             "> Model first (%s)." % e)
+        eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
+        missing = [q for q in qois if not (eps.get(q) or 0) > 0]
+        if missing:
+            raise ValueError("Set \u03b5_q of %s in Optimization > Model "
+                             "first." % ", ".join(missing))
+        if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
+            raise ValueError("The ZOI of Optimization > Model is empty.")
+        if any(q in mq.FIELD_QUANTITIES for q in qois) \
+                and not self.chk_full_domain.isChecked():
+            b = self.cfg.bbox
+            crop = {"xmin": float(b.xmin), "xmax": float(b.xmax),
+                    "ymin": float(b.ymin), "ymax": float(b.ymax)}
+            if not mq.zoi_within_crop(zoi, crop):
+                raise ValueError(
+                    "The ZOI of Optimization > Model x[%g, %g] y[%g, %g] is "
+                    "not inside the ROI the runs extract x[%g, %g] y[%g, %g]: "
+                    "widen the ROI (Geometry tab) or tick 'Whole Eulerian "
+                    "domain'." % (zoi + (crop["xmin"], crop["xmax"],
+                                         crop["ymin"], crop["ymax"])))
+        return {"zoi": zoi, "window": window,
+                "evf_threshold": float(st.get("evf_threshold", 0.5)),
+                "eps": {q: eps[q] for q in qois}}
 
     def _selected_field_vars(self):
         return [v for v, cb in self._field_checks.items() if cb.isChecked()]
@@ -1030,6 +1121,7 @@ class SensitivityTab(QWidget):
             workdir=str(wd), cpus=cpus,
             warmup_frac=float(self.spin_warmup.value()),
             job_prefix="sensitivity", field_vars=field_vars,
+            eps=(self._plan_model_qoi or {}).get("eps"),
             remote_prefs=prefs if is_remote(prefs) else None,
             extract_full_domain=self._run_full_domain)
         self._thread = QThread(self)
@@ -1090,6 +1182,14 @@ class SensitivityTab(QWidget):
             run["values"] = {p: float(d[p]) for p in plan.param_paths}
             runs.append(run)
         rec["runs"] = runs
+        st = getattr(self, "_plan_model_qoi", None)
+        if st:
+            # ZOI [mm], window T (fractions of the simulated time), EVF
+            # threshold and eps_q of the Model tab, as used for this plan.
+            rec["model_qoi"] = {"zoi": list(st["zoi"]),
+                                "window": list(st["window"]),
+                                "evf_threshold": st["evf_threshold"],
+                                "eps": dict(st["eps"])}
         return rec
 
     def _on_cancel(self):
@@ -1420,9 +1520,26 @@ class SensitivityTab(QWidget):
             has_eps_field and self._map_times is not None)
 
     def set_model_settings_getter(self, fn):
-        """fn() -> {"eps": {Vx, Vy, T, EVF: eps_q}, "window": (a, b)}, read
-        from the Model tab when a ZOI is proposed."""
+        """fn() -> {"eps": {Vx, Vy, T, EVF, Fc, Ff: eps_q}, "window": (a, b),
+        "zoi": (xmin, xmax, ymin, ymax), "evf_threshold": t}, read from the
+        Model tab when a ZOI is proposed or a plan is generated. Connecting
+        it makes the Model-tab QoI the default ones."""
         self._model_settings_getter = fn
+        on = fn is not None
+        # Wiring, not a user edit: the defaults change without discarding a
+        # plan already generated.
+        for cb in self._model_qoi_checks.values():
+            cb.blockSignals(True)
+            cb.setEnabled(on)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        if on:
+            for qid in _DEFAULT_QOIS:
+                cb = self._qoi_checks.get(qid)
+                if cb is not None:
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
 
     def _model_settings(self):
         if self._model_settings_getter is None:
@@ -1799,6 +1916,8 @@ class SensitivityTab(QWidget):
         self.lbl_chart_note.setText("")
         if jacobian:
             key = self.cb_chart_rank.currentData() or "sensitivity"
+            if qid.endswith(rc.EPS_SUFFIX):
+                key = "sensitivity"       # already dimensionless
             rows = rc.jacobian_ranking(result, qid, key=key)
             vals = [abs(s) for _, s in rows]
             xlabel = "|%s|" % key
@@ -1817,6 +1936,14 @@ class SensitivityTab(QWidget):
         ax.set_yticks(list(y))
         ax.set_yticklabels(labels, fontsize=8)
         ax.invert_yaxis()                                  # most influential on top
+        if qid.endswith(rc.EPS_SUFFIX):
+            # Dimensionless: 1 = the admitted deviation eps_q.
+            ax.axvline(1.0, color="#b91c1c", linestyle="--", linewidth=1)
+            self.lbl_chart_note.setText(
+                "Red line: \u03b5_q. Jacobian: |dQ/dx\u00b7\u03b4| / "
+                "\u03b5_q, the change over one step \u03b4. Morris: "
+                "\u03bc* / \u03b5_q, the mean change over the whole "
+                "Min..Max range.")
         ax.set_xlabel("%s — %s" % (xlabel, qid), fontsize=9)
         self._fig.tight_layout()
         self._canvas.draw_idle()

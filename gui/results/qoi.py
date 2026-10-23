@@ -65,6 +65,9 @@ class QoISpec:
     unit: str                     # display unit
     fn: Callable[["ResultsBundle", Optional[str], float], float]
     # `fn(bundle, instance, warmup_frac) -> float` (nan on missing data)
+    # Key of the admitted deviation eps_q of the Model tab this QoI is judged
+    # against ("Vx", "Vy", "T", "EVF", "Fc", "Ff"); "" = none.
+    eps_key: str = ""
 
 
 # ---------------------------------------------------------------------------
