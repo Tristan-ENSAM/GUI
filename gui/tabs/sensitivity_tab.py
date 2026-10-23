@@ -244,7 +244,7 @@ class SensitivityTab(QWidget):
             cb.setEnabled(False)          # until the Model tab is connected
             cb.setToolTip(
                 "Computed exactly as the ms / mesh / domain studies of "
-                "Optimization > Model: ZOI, window T and EVF threshold of that "
+                "Optimization > Model sizing: ZOI, window T and EVF threshold of that "
                 "tab. Fields: area mean over the ZOI of the time mean of each "
                 "element over its material frames in T. Forces: mean of F/w "
                 "over T. A \"/\u03b5_q\" column is added to the results.")
@@ -252,7 +252,7 @@ class SensitivityTab(QWidget):
             self._model_qoi_checks[q] = cb
             mg.addWidget(cb, i // 2, i % 2)
         self.lbl_model_qoi = QLabel(
-            "Settings read from Optimization > Model when the plan is "
+            "Settings read from Optimization > Model sizing when the plan is "
             "generated.")
         self.lbl_model_qoi.setWordWrap(True)
         self.lbl_model_qoi.setStyleSheet("color: #6b7280;")
@@ -934,10 +934,10 @@ class SensitivityTab(QWidget):
         eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
         missing = [q for q in qois if not (eps.get(q) or 0) > 0]
         if missing:
-            raise ValueError("Set \u03b5_q of %s in Optimization > Model "
+            raise ValueError("Set \u03b5_q of %s in Optimization > Model sizing "
                              "first." % ", ".join(missing))
         if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
-            raise ValueError("The ZOI of Optimization > Model is empty.")
+            raise ValueError("The ZOI of Optimization > Model sizing is empty.")
         if any(q in mq.FIELD_QUANTITIES for q in qois) \
                 and not self.chk_full_domain.isChecked():
             b = self.cfg.bbox
@@ -945,7 +945,7 @@ class SensitivityTab(QWidget):
                     "ymin": float(b.ymin), "ymax": float(b.ymax)}
             if not mq.zoi_within_crop(zoi, crop):
                 raise ValueError(
-                    "The ZOI of Optimization > Model x[%g, %g] y[%g, %g] is "
+                    "The ZOI of Optimization > Model sizing x[%g, %g] y[%g, %g] is "
                     "not inside the ROI the runs extract x[%g, %g] y[%g, %g]: "
                     "widen the ROI (Geometry tab) or tick 'Whole Eulerian "
                     "domain'." % (zoi + (crop["xmin"], crop["xmax"],
