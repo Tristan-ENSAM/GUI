@@ -19,6 +19,8 @@ PANEL = "#ffffff"
 BORDER = "#cfd6df"
 TEXT = "#1d2430"
 MUTED = "#6b7480"
+DISABLED_BG = "#e3e7ec"
+DISABLED_TEXT = "#8c95a1"
 
 _QSS = """
 QMainWindow, QDialog {{ background: {window}; }}
@@ -26,7 +28,7 @@ QToolTip {{ color: {text}; background: #fffef2; border: 1px solid {border};
            padding: 4px; }}
 
 /* Panels: white cards with a bold title. */
-QGroupBox {{ background: {panel}; border: 1px solid {border};
+QGroupBox {{ font-weight: 600; background: {panel}; border: 1px solid {border};
             border-radius: 6px; margin-top: 18px; padding: 10px 8px 6px 8px; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left;
                    left: 8px; top: 2px; padding: 0 4px; color: {accent_dark}; }}
@@ -59,7 +61,7 @@ QLineEdit, QPlainTextEdit, QTextEdit {{
     background: {panel}; border: 1px solid {border}; border-radius: 4px;
     padding: 2px 6px; selection-background-color: {accent}; }}
 QLineEdit:focus {{ border-color: {accent}; }}
-QLineEdit:disabled {{ color: #9aa2ac; background: #f4f6f8; }}
+QLineEdit:disabled {{ color: {disabled_text}; background: {disabled_bg}; }}
 QPlainTextEdit {{ font-family: Consolas, "DejaVu Sans Mono", monospace; }}
 
 QTableView, QTableWidget {{ background: {panel}; border: 1px solid {border};
@@ -80,7 +82,9 @@ QProgressBar::chunk {{ background: {accent}; border-radius: 3px; }}
 
 def style_sheet() -> str:
     return _QSS.format(accent=ACCENT, accent_dark=ACCENT_DARK, window=WINDOW,
-                       panel=PANEL, border=BORDER, text=TEXT, muted=MUTED)
+                       panel=PANEL, border=BORDER, text=TEXT, muted=MUTED,
+                       disabled_bg=DISABLED_BG,
+                       disabled_text=DISABLED_TEXT)
 
 
 def apply_theme(app: QApplication) -> None:
@@ -99,6 +103,14 @@ def apply_theme(app: QApplication) -> None:
     pal.setColor(QPalette.HighlightedText, QColor("white"))
     pal.setColor(QPalette.ToolTipBase, QColor("#fffef2"))
     pal.setColor(QPalette.ToolTipText, QColor(TEXT))
+    # Disabled fields (a locked drop-down list, a greyed entry): grey
+    # background and text, so they are told apart from the active ones.
+    for role, col in ((QPalette.Button, DISABLED_BG),
+                      (QPalette.Base, DISABLED_BG),
+                      (QPalette.Text, DISABLED_TEXT),
+                      (QPalette.ButtonText, DISABLED_TEXT),
+                      (QPalette.WindowText, DISABLED_TEXT)):
+        pal.setColor(QPalette.Disabled, role, QColor(col))
     app.setPalette(pal)
     app.setStyleSheet(style_sheet())
 
