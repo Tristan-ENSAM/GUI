@@ -303,5 +303,5 @@ def test_model_tab_set_zoi_and_settings(qapp):
     tab.set_zoi((0.1, 0.25, -0.05, 0.02))
     assert tab.zoi() == pytest.approx((0.1, 0.25, -0.05, 0.02))
     st = tab.model_settings()
-    assert set(st) == {"eps", "window"}
+    assert set(st) == {"eps", "window", "zoi", "evf_threshold"}
     assert len(st["window"]) == 2

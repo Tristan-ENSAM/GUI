@@ -242,7 +242,8 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
              progress: Optional[Callable[[int, int], None]] = None,
              should_cancel: Optional[Callable[[], bool]] = None,
              keep_bundles: bool = False,
-             field_vars=None, field_metric: str = "ssd") -> RunResult:
+             field_vars=None, field_metric: str = "ssd",
+             eps: Optional[dict] = None) -> RunResult:
     """Run every profile of `plan` and analyse the result.
 
     solve_fn(cfg, run_index) -> bundle | None
@@ -252,6 +253,9 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                                    (e.g. ["EVF", "V", "TEMP"]) to screen as
                                    field-discrepancy QoI (Jacobian only;
                                    forces keep_bundles).
+       eps                            optional {eps_key: eps_q} of the Model
+                                   tab: adds a "<qoi> /\u03b5_q" column per
+                                   QoI that has an eps_key (add_eps_ratios).
     """
     if plan_kind not in ("morris", "jacobian"):
         raise ValueError("plan_kind must be 'morris' or 'jacobian'")
@@ -320,6 +324,9 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
             analyses[qid] = {"error": str(e)}
 
     qoi_ids_all = list(qoi_ids)
+    if eps:
+        qoi_ids_all += add_eps_ratios(analyses, qoi_specs, plan, plan_kind,
+                                      eps)
     if want_fields and bundles is not None:
         try:
             fa = jacobian_field_analysis(plan, bundles, list(field_vars),
@@ -344,6 +351,57 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
                      param_paths=list(plan.param_paths), Y=Y,
                      analyses=analyses, failures=failures, bundles=bundles,
                      n_attempted=n_attempted, cancelled=cancelled)
+
+
+EPS_SUFFIX = " /\u03b5_q"
+
+
+def add_eps_ratios(analyses: dict, qoi_specs, plan, plan_kind: str,
+                   eps: dict) -> List[str]:
+    """Add, for each QoI judged against an admitted deviation eps_q, a
+    dimensionless column "<qoi> /eps_q" to `analyses`; return the new keys.
+
+    Jacobian: |dQ/dx| * delta / eps_q, the change of the QoI over one FD
+    step delta, compared with eps_q (the S* of the ZOI proposal).
+    Morris: mu* / eps_q (and sigma / eps_q). SALib divides each elementary
+    effect by the step in the unit hypercube (SALib 1.5.2,
+    analyze/morris.py `_compute_elementary_effects`), so mu* is the mean
+    |slope| times the Min..Max range: mu* / eps_q >= 1 means crossing the
+    whole range moves the QoI by more than eps_q on average.
+    """
+    added = []
+    for spec in qoi_specs:
+        key = getattr(spec, "eps_key", "")
+        e = eps.get(key) if key else None
+        a = analyses.get(spec.id)
+        if not e or not (np.isfinite(e) and e > 0) or not isinstance(a, dict):
+            continue
+        if "error" in a:
+            continue
+        col = spec.id + EPS_SUFFIX
+        if plan_kind == "jacobian":
+            out = {}
+            for i, p in enumerate(plan.param_paths):
+                d = a.get(p)
+                if not isinstance(d, dict):
+                    continue
+                out[p] = {"sensitivity": abs(float(d["dQdx"])
+                                             * float(plan.deltas[i])) / e,
+                          "scheme_used": d.get("scheme_used", "")}
+            analyses[col] = out
+        else:
+            if "mu_star" not in a:
+                continue
+            out = {"names": list(a.get("names", []))}
+            for k in ("mu_star", "sigma", "mu", "mu_star_conf"):
+                if k in a:
+                    out[k] = [float(v) / e for v in a[k]]
+            for k in ("n_trajectories", "n_used", "n_dropped"):
+                if k in a:
+                    out[k] = a[k]
+            analyses[col] = out
+        added.append(col)
+    return added
 
 
 def _qoi_is_temperature(spec) -> bool:

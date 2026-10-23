@@ -2035,9 +2035,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._draw_preview()
 
     def model_settings(self) -> dict:
-        """eps_q and the window T, for the ZOI proposal of the Sensitivity
-        tab (same values as the studies of this tab)."""
-        return {"eps": self.thresholds(), "window": self.window()}
+        """eps_q, the window T, the ZOI and the EVF threshold, for the ZOI
+        proposal and the QoI of the Sensitivity tab (same values as the
+        studies of this tab)."""
+        return {"eps": self.thresholds(), "window": self.window(),
+                "zoi": self.zoi(), "evf_threshold": 0.5}
 
     def _zoi_from_roi(self):
         for k, v in zip(("xmin", "xmax", "ymin", "ymax"),

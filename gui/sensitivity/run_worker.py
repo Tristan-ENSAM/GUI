@@ -238,11 +238,14 @@ class SensitivityRunWorker(QObject):
                  job_prefix: str = "sens", keep_bundles: bool = False,
                  field_vars=None, field_metric: str = "ssd",
                  solve_fn=None, remote_prefs=None,
-                 extract_full_domain: bool = False, parent=None):
+                 extract_full_domain: bool = False, eps=None,
+                 parent=None):
         super().__init__(parent)
         # True: the extraction keeps the whole Eulerian instance instead of
         # the ROI crop (sensitivity maps over the whole domain).
         self._full_domain = bool(extract_full_domain)
+        # {eps_key: eps_q} of the Model tab, frozen with the plan.
+        self._eps = dict(eps) if eps else None
         # Preferences in remote mode (gui.core.remote_exec), else None: the
         # runs then go to the agent of the compute PC instead of a Popen.
         self._remote_prefs = remote_prefs
@@ -338,7 +341,8 @@ class SensitivityRunWorker(QObject):
                 progress=lambda d, t: self.progress.emit(d, t),
                 should_cancel=lambda: self._cancel,
                 keep_bundles=self._keep_bundles,
-                field_vars=self._field_vars, field_metric=self._field_metric)
+                field_vars=self._field_vars, field_metric=self._field_metric,
+                eps=self._eps)
             self.finished.emit(result)
         except Exception as e:                          # pragma: no cover
             self.failed.emit("%s" % e)
