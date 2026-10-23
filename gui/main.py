@@ -271,29 +271,38 @@ class MainWindow(QMainWindow):
                     self, "Save preferences",
                     f"Failed to save preferences:\n{type(e).__name__}: {e}",
                 )
-            if self.prefs.execution_mode == "remote" \
-                    and self.prefs.remote_queue_dir:
-                self._deploy_remote_agent()
+            for tab in (self.job_tab, self.sensitivity_tab,
+                        self.optimization_tab):
+                tab.refresh_machines()
+            self._deploy_remote_agents()
 
-    def _deploy_remote_agent(self):
-        """Put the agent and start_agent.bat in the queue folder now, so the
-        user can start it on the compute PC before the first run."""
+    def _deploy_remote_agents(self):
+        """Put the agent and start_agent.bat in the queue folder of every
+        queue machine now, so the user can start them before the first run."""
+        from gui.core.machines import QUEUE, machines
         from gui.core.remote_exec import deploy_queue
-        try:
-            bat = deploy_queue(self.prefs.remote_queue_dir,
-                               self.prefs.remote_abaqus_cmd)
-        except Exception as e:
+        bats, errors = [], []
+        for m in machines(self.prefs):
+            if m.kind != QUEUE or not m.queue_dir:
+                continue
+            try:
+                bats.append("%s:\n  %s" % (m.name,
+                                           deploy_queue(m.queue_dir,
+                                                        m.abaqus_cmd)))
+            except Exception as e:
+                errors.append("%s: %s: %s" % (m.name, type(e).__name__, e))
+        if errors:
             QMessageBox.warning(
                 self, "Remote execution",
-                f"Could not prepare the queue folder:\n{type(e).__name__}: {e}")
-            return
-        QMessageBox.information(
-            self, "Remote execution",
-            "On the compute PC, double-click\n\n"
-            f"{bat}\n\n"
-            "and leave its window open (nothing to install there: it uses the\n"
-            "Python bundled with Abaqus). Close Remote Desktop with the cross,\n"
-            "do not sign out.")
+                "Could not prepare the queue folder of:\n" + "\n".join(errors))
+        if bats:
+            QMessageBox.information(
+                self, "Remote execution",
+                "On each compute PC, double-click its start_agent.bat\n\n"
+                + "\n".join(bats) + "\n\n"
+                "and leave its window open (nothing to install there: it uses\n"
+                "the Python bundled with Abaqus). Close Remote Desktop with the\n"
+                "cross, do not sign out.")
 
     # =====================================================================
     # Dirty tracking

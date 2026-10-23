@@ -28,12 +28,14 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from gui.core.logging_util import log_swallowed
+from gui.core.machines import machine_name
 from gui.sensitivity.ms_independence import failure_cause
 from gui.sensitivity.run_cache import RunCache, same_folder
 from gui.sensitivity.study_specs import (
     CHECKS_CONFIG, DIM_KEYS, JOB_PREFIX, ZOI_KEYS, comparison_settings,
     eps_of_spec, grid_set_of_spec, ms_of, read_checks_config,
-    read_study_folder, rewrite_study_config, settings_of_spec, zoi_tuple)
+    read_study_folder, record_study_machine, rewrite_study_config,
+    settings_of_spec, zoi_tuple)
 from gui.sensitivity.study_state import (
     AXIS_KEYS, STATE_LABELS, STEPS, STEP_TITLES, first_step_not_done,
     format_value, make_record, missing_prerequisites, model_differences,
@@ -466,10 +468,25 @@ class ModelStepsMixin:
         elif mode == "load":
             self._log_ui("LOADING %s: no Abaqus run, the finished runs are "
                          "read back" % run_dir)
+        if mode != "load":
+            self._log_machine(prefs, run_dir)
         n = len(self._study_cache)
         if n:
             self._log_ui("  %d finished run(s) available for reuse" % n)
         return run_bundle
+
+    def _log_machine(self, prefs, run_dir):
+        """Log the machine the runs go to and record it in the study's
+        config.json; warn when the study ran on another one before (its
+        run times, hence C_CPU, and maybe the Abaqus version differ)."""
+        name = machine_name(prefs)
+        self._log_ui("Machine: %s" % name)
+        before = record_study_machine(run_dir, name)
+        others = sorted(set(before or []) - {name})
+        if others:
+            self._log_ui("  WARNING: runs of this study were made on %s: "
+                         "their run times (C_CPU) and possibly the Abaqus "
+                         "version differ from %s" % (", ".join(others), name))
 
     @staticmethod
     def _inputs_of(step, spec) -> dict:

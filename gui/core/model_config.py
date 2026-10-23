@@ -452,6 +452,8 @@ class JobCfg:
     portable .acpf project file."""
     job_name: str = "Cutting_job"
     cpus:     int = 4
+    # Machine the Job tab runs on (gui.core.machines); "" = the default.
+    machine:  str = ""
 
 
 @dataclass
@@ -531,6 +533,9 @@ class OptimizationCfg:
     # exactly those of a run to make (2026-10-20). Off: a new study launches
     # every run; a resumed study still reuses the runs of its own folder.
     reuse_runs:     bool = True
+    # Machine the studies run on (gui.core.machines), by name; "" = the
+    # default machine of the Preferences.
+    machine:        str  = ""
     # What each sizing step found for this model (ms, mesh, domain,
     # checks): one record per step, written when a study ends, so the tab
     # can tell which steps are done for the current model and in which
