@@ -7,9 +7,9 @@ differ (gui.sensitivity.deviation_maps):
 
 * a map of |q_b - q_a| / eps_q on the ZOI grid: at one frame, averaged over
   T, or as the difference of the time means (bias);
-* a click on a ZOI point plots q_a(t) and q_b(t) at that point (right of the
-  map) and |q_b - q_a| / eps_q at that point over time (bottom), with the
-  spatial mean over the ZOI per frame and the threshold of the step;
+* a click on a ZOI point plots, right of the map, q_a(t) and q_b(t) at that
+  point and, below them, |q_b - q_a| / eps_q at that point over time, with
+  the spatial mean over the ZOI per frame and the threshold of the step;
 * for the forces, the two force curves and |F_b - F_a| / eps over time.
 
 Each study folder is one entry of the Study list and the run lists (a), (b)
@@ -158,31 +158,32 @@ class DeviationMapsDialog(QDialog):
         self.lbl_summary.setWordWrap(True)
         lay.addWidget(self.lbl_summary)
 
-        # Map (left) and the two curves at the clicked point (right) on
-        # top, the deviation over time with the threshold below. The
-        # "compressed" layout keeps the colorbar next to an equal-aspect
-        # map instead of leaving the map against the right edge.
-        self.fig_map = Figure(figsize=(5, 4), layout="compressed")
+        # Map on the left over the whole height; on the right, the two
+        # curves at the clicked point above their deviation over time with
+        # the threshold. The "compressed" layout keeps the colorbar next to
+        # an equal-aspect map instead of leaving the map against the right
+        # edge.
+        self.fig_map = Figure(figsize=(5, 5), layout="compressed")
         self.canvas_map = FigureCanvas(self.fig_map)
         self.canvas_map.mpl_connect("button_press_event", self._on_click)
-        self.fig_curves = Figure(figsize=(5, 4), tight_layout=True)
+        self.fig_curves = Figure(figsize=(6, 3), tight_layout=True)
         self.canvas_curves = FigureCanvas(self.fig_curves)
-        self.fig_dev = Figure(figsize=(10, 2.5), tight_layout=True)
+        self.fig_dev = Figure(figsize=(6, 3), tight_layout=True)
         self.canvas_dev = FigureCanvas(self.fig_dev)
         w_map, self._map_toolbar = _plot_panel(self.canvas_map)
         w_curves, _ = _plot_panel(self.canvas_curves)
         w_dev, _ = _plot_panel(self.canvas_dev)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(w_map)
-        top.addWidget(w_curves)
-        top.setStretchFactor(0, 1)
-        top.setStretchFactor(1, 1)
-        split = QSplitter(Qt.Vertical)
-        split.addWidget(top)
-        split.addWidget(w_dev)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([450, 300])
+        right = QSplitter(Qt.Vertical)
+        right.addWidget(w_curves)
+        right.addWidget(w_dev)
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 1)
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(w_map)
+        split.addWidget(right)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        split.setSizes([600, 650])
         lay.addWidget(split, 1)
 
         self.cb_study.blockSignals(True)
@@ -604,8 +605,8 @@ class DeviationMapsDialog(QDialog):
                 ax.plot(d.times, d.point_deviation(i), lw=1.0, marker=".",
                         ms=3, color="C2",
                         label="|b − a| / ε at x = %.4g, y = %.4g mm" % (x, y))
-                title += (" at the point: mean %s, |b̄ − ā| / ε %s, %d frames"
-                          " compared" % (_fmt(d.mean_map()[i]),
+                title += (" at the point: mean %s, |b̄ − ā| / ε %s, %d "
+                          "frames" % (_fmt(d.mean_map()[i]),
                                          _fmt(d.bias_map()[i]),
                                          d.n_compared()[i]))
             if self.cb_view.currentData() == "frame":
@@ -615,12 +616,13 @@ class DeviationMapsDialog(QDialog):
                    label="threshold of the step = %s ε" % _fmt(thr, "%.3g"))
         if not math.isclose(thr, 1.0):
             ax.axhline(1.0, color=_C_THR, lw=0.8, ls=":", label="ε_q")
-        ax.set_title("%s. Value that decides the study: %s"
+        ax.set_title("%s\nvalue that decides the study: %s"
                      % (title, _fmt(d.e_mean)), fontsize=9)
         ax.set_ylabel("|b − a| / ε_%s [-]" % d.quantity)
         ax.set_xlabel("time [s]")
-        ax.set_ylim(0.0, max(1.15 * thr, 1.15, ax.get_ylim()[1]))
-        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
+        # Room above the threshold for the legend.
+        ax.set_ylim(0.0, max(1.6 * thr, 1.15, 1.15 * ax.get_ylim()[1]))
+        ax.legend(fontsize=7, loc="upper left", framealpha=0.8)
         ax.grid(True, alpha=0.25, linestyle=":")
         self.canvas_dev.draw_idle()
 
