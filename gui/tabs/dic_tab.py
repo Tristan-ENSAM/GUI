@@ -41,6 +41,7 @@ from gui.core.exp_field_io import save_dic_field, load_dic_field
 from gui.widgets.dic_field_viewer import DicFieldViewer
 from gui.widgets.num_input import DecimalSpinBox, WheelStepSlider
 from gui.core.logging_util import log_swallowed
+from gui.widgets.theme import mark_primary
 
 
 class _DicCancelled(Exception):
@@ -811,6 +812,7 @@ class DICTab(QWidget):
         g = QGroupBox("Run / save")
         v = QVBoxLayout(g)
         self.b_run = QPushButton("Run DIC")
+        mark_primary(self.b_run)
         self.b_run.setEnabled(False)
         self.b_run.setToolTip("Validate the ROI first.")
         self.b_run.clicked.connect(self._run_clicked)

@@ -30,6 +30,7 @@ from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
 from gui.widgets.machine_combo import MachineCombo
+from gui.widgets.theme import mark_primary
 from gui.core.remote_exec import (is_remote, launch_problems,
                                   request_cancel_by_job, submit_command)
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
@@ -214,6 +215,7 @@ class JobTab(QWidget):
         row.addWidget(self.btn_generate)
 
         self.btn_run = QPushButton("Run Abaqus")
+        mark_primary(self.btn_run)
         self.btn_run.setToolTip(
             "Launch the Abaqus generator script with the current profile.\n"
             "Output is streamed live below; the GUI remains responsive."

@@ -82,6 +82,7 @@ from gui.widgets.collapsible import CollapsibleSection
 from gui.widgets.geometry_preview import GeometryPreview
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.workdir_button import workdir_button
+from gui.widgets.theme import mark_primary
 
 
 # Quantity -> bundle element-field name (velocity components V1/V2 are written
@@ -352,7 +353,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "It is NOT the ROI: the ROI is the output zone of the Geometry\n"
             "tab, matched to the DIC/IRT fields. An empty bound takes the\n"
             "ROI bound. The Sensitivity tab can propose a ZOI from its maps\n"
-            "('Copy ZOI to the Model tab').")
+            "('Copy ZOI to the Model sizing tab').")
         cg0.addWidget(lab, 0, 0)
         self.le_zoi = {}
         zoi_row = QHBoxLayout()
@@ -551,6 +552,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.cb_ms_search.currentIndexChanged.connect(self._on_ms_search)
         sg.addWidget(self.cb_ms_search, 2, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
+        mark_primary(self.btn_ms)
         self.btn_ms.setToolTip(
             "Runs the ms values in increasing order on the current domain and\n"
             "compares each run with the reference chosen on the left (E_max with the absolute\n"
@@ -632,6 +634,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # mesh is selected with the common absolute eps_q. The old relative
         # GCI tolerances (persisted key sizing_tol) are no longer read.
         self.btn_mesh = QPushButton("Run mesh convergence (GCI)")
+        mark_primary(self.btn_mesh)
         self.btn_mesh.setToolTip(
             "GCI/Richardson mesh convergence on the current (fixed) domain:\n"
             "n systematically-refined meshes, observed order p, extrapolated\n"
@@ -714,6 +717,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         dg.setColumnStretch(5, 1)
         btn_row = QHBoxLayout()
         self.btn_domain = QPushButton("Run domain sizing (independence)")
+        mark_primary(self.btn_domain)
         self.btn_domain.setToolTip(
             "Sequential independence study: each dimension grown by a constant\n"
             "step from the starting domain (mesh and mass scaling held\n"
@@ -776,6 +780,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         gchk = QGroupBox("Step 3 · Final checks at (ms*, h*, D*)")
         kv = QVBoxLayout(gchk)
         self.btn_checks = QPushButton("Run interaction checks")
+        mark_primary(self.btn_checks)
         self.btn_checks.setToolTip(
             "A-posteriori checks of the sized model:\n"
             "mass-scaling factor inside its window at (h*, D*), the four\n"
@@ -796,6 +801,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         top = QHBoxLayout()
         top.setSpacing(6)
         self.btn_all = QPushButton("Run all steps")
+        mark_primary(self.btn_all)
         self.btn_all.setToolTip(
             "Runs steps 0 to 3 in order. A step already done for this model\n"
             "is skipped, an interrupted one is resumed. Each result is\n"
@@ -2091,8 +2097,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return CompareSettings(
             step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
             window=self.window(), thresholds=self.thresholds(),
-            source="current settings of the Model tab (the folder of run a "
-                   "is not a study of the Model tab)")
+            source="current settings of the Model sizing tab (the folder of "
+                   "run a is not a study of the Model sizing tab)")
 
     def _validate_launch(self, folder=None):
         """Shared pre-flight for a run: returns (prefs, workdir, cpus) or None
