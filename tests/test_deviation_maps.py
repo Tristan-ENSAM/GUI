@@ -279,6 +279,11 @@ def test_window_compare_views_click_export(qapp, tmp_path, monkeypatch):
     dlg._on_click(_Event(ax, 0.1, 0.05))
     assert dlg._point is not None
     assert len(dlg.fig_curves.axes[0].lines) >= 2
+    # Deviation over time: ZOI mean, the point, the threshold of the step.
+    dev = dlg.fig_dev.axes[0]
+    assert any(ln.get_label().startswith("threshold of the step")
+               for ln in dev.lines)
+    assert len(dev.lines) >= 3
     dlg.cb_q.setCurrentText("Fc")
     assert not dlg.sl_frame.isEnabled()
     monkeypatch.setattr(dlg_mod.QFileDialog, "getExistingDirectory",
@@ -288,3 +293,55 @@ def test_window_compare_views_click_export(qapp, tmp_path, monkeypatch):
     dlg._on_export()
     assert (tmp_path / "out" /
             "deviation_ms_run001_vs_ms_run000_maps.xlsx").exists()
+
+
+def test_window_folders_are_separate_and_runs_exclusive(qapp, tmp_path,
+                                                        monkeypatch):
+    import shutil
+    import gui.widgets.deviation_maps_dialog as dlg_mod
+    monkeypatch.setattr(dlg_mod.QMessageBox, "information",
+                        lambda *a, **k: None)
+    f1 = _study_folder(tmp_path)
+    f2 = tmp_path / "rerun"
+    f2.mkdir()
+    for p in f1.iterdir():
+        shutil.copy(p, f2 / p.name)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    dlg = dlg_mod.DeviationMapsDialog(folders=[str(f1)])
+    # "Add a folder" puts the folder in the Study list and selects it; the
+    # lists (a), (b) then hold its runs only.
+    monkeypatch.setattr(dlg_mod.QFileDialog, "getExistingDirectory",
+                        lambda *a, **k: str(f2))
+    dlg._on_add_folder()
+    assert dlg.cb_study.currentData() == str(f2)
+    assert dlg.cb_a.count() == 2
+    assert all(r.folder == f2 for r in dlg._runs)
+    assert dlg.add_folder(empty) == 0
+    assert dlg.cb_study.findData(str(empty)) < 0
+    dlg.cb_study.setCurrentIndex(dlg.cb_study.findData(str(f1)))
+    assert all(r.folder == f1 for r in dlg._runs)
+    # All the folders: grouped, with one disabled header per folder.
+    dlg.cb_study.setCurrentIndex(dlg.cb_study.findData(dlg_mod._ALL))
+    assert len(dlg._runs) == 4 and dlg.cb_a.count() == 6
+    assert not dlg.cb_a.model().item(0).isEnabled()
+    # The run of the other list is greyed out; picking it moves the other.
+    ib = dlg.cb_b.currentData()
+    k = dlg.cb_a.findData(ib)
+    assert not dlg.cb_a.model().item(k).isEnabled()
+    assert "already b" in dlg.cb_a.itemText(k)
+    dlg.cb_a.setCurrentIndex(k)
+    assert dlg.cb_a.currentData() == ib != dlg.cb_b.currentData()
+
+
+def test_share_of_the_step_is_the_threshold(tmp_path):
+    folder = tmp_path / "ms"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({
+        "study": "massscaling", "parameters": {
+            "zoi": [-0.1, 0.0, -0.05, 0.05], "elem_size": 0.002,
+            "ms_values": [1, 200], "grid_step": 0.005,
+            "thresholds_abs": _THR, "window": [0.3, 1.0],
+            "domain_dims": {}, "eps_shares": [0.5, 0.25, 0.25]}}))
+    s = dm.settings_of_folder(folder)
+    assert s.share == 0.5 and "ms" in s.source

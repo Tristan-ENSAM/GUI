@@ -7,9 +7,15 @@ differ (gui.sensitivity.deviation_maps):
 
 * a map of |q_b - q_a| / eps_q on the ZOI grid: at one frame, averaged over
   T, or as the difference of the time means (bias);
-* a click on a ZOI point plots q_a(t) and q_b(t) at that point; without a
-  point, the spatial mean of |q_b - q_a| / eps_q per frame;
-* for the forces, the two force curves.
+* a click on a ZOI point plots q_a(t) and q_b(t) at that point (right of the
+  map) and |q_b - q_a| / eps_q at that point over time (bottom), with the
+  spatial mean over the ZOI per frame and the threshold of the step;
+* for the forces, the two force curves and |F_b - F_a| / eps over time.
+
+Each study folder is one entry of the Study list and the run lists (a), (b)
+only hold the runs of the chosen entry; "All the folders" lists the runs of
+every folder, grouped by folder, to compare runs made in different folders.
+The run chosen in one list is greyed out in the other one.
 
 Nothing is run: the saved results of the study folders are read.
 """
@@ -20,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget)
@@ -36,65 +43,87 @@ _VIEWS = (("mean", "Mean over T of |b − a| / ε"),
           ("bias", "Difference of the time means |b̄ − ā| / ε"))
 _UNITS = {"Vx": "mm/s", "Vy": "mm/s", "T": "K", "EVF": "-", "Fc": "N/mm",
           "Ff": "N/mm"}
+_ALL = "__all__"                    # Study entry listing every folder
+_BASE_TEXT = Qt.UserRole + 1        # run label without the "taken" note
+_C_THR = "#c0392b"                  # threshold of the step (red)
 
 
 def _fmt(v, f="%.3f"):
     return f % v if v is not None and math.isfinite(v) else "–"
 
 
-class DeviationMapsDialog(QDialog):
-    """Non-modal window; `folders` are the study folders listed at start."""
+def _plot_panel(canvas):
+    """A widget holding the matplotlib toolbar over `canvas`."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    tb = NavigationToolbar2QT(canvas, w)
+    v.addWidget(tb)
+    v.addWidget(canvas, 1)
+    return w, tb
 
-    def __init__(self, folders=(), start_dir="", parent=None):
+
+class DeviationMapsDialog(QDialog):
+    """Non-modal window; `folders` are the study folders listed at start.
+    `settings_getter` returns the Model tab's current comparison settings
+    (dm.CompareSettings), used when the folder of the reference run is not
+    a study of the Model tab (e.g. a Sensitivity-tab folder)."""
+
+    def __init__(self, folders=(), start_dir="", parent=None,
+                 settings_getter=None):
         super().__init__(parent)
         self.setWindowTitle("Deviation maps between two runs")
-        self.resize(1100, 850)
-        self._folders = []
-        self._runs = []
+        self.resize(1250, 900)
+        self._folders = []               # study folders, in the Study list
+        self._folder_runs = {}           # str(folder) -> its finished runs
+        self._runs = []                  # runs of the chosen Study entry
         self._pair = None
         self._pair_jobs = ("a", "b")
         self._point = None
         self._busy = False
         self._start_dir = str(start_dir or "")
+        self._settings_getter = settings_getter
 
         lay = QVBoxLayout(self)
         intro = QLabel(
-            "Where and when two runs of a study differ. Pick the reference "
-            "run (a) and the compared run (b), then Compare. The value shown "
-            "is |b − a| / ε_q: 1 means a deviation equal to the tolerance. "
-            "Click a point of the map to see the two time curves there.")
+            "Where and when two runs of a study differ. Pick the study "
+            "folder, the reference run (a) and the compared run (b), then "
+            "Compare. The value shown is |b − a| / ε_q: 1 means a deviation "
+            "equal to the admitted deviation ε_q. Click a point of the map "
+            "to see the two curves there and their deviation over time.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Study"))
+        row.addWidget(QLabel("Study folder"))
         self.cb_study = QComboBox()
         self.cb_study.setToolTip(
-            "The study folders recorded for this model. The runs of the\n"
-            "chosen one are listed below; 'Add a folder' adds the runs of\n"
-            "another folder to them (e.g. a run made again elsewhere).")
-        self.cb_study.addItem("(choose a study folder)", None)
-        for f in folders or ():
-            if Path(f).is_dir():
-                self.cb_study.addItem(Path(f).name, str(f))
+            "One entry per study folder: the lists (a) and (b) hold the\n"
+            "finished runs of the chosen folder only. 'All the folders'\n"
+            "lists the runs of every folder, grouped by folder (e.g. to\n"
+            "compare a run with the same run made again elsewhere).")
         self.cb_study.currentIndexChanged.connect(self._on_study)
         row.addWidget(self.cb_study, 1)
         b = QPushButton("Add a folder…")
+        b.setToolTip("Add a study folder to the list and select it.")
         b.clicked.connect(self._on_add_folder)
         row.addWidget(b)
         lay.addLayout(row)
         self.lbl_folders = QLabel("No study folder.")
         self.lbl_folders.setWordWrap(True)
+        self.lbl_folders.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self.lbl_folders)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Reference (a)"))
         self.cb_a = QComboBox()
         self.cb_a.setMinimumContentsLength(30)
+        self.cb_a.currentIndexChanged.connect(lambda *_: self._on_pick("a"))
         row.addWidget(self.cb_a, 1)
         row.addWidget(QLabel("Compared (b)"))
         self.cb_b = QComboBox()
         self.cb_b.setMinimumContentsLength(30)
+        self.cb_b.currentIndexChanged.connect(lambda *_: self._on_pick("b"))
         row.addWidget(self.cb_b, 1)
         self.btn_compare = QPushButton("Compare")
         self.btn_compare.clicked.connect(self._on_compare)
@@ -129,115 +158,230 @@ class DeviationMapsDialog(QDialog):
         self.lbl_summary.setWordWrap(True)
         lay.addWidget(self.lbl_summary)
 
-        split = QSplitter(Qt.Vertical)
-        self.fig_map = Figure(figsize=(6, 4), tight_layout=True)
+        # Map (left) and the two curves at the clicked point (right) on
+        # top, the deviation over time with the threshold below. The
+        # "compressed" layout keeps the colorbar next to an equal-aspect
+        # map instead of leaving the map against the right edge.
+        self.fig_map = Figure(figsize=(5, 4), layout="compressed")
         self.canvas_map = FigureCanvas(self.fig_map)
         self.canvas_map.mpl_connect("button_press_event", self._on_click)
-        self.fig_curves = Figure(figsize=(6, 3), tight_layout=True)
+        self.fig_curves = Figure(figsize=(5, 4), tight_layout=True)
         self.canvas_curves = FigureCanvas(self.fig_curves)
-        for canvas in (self.canvas_map, self.canvas_curves):
-            w = QWidget()
-            v = QVBoxLayout(w)
-            v.setContentsMargins(0, 0, 0, 0)
-            tb = NavigationToolbar2QT(canvas, w)
-            v.addWidget(tb)
-            v.addWidget(canvas, 1)
-            if canvas is self.canvas_map:
-                self._map_toolbar = tb
-            split.addWidget(w)
+        self.fig_dev = Figure(figsize=(10, 2.5), tight_layout=True)
+        self.canvas_dev = FigureCanvas(self.fig_dev)
+        w_map, self._map_toolbar = _plot_panel(self.canvas_map)
+        w_curves, _ = _plot_panel(self.canvas_curves)
+        w_dev, _ = _plot_panel(self.canvas_dev)
+        top = QSplitter(Qt.Horizontal)
+        top.addWidget(w_map)
+        top.addWidget(w_curves)
+        top.setStretchFactor(0, 1)
+        top.setStretchFactor(1, 1)
+        split = QSplitter(Qt.Vertical)
+        split.addWidget(top)
+        split.addWidget(w_dev)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
+        split.setSizes([450, 300])
         lay.addWidget(split, 1)
 
-        if self.cb_study.count() > 1:
-            self.cb_study.setCurrentIndex(self.cb_study.count() - 1)
+        self.cb_study.blockSignals(True)
+        self.cb_study.addItem("(add a study folder)", None)
+        self.cb_study.blockSignals(False)
+        for f in folders or ():
+            self.add_folder(f, quiet=True, select=False)
+        if self._folders:
+            self.cb_study.setCurrentIndex(self._study_index(self._folders[-1]))
         self._redraw()
 
-    def _on_study(self, *_):
-        folder = self.cb_study.currentData()
-        self._folders, self._runs = [], []
-        if folder:
-            self.add_folder(folder)
-        else:
-            self._refill_runs()
+    # ---- study folders -------------------------------------------------
+    def _study_index(self, folder) -> int:
+        return self.cb_study.findData(str(folder))
 
-    # ---- runs ----------------------------------------------------------
-    def add_folder(self, folder, quiet=False) -> int:
+    def _rebuild_study_list(self, select=None):
+        """One entry per folder, plus 'All the folders' when there are
+        several; `select` (a folder or _ALL) is made current."""
+        keep = self.cb_study.currentData() if select is None else str(select)
+        self.cb_study.blockSignals(True)
+        self.cb_study.clear()
+        if not self._folders:
+            self.cb_study.addItem("(add a study folder)", None)
+        for f in self._folders:
+            n = len(self._folder_runs.get(str(f), ()))
+            self.cb_study.addItem("%s  (%d finished run%s)"
+                                  % (f.name, n, "" if n == 1 else "s"),
+                                  str(f))
+            self.cb_study.setItemData(self.cb_study.count() - 1, str(f),
+                                      Qt.ToolTipRole)
+        if len(self._folders) > 1:
+            self.cb_study.addItem("All the folders (%d)" % len(self._folders),
+                                  _ALL)
+        i = self.cb_study.findData(keep) if keep is not None else -1
+        self.cb_study.setCurrentIndex(max(i, 0))
+        self.cb_study.blockSignals(False)
+        self._on_study()
+
+    def add_folder(self, folder, quiet=False, select=True) -> int:
+        """Add a study folder to the Study list (and select it); returns
+        its number of finished runs. A folder already listed is only
+        selected; a folder without a finished run is not added."""
         folder = Path(folder)
-        if not folder.is_dir() or any(
-                folder.resolve() == f.resolve() for f in self._folders):
+        if not folder.is_dir():
+            return 0
+        for f in self._folders:
+            if f.resolve() == folder.resolve():
+                if select:
+                    self.cb_study.setCurrentIndex(self._study_index(f))
+                return len(self._folder_runs.get(str(f), ()))
+        runs = dm.list_runs([folder])
+        if not runs:
+            if not quiet:
+                QMessageBox.information(
+                    self, "Add a study folder",
+                    "%s holds no finished run (a run needs its .results.npz,"
+                    " .meta.json and a .sta that reports a completed "
+                    "analysis). The folder is not added." % folder.name)
             return 0
         self._folders.append(folder)
-        before = len(self._runs)
-        self._runs = dm.list_runs(self._folders)
-        n = len(self._runs) - before
-        if n == 0 and not quiet:
-            QMessageBox.information(
-                self, "Add a study folder",
-                "%s holds no finished run (a run needs its .results.npz, "
-                ".meta.json and a .sta that reports a completed analysis)."
-                % folder.name)
-        self._refill_runs()
-        return n
-
-    def _refill_runs(self):
-        names = ", ".join(f.name for f in self._folders)
-        self.lbl_folders.setText(
-            "Study folders: %s (%d finished runs)" % (names, len(self._runs))
-            if self._folders else "No study folder.")
-        for cb in (self.cb_a, self.cb_b):
-            cb.blockSignals(True)
-            cb.clear()
-            for r in self._runs:
-                cb.addItem(dm.run_label(r))
-            cb.blockSignals(False)
-        if not self._runs:
-            return
-        step = None
-        for f in self._folders:
-            try:
-                step = dm.settings_of_folder(f).step
-                break
-            except Exception:
-                continue
-        ia = dm.default_reference(self._runs, step)
-        self.cb_a.setCurrentIndex(max(ia, 0))
-        self.cb_b.setCurrentIndex(1 if ia == 0 and len(self._runs) > 1 else 0)
+        self._folder_runs[str(folder)] = runs
+        self._rebuild_study_list(select=folder if select else None)
+        return len(runs)
 
     def _on_add_folder(self):
-        start = str(self._folders[-1].parent) if self._folders \
-            else self._start_dir
+        cur = self.cb_study.currentData()
+        start = (str(Path(cur).parent) if cur and cur != _ALL
+                 else str(self._folders[-1].parent) if self._folders
+                 else self._start_dir)
         folder = QFileDialog.getExistingDirectory(
             self, "Add a study folder", start)
         if folder:
             self.add_folder(folder)
 
-    def _settings_for(self, run):
-        """Settings of the reference run's folder, else of the first study
-        folder that has them."""
-        errors = []
-        for f in [run.folder] + self._folders:
+    def _on_study(self, *_):
+        key = self.cb_study.currentData()
+        if key == _ALL:
+            folders = list(self._folders)
+        elif key:
+            folders = [Path(key)]
+        else:
+            folders = []
+        self._runs = [r for f in folders
+                      for r in self._folder_runs.get(str(f), ())]
+        if not folders:
+            self.lbl_folders.setText("No study folder.")
+        elif key == _ALL:
+            self.lbl_folders.setText(
+                "Runs of every folder, grouped by folder (%d finished runs)."
+                % len(self._runs))
+        else:
+            self.lbl_folders.setText("Folder: %s (%d finished runs)"
+                                     % (folders[0], len(self._runs)))
+        self._refill_runs(grouped=key == _ALL)
+
+    # ---- runs ----------------------------------------------------------
+    def _refill_runs(self, grouped=False):
+        bold = QFont()
+        bold.setBold(True)
+        for cb in (self.cb_a, self.cb_b):
+            cb.blockSignals(True)
+            cb.clear()
+            folder = None
+            for i, r in enumerate(self._runs):
+                if grouped and r.folder != folder:
+                    folder = r.folder
+                    cb.addItem("— %s —" % folder.name, None)
+                    item = cb.model().item(cb.count() - 1)
+                    item.setEnabled(False)
+                    item.setFont(bold)
+                text = dm.run_label(r, folder=False)
+                cb.addItem(text, i)
+                cb.setItemData(cb.count() - 1, text, _BASE_TEXT)
+            cb.blockSignals(False)
+        if not self._runs:
+            return
+        step = None
+        for f in dict.fromkeys(r.folder for r in self._runs):
             try:
-                return dm.settings_of_folder(f), None
+                step = dm.settings_of_folder(f).step
+                break
+            except Exception:
+                continue
+        ia = max(dm.default_reference(self._runs, step), 0)
+        ib = 1 if ia == 0 and len(self._runs) > 1 else 0
+        for cb, i in ((self.cb_a, ia), (self.cb_b, ib)):
+            cb.blockSignals(True)
+            cb.setCurrentIndex(cb.findData(i))
+            cb.blockSignals(False)
+        self._mark_taken()
+
+    def _run_index(self, cb):
+        i = cb.currentData()
+        return i if isinstance(i, int) else None
+
+    def _on_pick(self, which):
+        """Keep (a) and (b) on two different runs: picking in one list the
+        run of the other moves the other one to the next run."""
+        cb, other = ((self.cb_a, self.cb_b) if which == "a"
+                     else (self.cb_b, self.cb_a))
+        i = self._run_index(cb)
+        if i is not None and i == self._run_index(other) \
+                and len(self._runs) > 1:
+            j = (i + 1) % len(self._runs)
+            other.blockSignals(True)
+            other.setCurrentIndex(other.findData(j))
+            other.blockSignals(False)
+        self._mark_taken()
+
+    def _mark_taken(self):
+        """Grey out, in each list, the run chosen in the other one."""
+        for cb, other, note in ((self.cb_a, self.cb_b, "already b"),
+                                (self.cb_b, self.cb_a, "already a")):
+            taken = self._run_index(other)
+            model = cb.model()
+            for k in range(cb.count()):
+                i = cb.itemData(k)
+                if not isinstance(i, int):
+                    continue
+                base = cb.itemData(k, _BASE_TEXT)
+                item = model.item(k)
+                if i == taken:
+                    item.setText("%s   [%s]" % (base, note))
+                    item.setEnabled(False)
+                else:
+                    item.setText(base)
+                    item.setEnabled(True)
+
+    def _settings_for(self, run):
+        """Settings of the reference run's folder, else the Model tab's
+        current ones; (settings, None) or (None, reason)."""
+        try:
+            return dm.settings_of_folder(run.folder), None
+        except Exception as e:
+            err = str(e)
+        if self._settings_getter is not None:
+            try:
+                s = self._settings_getter()
+                if s is not None:
+                    return s, None
             except Exception as e:
-                errors.append(str(e))
-        return None, "; ".join(errors)
+                err += "; Model tab: %s" % e
+        return None, err
 
     # ---- comparison ----------------------------------------------------
     def _on_compare(self):
         if self._busy or not self._runs:
             return
-        ra = self._runs[self.cb_a.currentIndex()]
-        rb = self._runs[self.cb_b.currentIndex()]
-        if ra is rb:
+        ia, ib = self._run_index(self.cb_a), self._run_index(self.cb_b)
+        if ia is None or ib is None or ia == ib:
             QMessageBox.information(self, "Compare",
                                     "Pick two different runs.")
             return
+        ra, rb = self._runs[ia], self._runs[ib]
         settings, err = self._settings_for(ra)
         if settings is None:
             QMessageBox.warning(
                 self, "Compare", "No comparison settings (ZOI, sampling step, "
-                "window, ε_q) found in the study folders: %s" % err)
+                "window, ε_q) found: %s" % err)
             return
         self._busy = True
         self.btn_compare.setEnabled(False)
@@ -280,6 +424,10 @@ class DeviationMapsDialog(QDialog):
         self._write_summary()
         self._on_quantity()
 
+    def _threshold(self) -> float:
+        """Threshold of the step in units of ε_q (its share of ε_q)."""
+        return float(self._pair.settings.share) if self._pair else 1.0
+
     def _write_summary(self):
         p = self._pair
         cells = ["%s %s / %s / %s" % (q, _fmt(d.e_mean), _fmt(d.e_inst),
@@ -289,14 +437,17 @@ class DeviationMapsDialog(QDialog):
         self.lbl_summary.setText(
             "<b>E/ε of the means (decides the studies) / E/ε (all samples)"
             " / bias E/ε (time means per point):</b> %s<br>"
+            "Threshold of the step: %s ε_q (its share of ε_q).<br>"
             "a = %s<br>b = %s<br>ZOI x[%g, %g] y[%g, %g] mm, step %g mm, "
             "T = %g–%g of the simulated time, sampling %s, largest frame "
-            "offset %s of a frame interval."
-            % ("&nbsp;&nbsp; ".join(cells), p.label_a, p.label_b,
+            "offset %s of a frame interval. Settings: %s."
+            % ("&nbsp;&nbsp; ".join(cells), _fmt(s.share, "%.3g"),
+               p.label_a, p.label_b,
                *s.zoi, s.grid_step, s.window[0], s.window[1],
                "linear (different meshes)" if p.linear else
                "nearest element (as the studies)",
-               _fmt(p.frame_offset_over_interval, "%.3g")))
+               _fmt(p.frame_offset_over_interval, "%.3g"),
+               s.source or "–"))
 
     def _current(self):
         if self._pair is None:
@@ -326,26 +477,30 @@ class DeviationMapsDialog(QDialog):
     def _redraw(self, *_):
         self._draw_map()
         self._draw_curves()
+        self._draw_deviation()
+
+    @staticmethod
+    def _message(fig, canvas, text):
+        ax = fig.add_subplot(111)
+        ax.text(0.5, 0.5, text, ha="center", va="center", wrap=True,
+                transform=ax.transAxes)
+        ax.set_axis_off()
+        canvas.draw_idle()
 
     def _draw_map(self):
         fig = self.fig_map
         fig.clear()
-        ax = fig.add_subplot(111)
         d = self._current()
         self.lbl_frame.setText("")
         if d is None:
-            ax.text(0.5, 0.5, "Add a study folder, pick two runs, Compare.",
-                    ha="center", va="center", transform=ax.transAxes)
-            ax.set_axis_off()
-            self.canvas_map.draw_idle()
+            self._message(fig, self.canvas_map,
+                          "Pick the study folder and two runs, then Compare.")
             return
         if not d.is_field:
-            ax.text(0.5, 0.5, "%s is a force: no map, see the curves below."
-                    % d.quantity, ha="center", va="center",
-                    transform=ax.transAxes)
-            ax.set_axis_off()
-            self.canvas_map.draw_idle()
+            self._message(fig, self.canvas_map,
+                          "%s is a force: no map, see the curves." % d.quantity)
             return
+        ax = fig.add_subplot(111)
         p = self._pair
         ny, nx = p.shape
         vals = self._map_values(d).reshape(ny, nx)
@@ -354,6 +509,7 @@ class DeviationMapsDialog(QDialog):
         ys = p.points[::nx, 1]
         extent = (xs[0] - g / 2, xs[-1] + g / 2, ys[0] - g / 2, ys[-1] + g / 2)
         finite = vals[np.isfinite(vals)]
+        thr = self._threshold()
         vmax = max(1.0, float(np.percentile(finite, 99))) if finite.size \
             else 1.0
         import matplotlib
@@ -362,11 +518,12 @@ class DeviationMapsDialog(QDialog):
                        vmin=0.0, vmax=vmax, interpolation="nearest",
                        aspect="equal")
         cb = fig.colorbar(im, ax=ax)
-        cb.set_label("/ ε_%s (ε = %g %s)" % (d.quantity, d.eps,
-                                             _UNITS.get(d.quantity, "")))
-        if finite.size and finite.max() > 1.0 and ny > 1 and nx > 1:
+        cb.set_label("|b − a| / ε_%s   (ε_%s = %g %s)"
+                     % (d.quantity, d.quantity, d.eps,
+                        _UNITS.get(d.quantity, "")))
+        if finite.size and finite.max() > thr and ny > 1 and nx > 1:
             ax.contour(xs, ys, np.where(np.isfinite(vals), vals, 0.0),
-                       levels=[1.0], colors="red", linewidths=1.0)
+                       levels=[thr], colors=_C_THR, linewidths=1.0)
         if self._point is not None:
             x, y = p.points[self._point]
             ax.plot([x], [y], marker="s", mfc="none", mec="white", mew=2, ms=10)
@@ -376,62 +533,102 @@ class DeviationMapsDialog(QDialog):
             k = self.sl_frame.value()
             self.lbl_frame.setText("t = %.4g s" % d.times[k])
             title += "  (t = %.4g s)" % d.times[k]
-        ax.set_title(title + "\nmean over the map: %s   (grey: not compared,"
-                     " red line: 1)" % _fmt(float(np.mean(finite))
-                                           if finite.size else None),
+        ax.set_title("%s\nmap mean %s · grey: not compared · red line: "
+                     "threshold %s" % (title, _fmt(float(np.mean(finite))
+                                                   if finite.size else None),
+                                       _fmt(thr, "%.3g")),
                      fontsize=9)
         ax.set_xlabel("x [mm]")
         ax.set_ylabel("y [mm]")
         self.canvas_map.draw_idle()
 
     def _draw_curves(self):
+        """The two runs: force histories, or the field at the clicked
+        point."""
         fig = self.fig_curves
         fig.clear()
-        ax = fig.add_subplot(111)
         d = self._current()
         if d is None:
-            ax.set_axis_off()
             self.canvas_curves.draw_idle()
             return
+        if d.is_field and self._point is None:
+            self._message(fig, self.canvas_curves,
+                          "Click a point of the map to plot %s of the two "
+                          "runs there." % d.quantity)
+            return
+        ax = fig.add_subplot(111)
         unit = _UNITS.get(d.quantity, "")
         if not d.is_field:
             ax.plot(d.times, d.a, lw=0.8, label="a (reference)")
             ax.plot(d.times, d.b, lw=0.8, label="b")
-            ax.set_ylabel("%s [%s]" % (d.quantity, unit))
-            ax.set_title("%s over T: E/ε %s, bias E/ε %s"
-                         % (d.quantity, _fmt(d.e_inst), _fmt(d.e_bias)),
-                         fontsize=9)
-            ax.legend(fontsize=8)
-        elif self._point is None:
-            ax.plot(d.times, d.e_frame, lw=1.0)
-            ax.axhline(1.0, color="red", lw=0.8)
-            ax.set_ylabel("mean over the ZOI of |b − a| / ε")
-            ax.set_title("%s: deviation per frame (click a map point for "
-                         "its curves)" % d.quantity, fontsize=9)
+            ax.set_title("%s of the two runs over T" % d.quantity, fontsize=9)
         else:
             i = self._point
             x, y = self._pair.points[i]
             ax.plot(d.times, d.a[:, i], lw=1.0, marker=".", ms=3,
                     label="a (reference)")
             ax.plot(d.times, d.b[:, i], lw=1.0, marker=".", ms=3, label="b")
-            ax.set_ylabel("%s [%s]" % (d.quantity, unit))
-            ax.set_title("%s at x = %.4g, y = %.4g mm: mean |b − a| / ε %s, "
-                         "|b̄ − ā| / ε %s, %d frames compared (gaps: void)"
-                         % (d.quantity, x, y, _fmt(d.mean_map()[i]),
-                            _fmt(d.bias_map()[i]), d.n_compared()[i]),
-                         fontsize=9)
-            ax.legend(fontsize=8)
-        if d.is_field and self.cb_view.currentData() == "frame":
-            ax.axvline(d.times[self.sl_frame.value()], color="grey", lw=0.8,
-                       ls="--")
+            ax.set_title("%s at x = %.4g, y = %.4g mm (gaps: void)"
+                         % (d.quantity, x, y), fontsize=9)
+            if self.cb_view.currentData() == "frame":
+                ax.axvline(d.times[self.sl_frame.value()], color="grey",
+                           lw=0.8, ls="--")
+        ax.set_ylabel("%s [%s]" % (d.quantity, unit))
         ax.set_xlabel("time [s]")
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.25, linestyle=":")
         self.canvas_curves.draw_idle()
+
+    def _draw_deviation(self):
+        """|b − a| / ε over time (at the clicked point and its mean over
+        the ZOI, or the force), with the threshold of the step."""
+        fig = self.fig_dev
+        fig.clear()
+        d = self._current()
+        if d is None:
+            self.canvas_dev.draw_idle()
+            return
+        ax = fig.add_subplot(111)
+        thr = self._threshold()
+        if not d.is_field:
+            ax.plot(d.times, d.e_frame, lw=0.8, color="C2",
+                    label="|%s_b − %s_a| / ε" % (d.quantity, d.quantity))
+            title = "%s: deviation over T" % d.quantity
+        else:
+            ax.plot(d.times, d.e_frame, lw=1.0, color="0.55",
+                    label="mean over the ZOI of |b − a| / ε")
+            title = "%s: deviation per frame" % d.quantity
+            if self._point is not None:
+                i = self._point
+                x, y = self._pair.points[i]
+                ax.plot(d.times, d.point_deviation(i), lw=1.0, marker=".",
+                        ms=3, color="C2",
+                        label="|b − a| / ε at x = %.4g, y = %.4g mm" % (x, y))
+                title += (" at the point: mean %s, |b̄ − ā| / ε %s, %d frames"
+                          " compared" % (_fmt(d.mean_map()[i]),
+                                         _fmt(d.bias_map()[i]),
+                                         d.n_compared()[i]))
+            if self.cb_view.currentData() == "frame":
+                ax.axvline(d.times[self.sl_frame.value()], color="grey",
+                           lw=0.8, ls="--")
+        ax.axhline(thr, color=_C_THR, lw=1.0,
+                   label="threshold of the step = %s ε" % _fmt(thr, "%.3g"))
+        if not math.isclose(thr, 1.0):
+            ax.axhline(1.0, color=_C_THR, lw=0.8, ls=":", label="ε_q")
+        ax.set_title("%s. Value that decides the study: %s"
+                     % (title, _fmt(d.e_mean)), fontsize=9)
+        ax.set_ylabel("|b − a| / ε_%s [-]" % d.quantity)
+        ax.set_xlabel("time [s]")
+        ax.set_ylim(0.0, max(1.15 * thr, 1.15, ax.get_ylim()[1]))
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
+        ax.grid(True, alpha=0.25, linestyle=":")
+        self.canvas_dev.draw_idle()
 
     def _on_click(self, event):
         d = self._current()
         if (d is None or not d.is_field or event.inaxes is None
                 or event.xdata is None
+                or event.inaxes is not self.fig_map.axes[0]
                 or getattr(self._map_toolbar, "mode", "")):
             return
         self._point = self._pair.nearest_point(event.xdata, event.ydata)

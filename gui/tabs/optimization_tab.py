@@ -2075,10 +2075,21 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             dlg = DeviationMapsDialog(
                 folders=self._known_folders(),
                 start_dir=str(getattr(prefs, "default_workdir", "") or ""),
-                parent=self)
+                parent=self, settings_getter=self._deviation_settings)
             self._dev_maps_dialog = dlg
         dlg.show()
         dlg.raise_()
+
+    def _deviation_settings(self):
+        """The tab's current comparison settings, for the deviation maps of
+        runs whose folder is not a study of this tab (no step: share 1).
+        Raises ValueError when the tab's settings are not valid."""
+        from gui.sensitivity.deviation_maps import CompareSettings
+        return CompareSettings(
+            step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
+            window=self.window(), thresholds=self.thresholds(),
+            source="current settings of the Model tab (the folder of run a "
+                   "is not a study of the Model tab)")
 
     def _open_working_dir(self):
         """Open the Preferences working directory in the file explorer."""
