@@ -2097,8 +2097,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return CompareSettings(
             step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
             window=self.window(), thresholds=self.thresholds(),
-            source="current settings of the Model tab (the folder of run a "
-                   "is not a study of the Model tab)")
+            source="current settings of the Model sizing tab (the folder of "
+                   "run a is not a study of the Model sizing tab)")
 
     def _validate_launch(self, folder=None):
         """Shared pre-flight for a run: returns (prefs, workdir, cpus) or None

@@ -235,7 +235,7 @@ class SensitivityTab(QWidget):
 
         # QoI of the Model tab (same reduction, same eps_q) + other QoI.
         qoi_row = QHBoxLayout()
-        model_box = QGroupBox("QoI of the Model tab (judged against \u03b5_q)")
+        model_box = QGroupBox("QoI of the Model sizing tab (judged against \u03b5_q)")
         mg = QGridLayout(model_box)
         self._model_qoi_checks = {}
         for i, q in enumerate(mq.MODEL_QOIS):
@@ -922,8 +922,8 @@ class SensitivityTab(QWidget):
         Model-tab QoI `qois`; ValueError when one is missing or the ZOI
         leaves the zone the runs extract."""
         if self._model_settings_getter is None:
-            raise ValueError("the Model-tab QoI need the Optimization > "
-                             "Model tab")
+            raise ValueError("the Model sizing QoI need the Optimization > "
+                             "Model sizing tab")
         try:
             st = self._model_settings_getter()
             window = tuple(float(v) for v in st["window"])

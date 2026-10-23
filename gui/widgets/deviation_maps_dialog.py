@@ -365,7 +365,7 @@ class DeviationMapsDialog(QDialog):
                 if s is not None:
                     return s, None
             except Exception as e:
-                err += "; Model tab: %s" % e
+                err += "; Model sizing tab: %s" % e
         return None, err
 
     # ---- comparison ----------------------------------------------------
