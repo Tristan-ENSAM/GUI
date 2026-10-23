@@ -46,6 +46,7 @@ from gui.sensitivity.run_worker import SensitivityRunWorker
 from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
 from gui.widgets.machine_combo import MachineCombo
+from gui.widgets.workdir_button import workdir_button
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
@@ -262,6 +263,13 @@ class SensitivityTab(QWidget):
         bl.addWidget(field_box)
 
         ctrl = QHBoxLayout()
+        # Same pair as in the Model tab: where the run folders are, and the
+        # machine the runs go to.
+        self.btn_open_wd = workdir_button(self, self._prefs_getter)
+        ctrl.addWidget(self.btn_open_wd)
+        ctrl.addWidget(QLabel("Machine:"))
+        self.cmb_machine = MachineCombo(self._prefs_getter)
+        ctrl.addWidget(self.cmb_machine)
         ctrl.addStretch(1)
         self.lbl_cost = QLabel("—")
         f = QFont(); f.setBold(True); self.lbl_cost.setFont(f)
@@ -274,9 +282,6 @@ class SensitivityTab(QWidget):
         self.lbl_cpus.setToolTip("CPU cores used per run — synchronised with "
                                  "the Job tab (set it there).")
         ctrl.addWidget(self.lbl_cpus)
-        ctrl.addWidget(QLabel("Machine:"))
-        self.cmb_machine = MachineCombo(self._prefs_getter)
-        ctrl.addWidget(self.cmb_machine)
         self.btn_run = QPushButton("Run plan")
         self.btn_run.setToolTip("Launch every profile through Abaqus, "
                                 "sequentially, then analyse.")

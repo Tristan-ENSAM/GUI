@@ -46,8 +46,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter,
     QScrollArea, QFrame, QComboBox
 )
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -83,6 +81,7 @@ from gui.tabs.model_steps import ModelStepsMixin
 from gui.widgets.collapsible import CollapsibleSection
 from gui.widgets.geometry_preview import GeometryPreview
 from gui.widgets.machine_combo import MachineCombo
+from gui.widgets.workdir_button import workdir_button
 
 
 # Quantity -> bundle element-field name (velocity components V1/V2 are written
@@ -403,6 +402,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             le.setFixedWidth(64)
             self._q_eps[q] = le
             eps_row.addWidget(le)
+            # The unit stays visible once the field is filled (the
+            # placeholder only shows while it is empty).
+            ulbl = QLabel(_unit[q] if _unit[q] else "–")
+            ulbl.setToolTip(tip)
+            eps_row.addWidget(ulbl)
             eps_row.addSpacing(10)
         eps_row.addStretch(1)
         cg0.addLayout(eps_row, 1, 1)
@@ -485,12 +489,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 ag.addWidget(le, i, 1)
         win_row.addStretch(1)
         ag.addLayout(win_row, 1, 1, 1, 2)
-        mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("Machine:"))
-        self.cmb_machine = MachineCombo(self._prefs_getter)
-        mrow.addWidget(self.cmb_machine)
-        mrow.addStretch(1)
-        ag.addLayout(mrow, ag.rowCount(), 0, 1, 3)
         self.cb_reuse_runs = QCheckBox(
             "Reuse the finished runs of earlier studies")
         self.cb_reuse_runs.setChecked(OptimizationCfgDefaults.reuse_runs)
@@ -872,10 +870,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
         # ---- Status bar (always visible) --------------------------------
         bar = QHBoxLayout()
-        self.btn_open_wd = QPushButton("Open working dir")
-        self.btn_open_wd.setToolTip("Open the Preferences working directory.")
-        self.btn_open_wd.clicked.connect(self._open_working_dir)
+        # Where the runs go, next to where their folders are (as in the
+        # Sensitivity tab).
+        self.btn_open_wd = workdir_button(self, self._prefs_getter)
         bar.addWidget(self.btn_open_wd)
+        bar.addWidget(QLabel("Machine:"))
+        self.cmb_machine = MachineCombo(self._prefs_getter)
+        bar.addWidget(self.cmb_machine)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
@@ -2090,24 +2091,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             window=self.window(), thresholds=self.thresholds(),
             source="current settings of the Model tab (the folder of run a "
                    "is not a study of the Model tab)")
-
-    def _open_working_dir(self):
-        """Open the Preferences working directory in the file explorer."""
-        prefs = self._prefs_getter() if self._prefs_getter else None
-        wd = getattr(prefs, "default_workdir", None) if prefs else None
-        if not wd:
-            QMessageBox.information(self, "Working directory",
-                                    "No working directory set in Preferences.")
-            return
-        p = Path(wd)
-        if not p.exists():
-            try:
-                p.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                QMessageBox.warning(self, "Working directory",
-                                    "Cannot open '%s': %s" % (wd, e))
-                return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
     def _validate_launch(self, folder=None):
         """Shared pre-flight for a run: returns (prefs, workdir, cpus) or None
