@@ -28,7 +28,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
+    QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget)
 
 from matplotlib.figure import Figure
@@ -73,7 +73,7 @@ class DeviationMapsDialog(QDialog):
                  settings_getter=None):
         super().__init__(parent)
         self.setWindowTitle("Deviation maps between two runs")
-        self.resize(1250, 900)
+        self._fit_to_screen(parent)
         self._folders = []               # study folders, in the Study list
         self._folder_runs = {}           # str(folder) -> its finished runs
         self._runs = []                  # runs of the chosen Study entry
@@ -194,6 +194,21 @@ class DeviationMapsDialog(QDialog):
         if self._folders:
             self.cb_study.setCurrentIndex(self._study_index(self._folders[-1]))
         self._redraw()
+
+    def _fit_to_screen(self, parent):
+        """Open at 1250 x 900, or at 90 % of the available screen when that
+        is smaller (a 1920 x 1080 screen at 125-150 % scaling has only
+        about 700-830 px of height), centred on the screen."""
+        screen = (parent.screen() if parent is not None else None) \
+            or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1250, 900)
+            return
+        g = screen.availableGeometry()
+        w = min(1250, int(0.9 * g.width()))
+        h = min(900, int(0.9 * g.height()))
+        self.resize(w, h)
+        self.move(g.x() + (g.width() - w) // 2, g.y() + (g.height() - h) // 2)
 
     # ---- study folders -------------------------------------------------
     def _study_index(self, folder) -> int:

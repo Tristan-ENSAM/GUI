@@ -45,3 +45,17 @@ def test_sensitivity_intro_behind_show_help(qapp):
     assert tab.lbl_intro.isVisible()
     names = [tab.tabs_out.tabText(i) for i in range(tab.tabs_out.count())]
     assert names[:3] == ["Plan", "Log", "Table"]
+
+
+def test_group_titles_bold_and_disabled_colours():
+    assert "font-weight: 600; background" in theme.style_sheet()
+    assert theme.DISABLED_BG in theme.style_sheet()
+
+
+def test_deviation_window_fits_the_screen(qapp):
+    from gui.widgets.deviation_maps_dialog import DeviationMapsDialog
+    d = DeviationMapsDialog()
+    g = qapp.primaryScreen().availableGeometry()
+    assert d.height() == min(900, int(0.9 * g.height()))
+    assert d.width() <= max(min(1250, int(0.9 * g.width())),
+                            d.minimumSizeHint().width())
