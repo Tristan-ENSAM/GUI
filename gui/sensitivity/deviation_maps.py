@@ -108,13 +108,15 @@ def run_domain(params: dict) -> Dict[str, float]:
     return out
 
 
-def run_label(run: CachedRun) -> str:
-    """'ms 25600 | h 0.002 mm | D 0.2/0.2/0.2/0.2 | ms_run008 (folder)'."""
+def run_label(run: CachedRun, folder: bool = True) -> str:
+    """'ms 25600 | h 0.002 mm | D 0.2/0.2/0.2/0.2 | ms_run008 (folder)';
+    without the folder name when `folder` is False."""
     p = run.params
     d = run_domain(p)
-    return ("ms %g | h %g mm | D %g/%g/%g/%g | %s (%s)"
+    text = ("ms %g | h %g mm | D %g/%g/%g/%g | %s"
             % (run_ms(p), run_elem_size(p), d["h_wp"], d["h_void"],
-               d["l_wp"], d["l_void"], run.job, run.folder.name))
+               d["l_wp"], d["l_void"], run.job))
+    return "%s (%s)" % (text, run.folder.name) if folder else text
 
 
 def list_runs(folders: Sequence) -> List[CachedRun]:
@@ -153,6 +155,16 @@ class CompareSettings:
     window: Tuple[float, float]
     thresholds: Dict[str, float]
     evf_threshold: float = 0.5
+    # Share of eps_q given to the step (spec["eps_shares"] = [ms, h, D]):
+    # the study passes when its deviation / eps_q stays below it. 1 for an
+    # older folder (no shares) or settings not taken from a step folder.
+    share: float = 1.0
+    # Where the settings come from, for the window ("" : not said).
+    source: str = ""
+
+
+# Index of each step in spec["eps_shares"].
+_SHARE_INDEX = {"ms": 0, "mesh": 1, "domain": 2}
 
 
 def _zoi_tuple(z) -> Tuple[float, float, float, float]:
@@ -176,11 +188,20 @@ def settings_of_folder(folder) -> CompareSettings:
     grid = spec.get("grid_step")
     if grid is None:
         grid = spec.get("elem_size") or spec.get("finest_elem_size")
+    share = 1.0
+    shares = spec.get("eps_shares")
+    if shares and step in _SHARE_INDEX:
+        try:
+            share = float(shares[_SHARE_INDEX[step]])
+        except (TypeError, ValueError, IndexError):
+            share = 1.0
     return CompareSettings(
         step=step, zoi=_zoi_tuple(spec["zoi"]), grid_step=float(grid),
         window=tuple(float(v) for v in (spec.get("window") or (0.3, 1.0))),
         thresholds=thr,
-        evf_threshold=float(spec.get("evf_threshold", 0.5)))
+        evf_threshold=float(spec.get("evf_threshold", 0.5)),
+        share=share if math.isfinite(share) and share > 0 else 1.0,
+        source="config.json of %s" % Path(folder).name)
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +322,11 @@ class QuantityDeviation:
             warnings.simplefilter("ignore", RuntimeWarning)
             return np.abs(np.nanmean(b, axis=0) - np.nanmean(a, axis=0)
                           ) / self.eps
+
+    def point_deviation(self, i: int) -> np.ndarray:
+        """|b - a| / eps at ZOI point i over the frames, (Nt,) (NaN where
+        not compared)."""
+        return np.abs(self.b[:, i] - self.a[:, i]) / self.eps
 
     def n_compared(self) -> np.ndarray:
         """Number of frames compared per point (both runs material)."""
