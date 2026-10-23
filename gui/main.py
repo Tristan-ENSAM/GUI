@@ -129,11 +129,15 @@ class MainWindow(QMainWindow):
         self.experimental_tab = ExperimentalDataTab(
             write_geometry=self._write_reference_geometry)
 
+        # In the order of the work (decision 2026-10-23): size the model
+        # (ms*, h*, D*) first, then the sensitivity studies run on it, then
+        # the identification. "Model sizing", not "Model", so it is not
+        # mistaken for the "Numerical Model" tab.
         self.opt_tabs = QTabWidget()
-        self.opt_tabs.addTab(self.sensitivity_tab,   "Sensitivity")
-        self.opt_tabs.addTab(self.optimization_tab,  "Model")
+        self.opt_tabs.addTab(self.optimization_tab,  "1 · Model sizing")
+        self.opt_tabs.addTab(self.sensitivity_tab,   "2 · Sensitivity")
         self.opt_tabs.addTab(_placeholder("Inverse identification — coming later"),
-                             "Inverse identification")
+                             "3 · Inverse identification")
 
         tabs = QTabWidget()
         tabs.addTab(self.model_tabs,        "Numerical Model")
@@ -430,7 +434,8 @@ class MainWindow(QMainWindow):
         if running:
             QMessageBox.information(
                 self, title,
-                "A study of the Model tab (Optimization > Model) is running. "
+                "A study of the Model sizing tab (Optimization > Model sizing) is "
+                "running. "
                 "Its results go into the current profile: wait for it to end, "
                 "or cancel it, before opening another profile.")
         return running
@@ -608,8 +613,8 @@ class MainWindow(QMainWindow):
         # Same for a study of the Model tab (or 'Run all steps').
         model_running = self.optimization_tab.is_running()
         if model_running and not confirm(
-                "Model tab study running",
-                "A study of the Model tab is still running. Quitting now\n"
+                "Model sizing study running",
+                "A study of the Model sizing tab is still running. Quitting now\n"
                 "stops it and terminates the current Abaqus job; its result\n"
                 "is not recorded. The finished runs stay in the study\n"
                 "folder: 'Open a study' reads them back or resumes it.\n\n"
@@ -647,6 +652,9 @@ def main():
             traceback.print_exc()
 
     app = QApplication(sys.argv)
+    # One look for every tab (gui/widgets/theme.py); before any widget.
+    from gui.widgets.theme import apply_theme
+    apply_theme(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

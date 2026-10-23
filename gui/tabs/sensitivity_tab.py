@@ -48,6 +48,7 @@ from gui.core.remote_exec import is_remote, launch_problems
 from gui.widgets.field_viewer import FieldViewer
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.workdir_button import workdir_button
+from gui.widgets.theme import mark_primary
 from gui.core.sta_parser import parse_sta
 from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
@@ -143,6 +144,17 @@ class SensitivityTab(QWidget):
             "backward) or 2k+1 (central)."
         )
         intro.setWordWrap(True)
+        # Grey help, hidden until "Show help" (as in the Model sizing tab).
+        intro.setStyleSheet("color:#6b7280;")
+        intro.setVisible(False)
+        self.lbl_intro = intro
+        top = QHBoxLayout()
+        top.addStretch(1)
+        self.cb_help = QCheckBox("Show help")
+        self.cb_help.setToolTip("Show the grey explanation of this tab.")
+        self.cb_help.toggled.connect(intro.setVisible)
+        top.addWidget(self.cb_help)
+        root.addLayout(top)
         root.addWidget(intro)
 
         split = QSplitter(Qt.Vertical)
@@ -322,6 +334,7 @@ class SensitivityTab(QWidget):
                                  "the Job tab (set it there).")
         ctrl.addWidget(self.lbl_cpus)
         self.btn_run = QPushButton("Run plan")
+        mark_primary(self.btn_run)
         self.btn_run.setToolTip("Launch every profile through Abaqus, "
                                 "sequentially, then analyse.")
         self.btn_run.setEnabled(False)
@@ -360,11 +373,11 @@ class SensitivityTab(QWidget):
         self.log.setReadOnly(True)
         self.log.setFont(QFont("Consolas, monospace"))
         self.log.setPlaceholderText("Abaqus output streams here during a run.")
-        self.tabs_out.addTab(self.log, "Run log")
+        self.tabs_out.addTab(self.log, "Log")
 
         self.results_table = QTableWidget(0, 0)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.tabs_out.addTab(self.results_table, "Results")
+        self.tabs_out.addTab(self.results_table, "Table")
 
         chart_w = QWidget(); cv = QVBoxLayout(chart_w)
         crow = QHBoxLayout()
@@ -442,13 +455,13 @@ class SensitivityTab(QWidget):
         self.btn_zoi_propose.setToolTip(
             "S* = max over (field, parameter) of mean over T of "
             "|dq/dp \u00b7 \u03b4| / \u03b5_q, with \u03b5_q and the window T "
-            "of the Model tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
+            "of the Model sizing tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
             "run. ZOI = smallest rectangle containing every element with "
             "S* \u2265 1.")
         self.btn_zoi_propose.setEnabled(False)
         self.btn_zoi_propose.clicked.connect(self._on_propose_zoi)
         zrow.addWidget(self.btn_zoi_propose)
-        self.btn_zoi_apply = QPushButton("Copy ZOI to the Model tab")
+        self.btn_zoi_apply = QPushButton("Copy ZOI to the Model sizing tab")
         self.btn_zoi_apply.setEnabled(False)
         self.btn_zoi_apply.clicked.connect(self._on_apply_zoi)
         zrow.addWidget(self.btn_zoi_apply)
@@ -1548,7 +1561,7 @@ class SensitivityTab(QWidget):
 
     def _model_settings(self):
         if self._model_settings_getter is None:
-            raise ValueError("the Model tab settings are not available")
+            raise ValueError("the Model sizing tab settings are not available")
         st = self._model_settings_getter()
         return dict(st.get("eps") or {}), tuple(st["window"])
 
@@ -1559,13 +1572,13 @@ class SensitivityTab(QWidget):
             eps, window = self._model_settings()
         except Exception as e:
             self.lbl_zoi.setText("Set \u03b5_q and the window T in the Model "
-                                 "tab first (%s)." % e)
+                                 "sizing tab first (%s)." % e)
             return
         need = sorted({zp.FIELD_TO_EPS[v] for v in self._field_maps
                        if v in zp.FIELD_TO_EPS} - {k for k, v in eps.items()
                                                     if v and v > 0})
         if need:
-            self.lbl_zoi.setText("Missing \u03b5_q in the Model tab: %s."
+            self.lbl_zoi.setText("Missing \u03b5_q in the Model sizing tab: %s."
                                  % ", ".join(need))
             return
         plan = self._run_plan or self.plan

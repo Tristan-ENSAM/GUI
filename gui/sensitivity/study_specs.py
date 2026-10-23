@@ -250,13 +250,13 @@ def read_study_folder(folder, defaults: Optional[dict] = None
         data = json.loads(path.read_text(encoding="utf-8"))
     except OSError:
         raise ValueError("%s has no config.json: it is not a study folder "
-                         "of the Model tab." % folder.name)
+                         "of the Model sizing tab." % folder.name)
     except ValueError:
         raise ValueError("%s: config.json is not valid JSON." % folder.name)
     prefix = data.get("study") if isinstance(data, dict) else None
     step = STEP_OF_PREFIX.get(prefix)
     if step is None:
-        raise ValueError("%s is a '%s' study, not a step of the Model tab "
+        raise ValueError("%s is a '%s' study, not a step of the Model sizing tab "
                          "(mass scaling, mesh convergence or domain)."
                          % (folder.name, prefix))
     spec = dict(data.get("parameters") or {})

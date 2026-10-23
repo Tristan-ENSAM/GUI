@@ -1034,7 +1034,7 @@ def test_quitting_during_a_study_asks_and_stops_it(qapp, monkeypatch):
     ev = QCloseEvent()
     w.closeEvent(ev)
     assert not ev.isAccepted() and stopped == []
-    assert asked == ["Model tab study running"]
+    assert asked == ["Model sizing study running"]
     answer["v"] = QMessageBox.Yes
     ev = QCloseEvent()
     w.closeEvent(ev)
@@ -1348,7 +1348,7 @@ def test_a_declined_quit_stops_nothing(qapp, monkeypatch):
     w.closeEvent(ev)
     w.optimization_tab._pipeline = False
     assert asked == ["Sensitivity campaign running",
-                     "Model tab study running"]
+                     "Model sizing study running"]
     assert not ev.isAccepted() and stopped == []
 
 
