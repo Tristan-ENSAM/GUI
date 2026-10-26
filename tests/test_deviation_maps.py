@@ -345,3 +345,64 @@ def test_share_of_the_step_is_the_threshold(tmp_path):
             "domain_dims": {}, "eps_shares": [0.5, 0.25, 0.25]}}))
     s = dm.settings_of_folder(folder)
     assert s.share == 0.5 and "ms" in s.source
+
+
+def test_window_result_files_repeatability(qapp, tmp_path, monkeypatch):
+    """Two copies of one run, added as result files outside any study
+    folder: compared with the tab's settings, deviation 0, 'identical'."""
+    import shutil
+    import gui.widgets.deviation_maps_dialog as dlg_mod
+    monkeypatch.setattr(dlg_mod, "run_async",
+                        lambda fn, done, parent: done(fn()))
+
+    def _no_box(*a, **k):
+        raise AssertionError("message box: %r" % (a[2:],))
+    monkeypatch.setattr(dlg_mod.QMessageBox, "warning", _no_box)
+    src = _study_folder(tmp_path)
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    for k in (0, 1):
+        for ext in (".results.npz", ".meta.json"):
+            shutil.copy(src / ("ms_run000" + ext),
+                        loose / ("TEST_rep_%d%s" % (k, ext)))
+    (loose / "orphan.results.npz").write_bytes(b"")
+    s = dm.settings_of_folder(src)
+    s.source = "tab"
+    dlg = dlg_mod.DeviationMapsDialog(settings_getter=lambda: s)
+    boxes = []
+    monkeypatch.setattr(dlg_mod.QMessageBox, "information",
+                        lambda *a, **k: boxes.append(a[2]))
+    n = dlg.add_files([loose / "TEST_rep_0.results.npz",
+                       loose / "TEST_rep_1.meta.json",
+                       loose / "TEST_rep_0.results.npz",
+                       loose / "orphan.results.npz"])
+    assert n == 2
+    assert boxes and "orphan" in boxes[0] and "meta.json" in boxes[0]
+    assert dlg.cb_study.currentData() == dlg_mod._FILES
+    assert dlg.cb_a.currentText().startswith("ms 1 |")
+    assert {dlg._runs[dlg.cb_a.currentData()].job,
+            dlg._runs[dlg.cb_b.currentData()].job} == {"TEST_rep_0",
+                                                       "TEST_rep_1"}
+    dlg._on_compare()
+    assert dlg._pair is not None and dlg._identical()
+    assert all(d.e_inst == 0.0 for d in dlg._pair.quantities.values())
+    assert "identical" in dlg.lbl_summary.text()
+    # A study folder next to the files: 'All the folders' groups both.
+    dlg.add_folder(src)
+    dlg.cb_study.setCurrentIndex(dlg.cb_study.findData(dlg_mod._ALL))
+    heads = [dlg.cb_a.itemText(i) for i in range(dlg.cb_a.count())
+             if dlg.cb_a.itemData(i) is None]
+    assert heads == ["— %s —" % src.name, "— Result files —"]
+
+
+def test_run_of_file_and_measured_size(tmp_path):
+    (tmp_path / "r.results.npz").write_bytes(b"")
+    with pytest.raises(ValueError):
+        dm.run_of_file(tmp_path / "r.results.npz")
+    (tmp_path / "r.meta.json").write_text("{}", encoding="utf-8")
+    run = dm.run_of_file(tmp_path / "r.meta.json")
+    assert run.job == "r" and run.params == {}
+    assert run.npz == tmp_path / "r.results.npz"
+    with pytest.raises(ValueError):
+        dm.run_of_file(tmp_path / "r.txt")
+    assert dm.bundle_elem_size(_Bundle(h=0.005)) == pytest.approx(0.005)

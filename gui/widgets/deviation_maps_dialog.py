@@ -44,6 +44,7 @@ _VIEWS = (("mean", "Mean over T of |b − a| / ε"),
 _UNITS = {"Vx": "mm/s", "Vy": "mm/s", "T": "K", "EVF": "-", "Fc": "N/mm",
           "Ff": "N/mm"}
 _ALL = "__all__"                    # Study entry listing every folder
+_FILES = "__files__"                # Study entry of the result files added
 _BASE_TEXT = Qt.UserRole + 1        # run label without the "taken" note
 _C_THR = "#c0392b"                  # threshold of the step (red)
 
@@ -87,7 +88,8 @@ class DeviationMapsDialog(QDialog):
         lay = QVBoxLayout(self)
         intro = QLabel(
             "Where and when two runs of a study differ. Pick the study "
-            "folder, the reference run (a) and the compared run (b), then "
+            "folder (or add result files), the reference run (a) and the "
+            "compared run (b), then "
             "Compare. The value shown is |b − a| / ε_q: 1 means a deviation "
             "equal to the admitted deviation ε_q. Click a point of the map "
             "to see the two curves there and their deviation over time.")
@@ -107,6 +109,16 @@ class DeviationMapsDialog(QDialog):
         b = QPushButton("Add a folder…")
         b.setToolTip("Add a study folder to the list and select it.")
         b.clicked.connect(self._on_add_folder)
+        row.addWidget(b)
+        b = QPushButton("Add result files…")
+        b.setToolTip(
+            "Add single runs by their result file (<job>.results.npz or\n"
+            "<job>.meta.json; both must be in the same folder), e.g. two\n"
+            "runs made with the same parameters to show their\n"
+            "repeatability. They are listed under 'Result files'. Outside a\n"
+            "study folder, the comparison uses the Model sizing tab's\n"
+            "settings (ZOI, sampling step, T, ε_q).")
+        b.clicked.connect(self._on_add_files)
         row.addWidget(b)
         lay.addLayout(row)
         self.lbl_folders = QLabel("No study folder.")
@@ -220,8 +232,9 @@ class DeviationMapsDialog(QDialog):
         keep = self.cb_study.currentData() if select is None else str(select)
         self.cb_study.blockSignals(True)
         self.cb_study.clear()
-        if not self._folders:
-            self.cb_study.addItem("(add a study folder)", None)
+        files = self._folder_runs.get(_FILES, [])
+        if not self._folders and not files:
+            self.cb_study.addItem("(add a study folder or result files)", None)
         for f in self._folders:
             n = len(self._folder_runs.get(str(f), ()))
             self.cb_study.addItem("%s  (%d finished run%s)"
@@ -229,9 +242,11 @@ class DeviationMapsDialog(QDialog):
                                   str(f))
             self.cb_study.setItemData(self.cb_study.count() - 1, str(f),
                                       Qt.ToolTipRole)
-        if len(self._folders) > 1:
-            self.cb_study.addItem("All the folders (%d)" % len(self._folders),
-                                  _ALL)
+        if files:
+            self.cb_study.addItem("Result files  (%d)" % len(files), _FILES)
+        n_groups = len(self._folders) + (1 if files else 0)
+        if n_groups > 1:
+            self.cb_study.addItem("All the folders (%d)" % n_groups, _ALL)
         i = self.cb_study.findData(keep) if keep is not None else -1
         self.cb_study.setCurrentIndex(max(i, 0))
         self.cb_study.blockSignals(False)
@@ -273,18 +288,59 @@ class DeviationMapsDialog(QDialog):
         if folder:
             self.add_folder(folder)
 
+    def add_files(self, paths, quiet=False) -> int:
+        """Add single result files to the 'Result files' entry (and select
+        it); returns the number of files added. A file already listed or
+        not a <job>.results.npz is skipped."""
+        files = self._folder_runs.setdefault(_FILES, [])
+        known = {Path(r.npz).resolve() for r in files}
+        added, refused = 0, []
+        for p in paths or ():
+            try:
+                run = dm.run_of_file(p)
+            except ValueError as e:
+                refused.append(str(e))
+                continue
+            if Path(run.npz).resolve() in known:
+                continue
+            known.add(Path(run.npz).resolve())
+            files.append(run)
+            added += 1
+        if refused and not quiet:
+            QMessageBox.information(self, "Add result files",
+                                    "\n".join(refused))
+        if added:
+            self._rebuild_study_list(select=_FILES)
+        return added
+
+    def _on_add_files(self):
+        files = self._folder_runs.get(_FILES, [])
+        start = (str(files[-1].folder) if files
+                 else str(self._folders[-1]) if self._folders
+                 else self._start_dir)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add result files", start,
+            "Result files (*.results.npz *.meta.json);;All files (*)")
+        if paths:
+            self.add_files(paths)
+
     def _on_study(self, *_):
         key = self.cb_study.currentData()
         if key == _ALL:
             folders = list(self._folders)
+            if self._folder_runs.get(_FILES):
+                folders.append(_FILES)
         elif key:
-            folders = [Path(key)]
+            folders = [key if key == _FILES else Path(key)]
         else:
             folders = []
         self._runs = [r for f in folders
                       for r in self._folder_runs.get(str(f), ())]
         if not folders:
             self.lbl_folders.setText("No study folder.")
+        elif key == _FILES:
+            self.lbl_folders.setText(
+                "Result files: %s" % ", ".join(str(r.npz) for r in self._runs))
         elif key == _ALL:
             self.lbl_folders.setText(
                 "Runs of every folder, grouped by folder (%d finished runs)."
@@ -301,15 +357,16 @@ class DeviationMapsDialog(QDialog):
         for cb in (self.cb_a, self.cb_b):
             cb.blockSignals(True)
             cb.clear()
-            folder = None
+            group = None
             for i, r in enumerate(self._runs):
-                if grouped and r.folder != folder:
-                    folder = r.folder
-                    cb.addItem("— %s —" % folder.name, None)
+                g = self._group_of(r)
+                if grouped and g != group:
+                    group = g
+                    cb.addItem("— %s —" % g, None)
                     item = cb.model().item(cb.count() - 1)
                     item.setEnabled(False)
                     item.setFont(bold)
-                text = dm.run_label(r, folder=False)
+                text = self._label(r, folder=False)
                 cb.addItem(text, i)
                 cb.setItemData(cb.count() - 1, text, _BASE_TEXT)
             cb.blockSignals(False)
@@ -329,6 +386,23 @@ class DeviationMapsDialog(QDialog):
             cb.setCurrentIndex(cb.findData(i))
             cb.blockSignals(False)
         self._mark_taken()
+
+    def _is_file(self, run) -> bool:
+        return any(r is run for r in self._folder_runs.get(_FILES, ()))
+
+    def _group_of(self, run) -> str:
+        return "Result files" if self._is_file(run) else run.folder.name
+
+    def _label(self, run, folder=True) -> str:
+        """dm.run_label, or the file name when the run's parameters are
+        unknown (a result file without its .meta.json)."""
+        if run.params:
+            text = dm.run_label(run, folder=folder)
+        else:
+            text = "%s | parameters unknown (none in its .meta.json)" % run.job
+            if folder:
+                text += " (%s)" % run.folder.name
+        return text
 
     def _run_index(self, cb):
         i = cb.currentData()
@@ -406,12 +480,19 @@ class DeviationMapsDialog(QDialog):
         def work():
             from gui.results.reader import ResultsBundle
             try:
+                measured = []
                 with ResultsBundle.load(ra.npz) as ba, \
                         ResultsBundle.load(rb.npz) as bb:
-                    pair = dm.compare_runs(
-                        ba, bb, settings, dm.run_elem_size(ra.params),
-                        dm.run_elem_size(rb.params))
-                pair.label_a, pair.label_b = dm.run_label(ra), dm.run_label(rb)
+                    sizes = []
+                    for run, bundle in ((ra, ba), (rb, bb)):
+                        h = dm.run_elem_size(run.params)
+                        if not math.isfinite(h):
+                            h = dm.bundle_elem_size(bundle)
+                            measured.append("%s: %g mm" % (run.job, h))
+                        sizes.append(h)
+                    pair = dm.compare_runs(ba, bb, settings, *sizes)
+                pair.label_a, pair.label_b = self._label(ra), self._label(rb)
+                pair.measured_sizes = measured
                 return ("ok", pair, (ra.job, rb.job))
             except Exception as e:
                 return ("error", "%s: %s" % (type(e).__name__, e))
@@ -463,7 +544,22 @@ class DeviationMapsDialog(QDialog):
                "linear (different meshes)" if p.linear else
                "nearest element (as the studies)",
                _fmt(p.frame_offset_over_interval, "%.3g"),
-               s.source or "–"))
+               s.source or "–")
+            + ("<br>Element size measured on the mesh (not in the "
+               ".meta.json): %s." % ", ".join(p.measured_sizes)
+               if p.measured_sizes else "")
+            + ("<br><b>The two runs are identical: |b − a| = 0 on every "
+               "compared sample of every output.</b>" if self._identical()
+               else ""))
+
+    def _identical(self) -> bool:
+        """True when b equals a on every compared sample of every output
+        (e.g. a run and its exact repeat)."""
+        qs = list(self._pair.quantities.values()) if self._pair else []
+        return bool(qs) and all(
+            np.array_equal(np.isfinite(d.a), np.isfinite(d.b))
+            and np.all(np.nan_to_num(d.a) == np.nan_to_num(d.b))
+            for d in qs)
 
     def _current(self):
         if self._pair is None:
