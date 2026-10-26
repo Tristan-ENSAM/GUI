@@ -131,6 +131,58 @@ def list_runs(folders: Sequence) -> List[CachedRun]:
     return sorted(cache.runs, key=key)
 
 
+def run_of_file(path) -> CachedRun:
+    """A run from one result file, outside a study folder (e.g. two runs
+    made with the same parameters, for repeatability). `path` is the
+    `<job>.results.npz` or its `<job>.meta.json`; both must be there (the
+    results reader needs the pair). The parameters are the meta's
+    `model_config`, empty when an older meta has none (the element size is
+    then measured on the mesh at comparison, see bundle_elem_size). Raises
+    ValueError with a message for the user."""
+    path = Path(path)
+    name = path.name
+    for suffix in (".results.npz", ".meta.json", ".results.json"):
+        if name.endswith(suffix):
+            job = name[:-len(suffix)]
+            break
+    else:
+        raise ValueError("%s is not a result file (<job>.results.npz or "
+                         "<job>.meta.json)." % name)
+    npz = path.with_name(job + ".results.npz")
+    meta = path.with_name(job + ".meta.json")
+    if not meta.is_file():
+        meta = path.with_name(job + ".results.json")
+    missing = [p.name for p in (npz, meta) if not p.is_file()]
+    if missing:
+        raise ValueError("%s: %s missing next to it (a result is the pair "
+                         "<job>.results.npz + <job>.meta.json)."
+                         % (name, " and ".join(missing)))
+    params = {}
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("model_config"),
+                                                 dict):
+            params = data["model_config"]
+    except (OSError, ValueError):
+        params = {}
+    return CachedRun(folder=npz.parent, job=job, key="file:%s" % npz,
+                     params=params)
+
+
+def bundle_elem_size(bundle) -> float:
+    """Element size of a run measured on its Eulerian mesh: the median gap
+    between the distinct x of the element centroids (the CEL mesh is
+    regular). NaN when it cannot be measured."""
+    try:
+        inst = eulerian_instance(bundle)
+        x = np.unique(np.round(element_centroids_xy(bundle, inst)[:, 0], 9))
+        gaps = np.diff(x)
+        gaps = gaps[gaps > 0]
+        return float(np.median(gaps)) if gaps.size else float("nan")
+    except Exception:
+        return float("nan")
+
+
 def default_reference(runs: Sequence[CachedRun], step: Optional[str]) -> int:
     """Index of the natural reference: the smallest ms (ms study), the finest
     mesh (mesh study), the largest domain (domain study). -1 if no run."""
@@ -344,6 +396,9 @@ class PairDeviation:
     frame_offset_over_interval: float = float("nan")
     label_a: str = ""
     label_b: str = ""
+    # "<job>: <h> mm" of the runs whose element size was measured on the
+    # mesh (no parameters: a result file without its .meta.json).
+    measured_sizes: List[str] = field(default_factory=list)
 
     def nearest_point(self, x: float, y: float) -> int:
         d = (self.points[:, 0] - x) ** 2 + (self.points[:, 1] - y) ** 2
