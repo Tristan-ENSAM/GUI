@@ -236,11 +236,11 @@ def prepare_parameters(model_cfg, run_cfg):
     inter_heat_gen         = bool( inter.get("heat_generation",        False))
     inter_heat_to_slave    = float(inter.get("heat_fraction_to_slave",  0.5))
     inter_heat_to_master   = float(inter.get("heat_fraction_to_master", 0.5))
-    # Thermal contact conductance: written only when "set"; otherwise Abaqus
+    # Thermal contact conductance: written only when given; otherwise Abaqus
     # applies its build-dependent default (changed by 2022 FD02).
-    inter_conductance_set  = str(  inter.get("conductance_mode", "abaqus_default")) == "set"
-    inter_conductance      = float(inter.get("gap_conductance",        0.0))
-    inter_cond_clearance   = float(inter.get("conductance_clearance",  0.001))
+    inter_conductance      = inter.get("gap_conductance", None)
+    if inter_conductance is not None:
+        inter_conductance = float(inter_conductance)
 
     # -----------------------------------------------------------------------------
     # Boundary / initial conditions parameters
@@ -516,9 +516,7 @@ def create_interaction(model, RP, tool_elem, p):
     inter_pressure = p["inter_pressure"]
     inter_heat_gen = p["inter_heat_gen"]
     inter_heat_to_slave = p["inter_heat_to_slave"]
-    inter_conductance_set = p["inter_conductance_set"]
     inter_conductance = p["inter_conductance"]
-    inter_cond_clearance = p["inter_cond_clearance"]
     #%%% Contact
     # All knobs (tangential formulation, friction coefficient, slip tolerance,
     # pressure-overclosure law, heat generation + fractions) come from the GUI's
@@ -556,15 +554,14 @@ def create_interaction(model, RP, tool_elem, p):
         # `inter_heat_to_master` don't sum to 1, the GUI value of
         # `heat_fraction_to_master` is ignored — Abaqus only stores one of them.
 
-    # Optional explicit thermal contact conductance: k at zero clearance,
-    # linear to 0 at `inter_cond_clearance` (constant beyond the table).
-    if inter_conductance_set:
+    # Optional explicit thermal contact conductance: one table row, so the
+    # conductance is the same constant k whatever the clearance.
+    if inter_conductance is not None:
         IntProp.ThermalConductance(
             definition=TABULAR, clearanceDependency=ON,
             pressureDependency=OFF, temperatureDependencyC=OFF,
             massFlowRateDependencyC=OFF, dependenciesC=0,
-            clearanceDepTable=((inter_conductance, 0.0),
-                               (0.0, inter_cond_clearance)),
+            clearanceDepTable=((inter_conductance, 0.0),),
         )
 
     model.ContactExp(name='Contact', createStepName='Initial',
