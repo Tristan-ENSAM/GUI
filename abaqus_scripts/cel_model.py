@@ -508,10 +508,11 @@ def create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p
     return RP, tool_elem
 
 
-# Abaqus 2022 GA refuses `slaveFraction` ("keyword error on slaveFraction",
-# CL-WTS-1, 2026-10-26); newer releases name the slave side "secondary".
-# The keyword is tried under each name; with the Abaqus default fraction
-# (0.5, *GAP HEAT GENERATION) it can be left out altogether.
+# Abaqus 2022 names the fraction `secondaryFraction` (Scripting Reference
+# 2022, GapHeatGeneration object; default 0.5) and refuses `slaveFraction`
+# ("keyword error on slaveFraction", CL-WTS-1, 2026-10-26). `slaveFraction`
+# is kept as a fallback for older releases; with the default fraction 0.5
+# the keyword can be left out altogether.
 _HEAT_FRACTION_KEYWORDS = ("secondaryFraction", "slaveFraction")
 _ABAQUS_DEFAULT_SLAVE_FRACTION = 0.5
 
