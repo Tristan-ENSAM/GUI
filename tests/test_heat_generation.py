@@ -65,3 +65,16 @@ def test_non_default_fraction_without_keyword_raises():
     with pytest.raises(TypeError):
         _helper()(prop, 1.0, 0.3)
     assert prop.calls == []
+
+
+def test_create_interaction_binds_every_parameter_it_uses():
+    # Regression (2026-10-26): create_interaction used inter_heat_conversion
+    # without reading it from `p`, a NameError only seen inside Abaqus.
+    tree = ast.parse(_MODEL.read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "create_interaction")
+    names = [n for n in ast.walk(fn) if isinstance(n, ast.Name)
+             and n.id.startswith("inter_")]
+    used = {n.id for n in names if isinstance(n.ctx, ast.Load)}
+    bound = {n.id for n in names if isinstance(n.ctx, ast.Store)}
+    assert used <= bound, sorted(used - bound)
