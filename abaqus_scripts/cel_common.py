@@ -229,6 +229,19 @@ def resolve_tool_translation(h_tool, l_tool, r_tool, rake_deg, clear_deg,
 # ---------------------------------------------------------------------------
 # Discretisation
 # ---------------------------------------------------------------------------
+# Clearance [mm] of the second row of a constant conductance table. Abaqus
+# refuses a one-row table ("two or more pairs of data") and keeps the last
+# value beyond the table, so k is the same at any clearance.
+CONDUCTANCE_TABLE_CLEARANCE = 1.0
+
+
+def conductance_table(k):
+    """clearanceDepTable for a constant thermal contact conductance k:
+    ((k, 0), (k, CONDUCTANCE_TABLE_CLEARANCE))."""
+    k = float(k)
+    return ((k, 0.0), (k, CONDUCTANCE_TABLE_CLEARANCE))
+
+
 def discretize(dim, element_size):
     """Round `dim` DOWN to the nearest multiple of `element_size` (floor).
 

@@ -24,8 +24,9 @@ from mesh import *
 from interaction import *
 from regionToolset import *
 
-from cel_common import (cfg_get, discretize, is_replay_file,
-                        resolve_mapping, resolve_tool_translation)
+from cel_common import (cfg_get, conductance_table, discretize,
+                        is_replay_file, resolve_mapping,
+                        resolve_tool_translation)
 
 _resolve_tool_translation = resolve_tool_translation
 _resolve_mapping = resolve_mapping
@@ -585,14 +586,14 @@ def create_interaction(model, RP, tool_elem, p):
         # to 1, the GUI value of `heat_fraction_to_master` is ignored —
         # Abaqus only stores one of them.
 
-    # Optional explicit thermal contact conductance: one table row, so the
-    # conductance is the same constant k whatever the clearance.
+    # Optional explicit thermal contact conductance: the same constant k
+    # whatever the clearance (two-row table, see cel_common).
     if inter_conductance is not None:
         IntProp.ThermalConductance(
             definition=TABULAR, clearanceDependency=ON,
             pressureDependency=OFF, temperatureDependencyC=OFF,
             massFlowRateDependencyC=OFF, dependenciesC=0,
-            clearanceDepTable=((inter_conductance, 0.0),),
+            clearanceDepTable=conductance_table(inter_conductance),
         )
 
     model.ContactExp(name='Contact', createStepName='Initial',
