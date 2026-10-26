@@ -147,6 +147,9 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
     assert res["margin"] == pytest.approx(0.03)          # 2 t1
     assert res["rc"].t_first == pytest.approx(b.times[40])
     dlg._on_done(res)
+    # one tab of plots per check, all filled
+    assert dlg.tabs.count() == 3
+    assert all(f.axes for f in dlg.figs.values())
     text = dlg.txt.toPlainText()
     assert "proposed window T" in text and "A = 40 dB needs" in text
     out = tmp_path / "s.csv"
@@ -155,6 +158,14 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
         lambda *a, **k: (str(out), ""))
     dlg._save()
     assert out.exists() and out.with_suffix(".xlsx").exists()
+
+
+def test_dialog_fits_the_screen(qapp):
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.preliminary_checks_dialog import PreliminaryChecksDialog
+    dlg = PreliminaryChecksDialog()
+    g = QApplication.primaryScreen().availableGeometry()
+    assert dlg.width() <= g.width() and dlg.height() <= g.height()
 
 
 def test_model_tab_opens_the_dialog(qapp):
