@@ -1695,7 +1695,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return n or "Untitled"
 
     def _study_run_dir(self, workdir, prefix, study_config):
-        """Timestamped per-study folder {profile}_{PREFIX}_{machine}_{stamp}
+        """Timestamped per-study folder {machine}__{profile}__{type}__{stamp}
         + config.json
         (via gui.core.run_output). Falls back to the flat working dir if the
         folder cannot be created."""
@@ -1703,7 +1703,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         try:
             return create_study_dir(workdir, self._profile_name(), prefix,
                                     study_config,
-                                    machine=self.cmb_machine.machine_label())
+                                    machine=self.cmb_machine.machine_host())
         except OSError:
             log_swallowed("creating study dir", level=logging.DEBUG)
             return Path(workdir)

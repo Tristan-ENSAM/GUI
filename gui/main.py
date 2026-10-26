@@ -89,7 +89,8 @@ class MainWindow(QMainWindow):
         self.step_tab        = StepTab(self.cfg)
         # JobTab takes a callable so it always sees the freshest prefs
         # (the user may edit them mid-session via Preferences dialog).
-        self.job_tab         = JobTab(self.cfg, lambda: self.prefs)
+        self.job_tab         = JobTab(self.cfg, lambda: self.prefs,
+                                      profile_name_getter=self._profile_name)
         self.results_tab     = ResultsTab()
         self.sensitivity_tab = SensitivityTab(
             self.cfg, lambda: self.prefs,
