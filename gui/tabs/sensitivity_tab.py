@@ -1105,7 +1105,8 @@ class SensitivityTab(QWidget):
         cpus = self._current_cpus()
         _study_cfg = self._plan_record(field_vars, cpus)
         try:
-            wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg)
+            wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg,
+                                  machine=self.cmb_machine.machine_label())
         except OSError:
             pass   # fall back to the flat working directory
 

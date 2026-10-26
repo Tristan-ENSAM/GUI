@@ -112,13 +112,15 @@ _JOB_RE_CACHE: Dict[str, "re.Pattern"] = {}
 def _job_re(prefix: str):
     pat = _JOB_RE_CACHE.get(prefix)
     if pat is None:
-        pat = re.compile(r"^%s_run(\d+)\." % re.escape(prefix), re.IGNORECASE)
+        # `<prefix>_runNNN.` (older folders) or `<prefix>_runNNN_<tag>.`
+        pat = re.compile(r"^%s_run(\d+)(?:_[^.]*)?\." % re.escape(prefix),
+                         re.IGNORECASE)
         _JOB_RE_CACHE[prefix] = pat
     return pat
 
 
 def next_job_index(folder, prefix: str) -> int:
-    """First run index after every `<prefix>_runNNN.*` file of `folder`, so
+    """First run index after every `<prefix>_runNNN[_tag].*` file of `folder`, so
     a study resumed in its folder never reuses the name of an earlier run."""
     folder = Path(folder)
     pat = _job_re(prefix)
