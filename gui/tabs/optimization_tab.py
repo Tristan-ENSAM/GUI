@@ -1695,13 +1695,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return n or "Untitled"
 
     def _study_run_dir(self, workdir, prefix, study_config):
-        """Timestamped per-study folder {profile}_{PREFIX}_{stamp} + config.json
+        """Timestamped per-study folder {profile}_{PREFIX}_{machine}_{stamp}
+        + config.json
         (via gui.core.run_output). Falls back to the flat working dir if the
         folder cannot be created."""
         from gui.core.run_output import create_study_dir
         try:
             return create_study_dir(workdir, self._profile_name(), prefix,
-                                    study_config)
+                                    study_config,
+                                    machine=self.cmb_machine.machine_label())
         except OSError:
             log_swallowed("creating study dir", level=logging.DEBUG)
             return Path(workdir)
@@ -1740,6 +1742,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         numbered after the runs already in `run_dir`, so a resumed study
         never overwrites one of its earlier runs."""
         import subprocess
+        from gui.core.run_output import job_name, model_run_tag
         from gui.sensitivity.run_cache import (
             copy_run, next_job_index, remove_job_files, same_folder,
             sta_outcome, write_failed_marker)
@@ -1797,7 +1800,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 # A copy in this study's folder: the folder stays complete
                 # when the other one is moved or deleted.
                 i = counter["i"]; counter["i"] += 1
-                job = "%s_run%03d" % (prefix, i)
+                job = job_name(prefix, i, model_run_tag(prefix, cfg))
                 if copy_run(hit.folder, hit.job, run_dir, job):
                     copied = (cache.add_run(run_dir, job)
                               if cache is not None else None)
@@ -1843,7 +1846,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             if self._cancel_evt.is_set():
                 return None
             i = counter["i"]; counter["i"] += 1
-            job = "%s_run%03d" % (prefix, i)
+            job = job_name(prefix, i, model_run_tag(prefix, cfg))
             out_path = Path(run_dir) / ("%s.results.npz" % job)
             self._current_sta = Path(run_dir) / ("%s.sta" % job)
             state["sta"], state["job"] = self._current_sta, job

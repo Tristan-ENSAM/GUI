@@ -552,8 +552,10 @@ def test_domain_study_resume_load_and_other_model(qapp, world, answers):
     # (steps 0 and 1 are not done here: the step says so)
     assert tab._step_state("domain")[0] == "prereq"
     # The new jobs do not reuse the names of the earlier ones.
-    assert world.launched[-2:] == ["domainsizing_run%03d" % i
-                                   for i in (n_runs, n_runs + 1)]
+    # (numbered after the earlier runs, then tagged with the domain).
+    assert [j.split("_D")[0] for j in world.launched[-2:]] == [
+        "domainsizing_run%03d" % i for i in (n_runs, n_runs + 1)]
+    assert all("_D" in j for j in world.launched[-2:])
     # The launch check looked at the study folder, not the working dir.
     assert world.validate[-1] == (folder,)
 
