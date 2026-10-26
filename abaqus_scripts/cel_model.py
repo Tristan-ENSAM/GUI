@@ -234,6 +234,7 @@ def prepare_parameters(model_cfg, run_cfg):
     inter_slip_tol         = float(inter.get("slip_tolerance",         0.005))
     inter_pressure         = str(  inter.get("pressure_overclosure",   "hard"))      # "hard" | "exponential" | "linear" | "tabular"
     inter_heat_gen         = bool( inter.get("heat_generation",        False))
+    inter_heat_conversion  = float(inter.get("heat_conversion_fraction", 1.0))
     inter_heat_to_slave    = float(inter.get("heat_fraction_to_slave",  0.5))
     inter_heat_to_master   = float(inter.get("heat_fraction_to_master", 0.5))
     # Thermal contact conductance: written only when given; otherwise Abaqus
@@ -508,6 +509,38 @@ def create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p
     return RP, tool_elem
 
 
+# Abaqus 2022 names the fraction `secondaryFraction` (Scripting Reference
+# 2022, GapHeatGeneration object; default 0.5) and refuses `slaveFraction`
+# ("keyword error on slaveFraction", CL-WTS-1, 2026-10-26). `slaveFraction`
+# is kept as a fallback for older releases; with the default fraction 0.5
+# the keyword can be left out altogether.
+_HEAT_FRACTION_KEYWORDS = ("secondaryFraction", "slaveFraction")
+_ABAQUS_DEFAULT_SLAVE_FRACTION = 0.5
+
+
+def _set_heat_generation(prop, conversion, slave_fraction):
+    """HeatGeneration on `prop`: a fraction `conversion` of the frictional
+    work turned into heat, `slave_fraction` of that heat to the slave
+    (secondary) side."""
+    for kw in _HEAT_FRACTION_KEYWORDS:
+        try:
+            prop.HeatGeneration(conversionFraction=conversion, **{kw: slave_fraction})
+            print("[META] heat_generation conversion=%g %s=%g"
+                  % (conversion, kw, slave_fraction))
+            return
+        except TypeError:
+            continue
+    if abs(slave_fraction - _ABAQUS_DEFAULT_SLAVE_FRACTION) > 1e-12:
+        raise TypeError("HeatGeneration accepts none of %s; cannot set a "
+                        "slave fraction of %g (only the Abaqus default %g "
+                        "works without it)" % (_HEAT_FRACTION_KEYWORDS,
+                                               slave_fraction,
+                                               _ABAQUS_DEFAULT_SLAVE_FRACTION))
+    prop.HeatGeneration(conversionFraction=conversion)
+    print("[META] heat_generation conversion=%g slave fraction=Abaqus default %g"
+          % (conversion, _ABAQUS_DEFAULT_SLAVE_FRACTION))
+
+
 def create_interaction(model, RP, tool_elem, p):
     """Create contact property, general contact and rigid-tool constraint."""
     inter_tangential = p["inter_tangential"]
@@ -545,14 +578,11 @@ def create_interaction(model, RP, tool_elem, p):
 
     # Optional heat-generation interaction property
     if inter_heat_gen:
-        IntProp.HeatGeneration(
-            conversionFraction=1.0,
-            slaveFraction=inter_heat_to_slave,
-        )
-        # `slaveFraction` covers most cases; the master fraction is implicitly
-        # (1 - slaveFraction) in Abaqus's API. If `inter_heat_to_slave` and
-        # `inter_heat_to_master` don't sum to 1, the GUI value of
-        # `heat_fraction_to_master` is ignored — Abaqus only stores one of them.
+        _set_heat_generation(IntProp, inter_heat_conversion, inter_heat_to_slave)
+        # The master fraction is implicitly (1 - slave fraction) in Abaqus's
+        # API. If `inter_heat_to_slave` and `inter_heat_to_master` don't sum
+        # to 1, the GUI value of `heat_fraction_to_master` is ignored —
+        # Abaqus only stores one of them.
 
     # Optional explicit thermal contact conductance: one table row, so the
     # conductance is the same constant k whatever the clearance.
