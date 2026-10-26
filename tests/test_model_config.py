@@ -210,3 +210,43 @@ class TestExportFloatCleanup:
         c.tool_geometry.r_tool = 0.010000000000000002
         assert repr(c.to_params_dict()["geometry"]["tool"]
                     ["geometry"]["r_tool"]) == "0.01"
+
+
+# ---------------------------------------------------------------------------
+# Thermal contact conductance
+# ---------------------------------------------------------------------------
+class TestConductance:
+
+    def test_abaqus_default_leaves_keys_out(self):
+        # Same run parameters as before the setting existed (run cache).
+        inter = ModelConfig().to_params_dict()["interaction"]
+        for k in ("conductance_mode", "gap_conductance",
+                  "conductance_clearance"):
+            assert k not in inter
+
+    def test_set_writes_keys(self):
+        cfg = ModelConfig()
+        cfg.interaction.conductance_mode = "set"
+        cfg.interaction.gap_conductance = 0.0
+        inter = cfg.to_params_dict()["interaction"]
+        assert inter["conductance_mode"] == "set"
+        assert inter["gap_conductance"] == 0.0
+        assert inter["conductance_clearance"] == pytest.approx(0.001)
+
+    def test_json_round_trip(self):
+        cfg = ModelConfig()
+        cfg.interaction.conductance_mode = "set"
+        cfg.interaction.gap_conductance = 12.5
+        cfg.interaction.conductance_clearance = 0.002
+        back = ModelConfig.from_json_dict(cfg.to_json_dict())
+        assert back.interaction.conductance_mode == "set"
+        assert back.interaction.gap_conductance == pytest.approx(12.5)
+        assert back.interaction.conductance_clearance == pytest.approx(0.002)
+
+    def test_old_profile_gets_abaqus_default(self):
+        d = ModelConfig().to_json_dict()
+        for k in ("conductance_mode", "gap_conductance",
+                  "conductance_clearance"):
+            d["interaction"].pop(k)
+        back = ModelConfig.from_json_dict(d)
+        assert back.interaction.conductance_mode == "abaqus_default"

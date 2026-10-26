@@ -268,6 +268,8 @@ class InteractionCfg:
         - TangentialBehavior(formulation, table=((mu,),), fraction=slip_frac)
         - NormalBehavior(pressureOverclosure=HARD)
         - (optional) HeatGeneration(slaveFraction, masterFraction)
+        - (optional) ThermalConductance: conductance k at zero clearance,
+          falling linearly to 0 at `conductance_clearance`
 
     The mapping from GUI strings to Abaqus symbolic constants happens at
     serialisation time (in the Abaqus generator).
@@ -285,6 +287,15 @@ class InteractionCfg:
     heat_generation:          bool  = False        # turn the *Gap heat generation on
     heat_fraction_to_slave:   float = 0.5
     heat_fraction_to_master:  float = 0.5
+
+    # --- Thermal contact conductance (tool <-> workpiece/chip) ---
+    # "abaqus_default": nothing is written, Abaqus applies its own default,
+    # which changed with Abaqus 2022 FD02 (HF2) from zero to a large value,
+    # so the result then depends on the Abaqus build. "set": the values
+    # below are written, the same on every build.
+    conductance_mode:      str   = "abaqus_default"   # "abaqus_default" | "set"
+    gap_conductance:       float = 0.0     # mW/(mm².K) = kW/(m².K), at zero clearance
+    conductance_clearance: float = 0.001   # mm, clearance where it reaches 0
 
 
 @dataclass
@@ -428,6 +439,21 @@ def _clean_floats(obj):
     if isinstance(obj, float):
         return _clean_float(obj)
     return obj
+
+
+_CONDUCTANCE_KEYS = ("conductance_mode", "gap_conductance",
+                     "conductance_clearance")
+
+
+def _interaction_export(inter) -> dict:
+    """asdict(inter). With the Abaqus default conductance, the conductance
+    keys are left out: the run parameters are then those of runs made before
+    the setting existed, so the run cache still matches them."""
+    d = asdict(inter)
+    if d.get("conductance_mode") != "set":
+        for k in _CONDUCTANCE_KEYS:
+            d.pop(k, None)
+    return d
 
 
 def _step_export(step) -> dict:
@@ -646,7 +672,7 @@ class ModelConfig:
                 "max_elem_size":   self.max_elem_size,
                 "discretize":     self.euler_geometry.discretize,
             },
-            "interaction": asdict(self.interaction),
+            "interaction": _interaction_export(self.interaction),
             "bcs":         asdict(self.bcs),
             "step":        _step_export(self.step),
         })
