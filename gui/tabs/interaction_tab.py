@@ -12,13 +12,14 @@ Four sub-groups:
   - Tangential behaviour: penalty / rough / frictionless + μ + slip tol
   - Normal behaviour:     hard / soft (exponential) / soft (linear)
   - Heat generation:      enable + slave/master fractions
-  - Thermal conductance:  Abaqus default or set explicitly
+  - Thermal conductance:  empty = Abaqus default, else the value entered
 """
 from __future__ import annotations
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QLocale
+from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QComboBox, QScrollArea,
-    QFrame,
+    QFrame, QLineEdit,
 )
 
 from gui.core.model_config import ModelConfig
@@ -33,6 +34,22 @@ def _section_header(title: str):
         "border-left: 3px solid #1f6fb2;"
     )
     return lbl
+
+
+def _fmt_optional(val) -> str:
+    """'' for None (field left empty), else the number."""
+    return "" if val is None else f"{val:g}"
+
+
+def _parse_optional(txt: str):
+    """None for an empty field, else the number (comma accepted)."""
+    txt = txt.strip().replace(",", ".")
+    if not txt:
+        return None
+    try:
+        return float(txt)
+    except ValueError:
+        return None
 
 
 class InteractionTab(QWidget):
@@ -171,56 +188,33 @@ class InteractionTab(QWidget):
         self._refresh_heat_visibility()
         return g
 
-    CONDUCTANCE_MODES = [
-        ("Abaqus default (depends on the Abaqus build)", "abaqus_default"),
-        ("Set explicitly",                               "set"),
-    ]
-
     def _build_conductance_group(self) -> QGroupBox:
         g = QGroupBox("Thermal contact conductance (tool ↔ workpiece/chip)")
         v = QVBoxLayout(g)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Definition:"))
-        self.cb_cond = QComboBox()
-        for label, value in self.CONDUCTANCE_MODES:
-            self.cb_cond.addItem(label, value)
-        idx = self.cb_cond.findData(self.cfg.interaction.conductance_mode)
-        if idx >= 0:
-            self.cb_cond.setCurrentIndex(idx)
-        self.cb_cond.setToolTip(
-            "Abaqus default: no conductance is written and Abaqus applies its\n"
-            "own default. Abaqus 2022 FD02 (HF2) changed it from zero to a\n"
-            "large value, so the same model conducts heat on one build and\n"
-            "not on another.\n"
-            "Set explicitly: the values below are written, the same on every\n"
+        row.addWidget(QLabel("Conductance:"))
+        self.e_cond = QLineEdit(_fmt_optional(self.cfg.interaction.gap_conductance))
+        self.e_cond.setPlaceholderText("empty = Abaqus default")
+        val = QDoubleValidator(0.0, 1e12, 6, self.e_cond)
+        val.setNotation(QDoubleValidator.ScientificNotation)
+        val.setLocale(QLocale(QLocale.Language.C))
+        self.e_cond.setValidator(val)
+        self.e_cond.setMaximumWidth(160)
+        self.e_cond.setToolTip(
+            "Empty: no conductance is written and Abaqus applies its own\n"
+            "default. Abaqus 2022 FD02 (HF2) changed it from zero to a large\n"
+            "value, so the same model conducts heat on one build and not on\n"
+            "another.\n"
+            "A value: that constant conductance is written, the same on every\n"
             "build. 0 = no conduction between tool and workpiece/chip."
         )
-        row.addWidget(self.cb_cond, stretch=1)
+        row.addWidget(self.e_cond)
+        row.addWidget(QLabel("mW/(mm²·K) = kW/(m²·K)"))
+        row.addStretch()
         v.addLayout(row)
 
-        self.f_cond = NumField(
-            "Conductance at contact", self.cfg.interaction.gap_conductance,
-            "mW/(mm²·K)", minimum=0.0, maximum=1e12, compact=True,
-        )
-        self.f_cond.setToolTip(
-            "Conductance at zero clearance. Model units: mW/(mm²·K),\n"
-            "equal to kW/(m²·K). 0 = no conduction."
-        )
-        self.f_cond_gap = NumField(
-            "Falls to 0 at clearance", self.cfg.interaction.conductance_clearance,
-            "mm", minimum=1e-9, maximum=1.0, compact=True,
-        )
-        self.f_cond_gap.setToolTip(
-            "Clearance at which the conductance reaches 0 (linear in between,\n"
-            "0 beyond). Has no effect when the conductance is 0."
-        )
-        v.addWidget(PairRow(self.f_cond, self.f_cond_gap))
-
-        self.cb_cond.currentIndexChanged.connect(self._on_change)
-        self.f_cond.valueChanged.connect(self._on_change)
-        self.f_cond_gap.valueChanged.connect(self._on_change)
-        self._refresh_conductance_visibility()
+        self.e_cond.textChanged.connect(self._on_change)
         return g
 
     # =====================================================================
@@ -244,11 +238,6 @@ class InteractionTab(QWidget):
         enabled = self.cb_heat.value()
         self.f_heat_slave.setEnabled(enabled)
 
-    def _refresh_conductance_visibility(self):
-        is_set = self.cb_cond.currentData() == "set"
-        self.f_cond.setEnabled(is_set)
-        self.f_cond_gap.setEnabled(is_set)
-
     # =====================================================================
     # Sync widgets -> cfg
     # =====================================================================
@@ -256,7 +245,6 @@ class InteractionTab(QWidget):
         self._pull_from_widgets()
         self._refresh_tangential_visibility()
         self._refresh_heat_visibility()
-        self._refresh_conductance_visibility()
         self.interactionChanged.emit()
 
     def _pull_from_widgets(self):
@@ -269,16 +257,14 @@ class InteractionTab(QWidget):
         i.heat_fraction_to_slave  = self.f_heat_slave.value()
         # Master gets the remainder so the split is consistent.
         i.heat_fraction_to_master = max(0.0, 1.0 - self.f_heat_slave.value())
-        i.conductance_mode        = self.cb_cond.currentData()
-        i.gap_conductance         = self.f_cond.value()
-        i.conductance_clearance   = self.f_cond_gap.value()
+        i.gap_conductance         = _parse_optional(self.e_cond.text())
 
     def apply_from_cfg(self):
         """Push cfg.interaction values into the widgets without firing
         the change signals (used when loading a profile)."""
         widgets = (self.cb_tang, self.f_mu, self.f_slip,
                    self.cb_heat, self.f_heat_slave,
-                   self.cb_cond, self.f_cond, self.f_cond_gap)
+                   self.e_cond)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -290,14 +276,9 @@ class InteractionTab(QWidget):
             self.f_slip.set_value(i.slip_tolerance)
             self.cb_heat.set_value(i.heat_generation)
             self.f_heat_slave.set_value(i.heat_fraction_to_slave)
-            idx = self.cb_cond.findData(i.conductance_mode)
-            if idx >= 0:
-                self.cb_cond.setCurrentIndex(idx)
-            self.f_cond.set_value(i.gap_conductance)
-            self.f_cond_gap.set_value(i.conductance_clearance)
+            self.e_cond.setText(_fmt_optional(i.gap_conductance))
         finally:
             for w in widgets:
                 w.blockSignals(False)
         self._refresh_tangential_visibility()
         self._refresh_heat_visibility()
-        self._refresh_conductance_visibility()

@@ -217,36 +217,28 @@ class TestExportFloatCleanup:
 # ---------------------------------------------------------------------------
 class TestConductance:
 
-    def test_abaqus_default_leaves_keys_out(self):
-        # Same run parameters as before the setting existed (run cache).
+    def test_empty_leaves_key_out(self):
+        # Abaqus default: same run parameters as before the field existed,
+        # so the run cache still matches older runs.
         inter = ModelConfig().to_params_dict()["interaction"]
-        for k in ("conductance_mode", "gap_conductance",
-                  "conductance_clearance"):
-            assert k not in inter
+        assert "gap_conductance" not in inter
 
-    def test_set_writes_keys(self):
+    def test_value_is_written(self):
         cfg = ModelConfig()
-        cfg.interaction.conductance_mode = "set"
         cfg.interaction.gap_conductance = 0.0
-        inter = cfg.to_params_dict()["interaction"]
-        assert inter["conductance_mode"] == "set"
-        assert inter["gap_conductance"] == 0.0
-        assert inter["conductance_clearance"] == pytest.approx(0.001)
+        assert cfg.to_params_dict()["interaction"]["gap_conductance"] == 0.0
 
     def test_json_round_trip(self):
         cfg = ModelConfig()
-        cfg.interaction.conductance_mode = "set"
         cfg.interaction.gap_conductance = 12.5
-        cfg.interaction.conductance_clearance = 0.002
         back = ModelConfig.from_json_dict(cfg.to_json_dict())
-        assert back.interaction.conductance_mode == "set"
         assert back.interaction.gap_conductance == pytest.approx(12.5)
-        assert back.interaction.conductance_clearance == pytest.approx(0.002)
+        cfg.interaction.gap_conductance = None
+        back = ModelConfig.from_json_dict(cfg.to_json_dict())
+        assert back.interaction.gap_conductance is None
 
     def test_old_profile_gets_abaqus_default(self):
         d = ModelConfig().to_json_dict()
-        for k in ("conductance_mode", "gap_conductance",
-                  "conductance_clearance"):
-            d["interaction"].pop(k)
+        d["interaction"].pop("gap_conductance")
         back = ModelConfig.from_json_dict(d)
-        assert back.interaction.conductance_mode == "abaqus_default"
+        assert back.interaction.gap_conductance is None
