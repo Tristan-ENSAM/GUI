@@ -6,6 +6,8 @@ Mirrors the dict structure expected by cel_model.py
 (MODEL_CFG keys: process, tool, euler, bbox).
 """
 from __future__ import annotations
+
+from typing import Optional
 import json
 import math
 from datetime import datetime
@@ -268,8 +270,7 @@ class InteractionCfg:
         - TangentialBehavior(formulation, table=((mu,),), fraction=slip_frac)
         - NormalBehavior(pressureOverclosure=HARD)
         - (optional) HeatGeneration(slaveFraction, masterFraction)
-        - (optional) ThermalConductance: conductance k at zero clearance,
-          falling linearly to 0 at `conductance_clearance`
+        - (optional) ThermalConductance: constant conductance k
 
     The mapping from GUI strings to Abaqus symbolic constants happens at
     serialisation time (in the Abaqus generator).
@@ -289,13 +290,11 @@ class InteractionCfg:
     heat_fraction_to_master:  float = 0.5
 
     # --- Thermal contact conductance (tool <-> workpiece/chip) ---
-    # "abaqus_default": nothing is written, Abaqus applies its own default,
-    # which changed with Abaqus 2022 FD02 (HF2) from zero to a large value,
-    # so the result then depends on the Abaqus build. "set": the values
-    # below are written, the same on every build.
-    conductance_mode:      str   = "abaqus_default"   # "abaqus_default" | "set"
-    gap_conductance:       float = 0.0     # mW/(mm².K) = kW/(m².K), at zero clearance
-    conductance_clearance: float = 0.001   # mm, clearance where it reaches 0
+    # None (field left empty): nothing is written and Abaqus applies its own
+    # default, which changed with Abaqus 2022 FD02 (HF2) from zero to a large
+    # value, so the result then depends on the Abaqus build. A number: that
+    # conductance is written, the same on every build.
+    gap_conductance: Optional[float] = None   # mW/(mm².K) = kW/(m².K)
 
 
 @dataclass
@@ -441,18 +440,13 @@ def _clean_floats(obj):
     return obj
 
 
-_CONDUCTANCE_KEYS = ("conductance_mode", "gap_conductance",
-                     "conductance_clearance")
-
-
 def _interaction_export(inter) -> dict:
-    """asdict(inter). With the Abaqus default conductance, the conductance
-    keys are left out: the run parameters are then those of runs made before
-    the setting existed, so the run cache still matches them."""
+    """asdict(inter). With the Abaqus default conductance (None), the key is
+    left out: the run parameters are then those of runs made before the
+    setting existed, so the run cache still matches them."""
     d = asdict(inter)
-    if d.get("conductance_mode") != "set":
-        for k in _CONDUCTANCE_KEYS:
-            d.pop(k, None)
+    if d.get("gap_conductance") is None:
+        d.pop("gap_conductance", None)
     return d
 
 
