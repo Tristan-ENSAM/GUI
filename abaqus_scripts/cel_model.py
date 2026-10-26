@@ -508,6 +508,35 @@ def create_sets_and_fields(assembly, eul_instance, wp_instance, tool_instance, p
     return RP, tool_elem
 
 
+# Abaqus 2022 GA refuses `slaveFraction` ("keyword error on slaveFraction",
+# CL-WTS-1, 2026-10-26); newer releases name the slave side "secondary".
+# The keyword is tried under each name; with the Abaqus default fraction
+# (0.5, *GAP HEAT GENERATION) it can be left out altogether.
+_HEAT_FRACTION_KEYWORDS = ("secondaryFraction", "slaveFraction")
+_ABAQUS_DEFAULT_SLAVE_FRACTION = 0.5
+
+
+def _set_heat_generation(prop, slave_fraction):
+    """HeatGeneration on `prop`: all frictional work turned into heat
+    (conversionFraction = 1), `slave_fraction` of it to the slave side."""
+    for kw in _HEAT_FRACTION_KEYWORDS:
+        try:
+            prop.HeatGeneration(conversionFraction=1.0, **{kw: slave_fraction})
+            print("[META] heat_generation conversion=1 %s=%g" % (kw, slave_fraction))
+            return
+        except TypeError:
+            continue
+    if abs(slave_fraction - _ABAQUS_DEFAULT_SLAVE_FRACTION) > 1e-12:
+        raise TypeError("HeatGeneration accepts none of %s; cannot set a "
+                        "slave fraction of %g (only the Abaqus default %g "
+                        "works without it)" % (_HEAT_FRACTION_KEYWORDS,
+                                               slave_fraction,
+                                               _ABAQUS_DEFAULT_SLAVE_FRACTION))
+    prop.HeatGeneration(conversionFraction=1.0)
+    print("[META] heat_generation conversion=1 slave fraction=Abaqus default %g"
+          % _ABAQUS_DEFAULT_SLAVE_FRACTION)
+
+
 def create_interaction(model, RP, tool_elem, p):
     """Create contact property, general contact and rigid-tool constraint."""
     inter_tangential = p["inter_tangential"]
@@ -545,14 +574,11 @@ def create_interaction(model, RP, tool_elem, p):
 
     # Optional heat-generation interaction property
     if inter_heat_gen:
-        IntProp.HeatGeneration(
-            conversionFraction=1.0,
-            slaveFraction=inter_heat_to_slave,
-        )
-        # `slaveFraction` covers most cases; the master fraction is implicitly
-        # (1 - slaveFraction) in Abaqus's API. If `inter_heat_to_slave` and
-        # `inter_heat_to_master` don't sum to 1, the GUI value of
-        # `heat_fraction_to_master` is ignored — Abaqus only stores one of them.
+        _set_heat_generation(IntProp, inter_heat_to_slave)
+        # The master fraction is implicitly (1 - slave fraction) in Abaqus's
+        # API. If `inter_heat_to_slave` and `inter_heat_to_master` don't sum
+        # to 1, the GUI value of `heat_fraction_to_master` is ignored —
+        # Abaqus only stores one of them.
 
     # Optional explicit thermal contact conductance: one table row, so the
     # conductance is the same constant k whatever the clearance.
