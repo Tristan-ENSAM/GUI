@@ -826,6 +826,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "results only: no Abaqus run.")
         self.btn_dev_maps.clicked.connect(self._on_deviation_maps)
         top.addWidget(self.btn_dev_maps)
+        self.btn_prelim = QPushButton("Preliminary checks…")
+        self.btn_prelim.setToolTip(
+            "On one finished run, before the studies: when the forces and\n"
+            "the zone means settle (window T), whether the output frames\n"
+            "are dense enough for the field filter, and whether the chip\n"
+            "comes back onto the uncut surface. No Abaqus run.")
+        self.btn_prelim.clicked.connect(self._on_preliminary_checks)
+        top.addWidget(self.btn_prelim)
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.setToolTip("Show the grey explanations under each step.")
@@ -2088,6 +2096,25 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self._dev_maps_dialog = dlg
         dlg.show()
         dlg.raise_()
+
+    def _on_preliminary_checks(self):
+        """Open (or bring back) the preliminary-checks window."""
+        from gui.widgets.preliminary_checks_dialog import \
+            PreliminaryChecksDialog
+        dlg = getattr(self, "_prelim_dialog", None)
+        if dlg is None:
+            prefs = self._prefs_getter() if self._prefs_getter else None
+            dlg = PreliminaryChecksDialog(
+                settings_getter=self._prelim_settings,
+                start_dir=str(getattr(prefs, "default_workdir", "") or ""),
+                parent=self)
+            self._prelim_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
+    def _prelim_settings(self) -> dict:
+        """eps_q and the ZOI (the window T may still be unset)."""
+        return {"eps": self.thresholds(), "zoi": self.zoi()}
 
     def _deviation_settings(self):
         """The tab's current comparison settings, for the deviation maps of
