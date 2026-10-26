@@ -24,7 +24,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
@@ -76,7 +76,16 @@ class PreliminaryChecksDialog(QDialog):
             "onto the uncut surface. No Abaqus run. Hover a field for more.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #6b7280;")
-        v.addWidget(intro)
+        self._help_labels = [intro]
+        top = QHBoxLayout()
+        top.addWidget(intro, 1)
+        self.cb_help = QCheckBox("Show help")
+        self.cb_help.setToolTip("Show or hide the grey explanations of the "
+                                "inputs and plots.")
+        self.cb_help.setChecked(True)
+        self.cb_help.toggled.connect(self._show_help)
+        top.addWidget(self.cb_help, 0, Qt.AlignRight | Qt.AlignTop)
+        v.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._build_left())
@@ -89,12 +98,16 @@ class PreliminaryChecksDialog(QDialog):
         self._fit_to_screen(parent)
 
     # ---- layout --------------------------------------------------------
-    @staticmethod
-    def _help(text):
+    def _help(self, text):
         lab = QLabel(text)
         lab.setWordWrap(True)
         lab.setStyleSheet("color: #6b7280; font-size: 8.5pt;")
+        self._help_labels.append(lab)
         return lab
+
+    def _show_help(self, on):
+        for lab in self._help_labels:
+            lab.setVisible(on)
 
     @staticmethod
     def _field(form, label, le, unit, tip):

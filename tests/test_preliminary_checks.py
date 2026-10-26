@@ -168,6 +168,16 @@ def test_dialog_fits_the_screen(qapp):
     assert dlg.width() <= g.width() and dlg.height() <= g.height()
 
 
+def test_dialog_help_toggle(qapp):
+    from gui.widgets.preliminary_checks_dialog import PreliminaryChecksDialog
+    dlg = PreliminaryChecksDialog()
+    assert len(dlg._help_labels) == 8      # intro, 4 boxes, 3 plot captions
+    dlg.cb_help.setChecked(False)
+    assert all(lab.isHidden() for lab in dlg._help_labels)
+    dlg.cb_help.setChecked(True)
+    assert not any(lab.isHidden() for lab in dlg._help_labels)
+
+
 def test_model_tab_opens_the_dialog(qapp):
     from gui.core.model_config import ModelConfig
     from gui.tabs.optimization_tab import OptimizationTab
