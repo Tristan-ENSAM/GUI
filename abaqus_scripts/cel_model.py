@@ -549,6 +549,7 @@ def create_interaction(model, RP, tool_elem, p):
     inter_pressure = p["inter_pressure"]
     inter_heat_gen = p["inter_heat_gen"]
     inter_heat_to_slave = p["inter_heat_to_slave"]
+    inter_heat_conversion = p["inter_heat_conversion"]
     inter_conductance = p["inter_conductance"]
     #%%% Contact
     # All knobs (tangential formulation, friction coefficient, slip tolerance,
