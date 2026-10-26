@@ -44,24 +44,24 @@ class _Prop:
 
 def test_secondary_fraction_keyword():
     prop = _Prop({"conversionFraction", "secondaryFraction"})
-    _helper()(prop, 0.5)
+    _helper()(prop, 1.0, 0.5)
     assert prop.calls == [{"conversionFraction": 1.0, "secondaryFraction": 0.5}]
 
 
 def test_slave_fraction_keyword_on_older_release():
     prop = _Prop({"conversionFraction", "slaveFraction"})
-    _helper()(prop, 0.3)
-    assert prop.calls == [{"conversionFraction": 1.0, "slaveFraction": 0.3}]
+    _helper()(prop, 0.9, 0.3)
+    assert prop.calls == [{"conversionFraction": 0.9, "slaveFraction": 0.3}]
 
 
 def test_default_fraction_left_out_when_no_keyword_works():
     prop = _Prop({"conversionFraction"})
-    _helper()(prop, 0.5)
-    assert prop.calls == [{"conversionFraction": 1.0}]
+    _helper()(prop, 0.9, 0.5)
+    assert prop.calls == [{"conversionFraction": 0.9}]
 
 
 def test_non_default_fraction_without_keyword_raises():
     prop = _Prop({"conversionFraction"})
     with pytest.raises(TypeError):
-        _helper()(prop, 0.3)
+        _helper()(prop, 1.0, 0.3)
     assert prop.calls == []

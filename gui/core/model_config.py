@@ -269,7 +269,7 @@ class InteractionCfg:
     Mirrors what cel_model.py builds via `ContactProperty`:
         - TangentialBehavior(formulation, table=((mu,),), fraction=slip_frac)
         - NormalBehavior(pressureOverclosure=HARD)
-        - (optional) HeatGeneration(slaveFraction, masterFraction)
+        - (optional) HeatGeneration(conversionFraction, secondaryFraction)
         - (optional) ThermalConductance: constant conductance k
 
     The mapping from GUI strings to Abaqus symbolic constants happens at
@@ -286,6 +286,7 @@ class InteractionCfg:
 
     # --- Heat generation (friction-to-thermal coupling) ---
     heat_generation:          bool  = False        # turn the *Gap heat generation on
+    heat_conversion_fraction: float = 1.0          # η: share of frictional work turned into heat
     heat_fraction_to_slave:   float = 0.5
     heat_fraction_to_master:  float = 0.5
 
@@ -441,12 +442,15 @@ def _clean_floats(obj):
 
 
 def _interaction_export(inter) -> dict:
-    """asdict(inter). With the Abaqus default conductance (None), the key is
-    left out: the run parameters are then those of runs made before the
-    setting existed, so the run cache still matches them."""
+    """asdict(inter). With the Abaqus default conductance (None) or the
+    conversion fraction every earlier run used (1.0), the key is left out:
+    the run parameters are then those of runs made before the setting
+    existed, so the run cache still matches them."""
     d = asdict(inter)
     if d.get("gap_conductance") is None:
         d.pop("gap_conductance", None)
+    if d.get("heat_conversion_fraction") == 1.0:
+        d.pop("heat_conversion_fraction", None)
     return d
 
 

@@ -11,7 +11,7 @@ Mirrors the ContactProperty block in cel_model.py:
 Four sub-groups:
   - Tangential behaviour: penalty / rough / frictionless + μ + slip tol
   - Normal behaviour:     hard / soft (exponential) / soft (linear)
-  - Heat generation:      enable + slave/master fractions
+  - Heat generation:      enable + conversion fraction + slave/master fractions
   - Thermal conductance:  empty = Abaqus default, else the value entered
 """
 from __future__ import annotations
@@ -165,10 +165,21 @@ class InteractionTab(QWidget):
         )
         self.cb_heat.setToolTip(
             "Adds *Gap Heat Generation to the ContactProperty.\n"
-            "All frictional work converts to heat (η = 1 by default).\n"
-            "The fractions below set how heat splits between the two surfaces."
+            "The conversion fraction η sets how much frictional work becomes heat;\n"
+            "the partition below sets how that heat splits between the two surfaces."
         )
         v.addWidget(self.cb_heat)
+
+        self.f_heat_conv = NumField(
+            "Conversion fraction η",
+            self.cfg.interaction.heat_conversion_fraction,
+            "—", minimum=0.0, maximum=1.0, compact=True,
+        )
+        self.f_heat_conv.setToolTip(
+            "Fraction of frictional work converted to heat (conversionFraction).\n"
+            "1 (all of it) is the Abaqus default."
+        )
+        v.addWidget(self.f_heat_conv)
 
         v.addWidget(_section_header("Heat partitioning"))
         self.f_heat_slave = NumField(
@@ -184,6 +195,7 @@ class InteractionTab(QWidget):
 
         # Wire and set initial visibility
         self.cb_heat.valueChanged.connect(self._on_change)
+        self.f_heat_conv.valueChanged.connect(self._on_change)
         self.f_heat_slave.valueChanged.connect(self._on_change)
         self._refresh_heat_visibility()
         return g
@@ -236,6 +248,7 @@ class InteractionTab(QWidget):
 
     def _refresh_heat_visibility(self):
         enabled = self.cb_heat.value()
+        self.f_heat_conv.setEnabled(enabled)
         self.f_heat_slave.setEnabled(enabled)
 
     # =====================================================================
@@ -254,6 +267,7 @@ class InteractionTab(QWidget):
         i.slip_tolerance         = self.f_slip.value()
         i.pressure_overclosure   = "hard"     # fixed in this build
         i.heat_generation         = self.cb_heat.value()
+        i.heat_conversion_fraction = self.f_heat_conv.value()
         i.heat_fraction_to_slave  = self.f_heat_slave.value()
         # Master gets the remainder so the split is consistent.
         i.heat_fraction_to_master = max(0.0, 1.0 - self.f_heat_slave.value())
@@ -263,7 +277,7 @@ class InteractionTab(QWidget):
         """Push cfg.interaction values into the widgets without firing
         the change signals (used when loading a profile)."""
         widgets = (self.cb_tang, self.f_mu, self.f_slip,
-                   self.cb_heat, self.f_heat_slave,
+                   self.cb_heat, self.f_heat_conv, self.f_heat_slave,
                    self.e_cond)
         for w in widgets:
             w.blockSignals(True)
@@ -275,6 +289,7 @@ class InteractionTab(QWidget):
             self.f_mu.set_value(i.friction_coeff)
             self.f_slip.set_value(i.slip_tolerance)
             self.cb_heat.set_value(i.heat_generation)
+            self.f_heat_conv.set_value(i.heat_conversion_fraction)
             self.f_heat_slave.set_value(i.heat_fraction_to_slave)
             self.e_cond.setText(_fmt_optional(i.gap_conductance))
         finally:

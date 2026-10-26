@@ -242,3 +242,31 @@ class TestConductance:
         d["interaction"].pop("gap_conductance")
         back = ModelConfig.from_json_dict(d)
         assert back.interaction.gap_conductance is None
+
+
+# ---------------------------------------------------------------------------
+# Friction heat: conversion fraction
+# ---------------------------------------------------------------------------
+class TestHeatConversion:
+
+    def test_default_one_leaves_key_out(self):
+        # Every earlier run converted all frictional work (η = 1): same run
+        # parameters, so the run cache still matches them.
+        inter = ModelConfig().to_params_dict()["interaction"]
+        assert "heat_conversion_fraction" not in inter
+
+    def test_other_value_is_written(self):
+        cfg = ModelConfig()
+        cfg.interaction.heat_conversion_fraction = 0.9
+        inter = cfg.to_params_dict()["interaction"]
+        assert inter["heat_conversion_fraction"] == pytest.approx(0.9)
+
+    def test_json_round_trip_and_old_profile(self):
+        cfg = ModelConfig()
+        cfg.interaction.heat_conversion_fraction = 0.9
+        back = ModelConfig.from_json_dict(cfg.to_json_dict())
+        assert back.interaction.heat_conversion_fraction == pytest.approx(0.9)
+        d = ModelConfig().to_json_dict()
+        d["interaction"].pop("heat_conversion_fraction", None)
+        back = ModelConfig.from_json_dict(d)
+        assert back.interaction.heat_conversion_fraction == 1.0
