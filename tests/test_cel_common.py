@@ -108,3 +108,26 @@ def test_replay_file_names():
     for name in ("abaqus.rpy.bak", "job.rpy", "abaqus.rec", "abaqus.rpyx",
                  "sensitivity_run000.odb"):
         assert not is_replay_file(name), name
+
+
+class TestConductanceTable:
+    """Abaqus 2022 refuses a one-row gap conductance table ("Gap conductance
+    table should have two or more pairs of data")."""
+
+    def test_two_rows_constant(self):
+        from abaqus_scripts.cel_common import conductance_table
+        t = conductance_table(0)
+        assert len(t) >= 2
+        assert all(row[0] == 0.0 for row in t)
+        t = conductance_table(12.5)
+        assert [row[0] for row in t] == [12.5, 12.5]
+
+    def test_clearances_increase_from_zero(self):
+        from abaqus_scripts.cel_common import conductance_table
+        clear = [row[1] for row in conductance_table(1.0)]
+        assert clear[0] == 0.0
+        assert all(b > a for a, b in zip(clear, clear[1:]))
+
+    def test_cel_model_uses_it(self):
+        src = _CEL_MODEL.read_text(encoding="utf-8")
+        assert "clearanceDepTable=conductance_table(" in src
