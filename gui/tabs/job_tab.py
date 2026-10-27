@@ -1014,7 +1014,33 @@ class JobTab(QWidget):
                 f"status: {exit_status}\n"
             )
         self._append_output(footer)
+        if success and not pipe.get("write_inp_only"):
+            self._archive_single_run(pipe)
         self._finish_pipeline(success=success)
+
+    def _archive_single_run(self, pipe):
+        """Copy the run that just finished into the simulation database
+        (gui.core.run_db), when one is set, off the GUI thread."""
+        from gui.core import run_db
+        prefs = self._get_prefs()
+        if prefs is None or run_db.from_prefs(prefs) is None:
+            return
+        machine = self.cmb_machine.machine()
+        host = self.cmb_machine.machine_host()
+        cpus = int(self.spin_cpus.value())
+        try:
+            profile = (self._profile_name_getter()
+                       if self._profile_name_getter else "")
+        except Exception:
+            profile = ""
+        folder, job = pipe.get("workdir"), pipe.get("job_name")
+
+        def _done(line):
+            if line:
+                self._append_output(line + "\n")
+        run_async(lambda: run_db.archive_run(prefs, machine, host, folder,
+                                             job, cpus, profile),
+                  _done, self)
 
     def _on_proc_error(self, error):
         """Slot connected to QProcess.errorOccurred. Fires for issues

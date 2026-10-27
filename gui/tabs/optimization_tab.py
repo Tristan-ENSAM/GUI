@@ -1979,10 +1979,28 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                                   % (job, e))
             if cache is not None:
                 cache.add_run(run_dir, job)
+            self._archive_run(run_dir, job, cpus)
             return bundle
 
         run_bundle.state = state
         return run_bundle
+
+    def _archive_run(self, run_dir, job, cpus):
+        """Copy a run this study just made into the simulation database
+        (gui.core.run_db), when one is set (study thread)."""
+        ctx = getattr(self, "_study_db", None)
+        if not ctx:
+            return
+        from gui.core import run_db
+        try:
+            line = run_db.archive_run(ctx["prefs"], ctx["machine"],
+                                      ctx["host"], run_dir, job, cpus,
+                                      self._profile_name())
+        except Exception as e:
+            line = "[%s] not archived in the simulation database: %s" % (
+                job, e)
+        if line:
+            self._log_ui(line)
 
     # -- worker callbacks --------------------------------------------------
     def _poll_sta(self):

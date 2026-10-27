@@ -93,6 +93,14 @@ class Preferences:
     machines: Optional[list] = None
     default_machine: str = ""
 
+    # ---- Simulation database (gui.core.run_db): a folder, e.g. on an
+    #      external drive, where finished runs are archived and looked up by
+    #      every study. "" = no database. ----
+    run_db_dir: str = ""
+    run_db_archive: bool = True        # copy each finished run into it
+    run_db_keep_odb: bool = False      # with its .odb (large)
+    run_db_any_release: bool = False   # reuse runs of another Abaqus release
+
 
 # ----------------------------------------------------------------------------
 # Load / save

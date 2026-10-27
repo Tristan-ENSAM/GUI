@@ -229,6 +229,26 @@ def kill_tree(proc):
 # ---------------------------------------------------------------------------
 # the agent
 # ---------------------------------------------------------------------------
+def _has_year(line):
+    for tok in line.replace(".", " ").replace("-", " ").split():
+        if len(tok) == 4 and tok.isdigit() and tok[:2] in ("19", "20"):
+            return True
+    return False
+
+
+def parse_release(text):
+    """Release named by `abaqus information=release` output: its first line
+    naming Abaqus and a year, plus its build line when there is one; same
+    rule as gui.core.run_db.parse_release (this file is standalone)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    head = next((ln for ln in lines
+                 if "abaqus" in ln.lower() and _has_year(ln)), "")
+    if not head:
+        return ""
+    build = next((ln for ln in lines if "build" in ln.lower()), "")
+    return head if not build or build == head else "%s | %s" % (head, build)
+
+
 class Agent(object):
     """`build_args`, `terminate` and `kill` are injectable for the tests."""
 
@@ -242,6 +262,9 @@ class Agent(object):
         self._kill = kill
         self.out = out or sys.stdout
         self.host = socket.gethostname()
+        # `abaqus information=release`, read once at start (read_release):
+        # the GUI files the runs of this PC under it (gui.core.run_db).
+        self.abaqus_release = ""
         self.seq = 0
         self._last_hb = 0.0
         self.job = None
@@ -272,6 +295,7 @@ class Agent(object):
                 "seq": self.seq, "host": self.host, "pid": os.getpid(),
                 "python": sys.version.split()[0],
                 "abaqus_cmd": self.abaqus_cmd,
+                "abaqus_release": self.abaqus_release,
                 "busy_job": self.job["id"] if self.job else None,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S")})
         except (IOError, OSError) as e:
@@ -308,7 +332,27 @@ class Agent(object):
         else:
             self._follow()
 
+    def read_release(self):
+        """Read `abaqus information=release` (a few seconds) and publish it
+        with the heartbeat; '' when it cannot be read."""
+        try:
+            proc = subprocess.Popen([self.abaqus_cmd, "information=release"],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            out = proc.communicate()[0]
+            self.abaqus_release = parse_release(
+                out.decode("cp1252", "replace"))
+        except Exception as e:
+            self.say("WARNING: Abaqus release not read (%r)" % (e,))
+            return
+        if self.abaqus_release:
+            self.say("Abaqus release: %s" % self.abaqus_release)
+        self.heartbeat(force=True)
+
     def run_forever(self, period=1.0):
+        t = threading.Thread(target=self.read_release)
+        t.daemon = True
+        t.start()
         self.recover()
         self.heartbeat(force=True)
         self.say("agent ready on %s (Python %s)" % (self.host,

@@ -437,6 +437,7 @@ class ModelStepsMixin:
             self._last_domain_ok = False    # usable once it ends well
         self._study_cache = RunCache(
             [run_dir] + [f for f in (spec.get("cache_folders") or []) if f])
+        db_line = self._setup_run_db(self._study_cache, prefs)
         run_bundle = self._make_run_bundle(prefs, run_dir, cpus,
                                            JOB_PREFIX[step])
         params = self._model_params()
@@ -473,7 +474,28 @@ class ModelStepsMixin:
         n = len(self._study_cache)
         if n:
             self._log_ui("  %d finished run(s) available for reuse" % n)
+        if db_line:
+            self._log_ui("  " + db_line)
         return run_bundle
+
+    def _setup_run_db(self, cache, prefs) -> str:
+        """The simulation database (Preferences) for this study: looked up
+        through `cache` when "Reuse the finished runs" is on, and kept in
+        self._study_db for archiving the runs this study makes. Returns a
+        line for the log."""
+        from gui.core import run_db
+        user = (self._prefs_getter() if getattr(self, "_prefs_getter", None)
+                else None) or prefs
+        self._study_db = None
+        if user is None or run_db.from_prefs(user) is None:
+            return ""
+        machine = self.cmb_machine.machine()
+        host = self.cmb_machine.machine_host()
+        self._study_db = {"prefs": user, "machine": machine, "host": host}
+        if not self.cb_reuse_runs.isChecked():
+            return ("Simulation database %s: not looked up (reuse of "
+                    "finished runs is off)" % run_db.from_prefs(user).root)
+        return run_db.attach_to_cache(cache, user, machine, host)
 
     def _log_machine(self, prefs, run_dir):
         """Log the machine the runs go to and record it in the study's
