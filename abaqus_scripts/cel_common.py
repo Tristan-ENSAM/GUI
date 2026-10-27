@@ -229,17 +229,20 @@ def resolve_tool_translation(h_tool, l_tool, r_tool, rake_deg, clear_deg,
 # ---------------------------------------------------------------------------
 # Discretisation
 # ---------------------------------------------------------------------------
-# Clearance [mm] of the second row of a constant conductance table. Abaqus
-# refuses a one-row table ("two or more pairs of data") and keeps the last
-# value beyond the table, so k is the same at any clearance.
-CONDUCTANCE_TABLE_CLEARANCE = 1.0
+# Pressure [MPa] of the second row of a constant conductance table. The
+# table is a function of contact PRESSURE: Abaqus refuses a clearance
+# dependence for Eulerian-Lagrangian thermal contact ("Gap conductance
+# cannot be defined as a function of clearance ..."), and refuses a one-row
+# table ("two or more pairs of data"). Both rows hold k, so k is the same
+# at any pressure in the table.
+CONDUCTANCE_TABLE_PRESSURE = 1.0
 
 
 def conductance_table(k):
-    """clearanceDepTable for a constant thermal contact conductance k:
-    ((k, 0), (k, CONDUCTANCE_TABLE_CLEARANCE))."""
+    """pressureDepTable for a constant thermal contact conductance k:
+    ((k, 0), (k, CONDUCTANCE_TABLE_PRESSURE))."""
     k = float(k)
-    return ((k, 0.0), (k, CONDUCTANCE_TABLE_CLEARANCE))
+    return ((k, 0.0), (k, CONDUCTANCE_TABLE_PRESSURE))
 
 
 def discretize(dim, element_size):

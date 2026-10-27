@@ -587,13 +587,14 @@ def create_interaction(model, RP, tool_elem, p):
         # Abaqus only stores one of them.
 
     # Optional explicit thermal contact conductance: the same constant k
-    # whatever the clearance (two-row table, see cel_common).
+    # whatever the contact pressure (two-row table, see cel_common). Abaqus
+    # refuses a clearance dependence for Eulerian-Lagrangian contact.
     if inter_conductance is not None:
         IntProp.ThermalConductance(
-            definition=TABULAR, clearanceDependency=ON,
-            pressureDependency=OFF, temperatureDependencyC=OFF,
-            massFlowRateDependencyC=OFF, dependenciesC=0,
-            clearanceDepTable=conductance_table(inter_conductance),
+            definition=TABULAR, clearanceDependency=OFF,
+            pressureDependency=ON, temperatureDependencyP=OFF,
+            massFlowRateDependencyP=OFF, dependenciesP=0,
+            pressureDepTable=conductance_table(inter_conductance),
         )
 
     model.ContactExp(name='Contact', createStepName='Initial',
