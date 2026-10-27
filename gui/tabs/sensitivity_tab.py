@@ -1091,7 +1091,7 @@ class SensitivityTab(QWidget):
         # Timing state for the live wall-clock estimate (from the running
         # job's .sta, plus measured durations of finished runs).
         # Group this sensitivity campaign in its own timestamped folder
-        # ({profile}_sensitivity_{stamp}) with a config.json; its run files
+        # ({machine}__{profile}__sensitivity__{stamp}) with a config.json; its run files
         # are prefixed with "sensitivity".
         from gui.core.run_output import create_study_dir
         try:
@@ -1106,7 +1106,7 @@ class SensitivityTab(QWidget):
         _study_cfg = self._plan_record(field_vars, cpus)
         try:
             wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg,
-                                  machine=self.cmb_machine.machine_label())
+                                  machine=self.cmb_machine.machine_host())
         except OSError:
             pass   # fall back to the flat working directory
 

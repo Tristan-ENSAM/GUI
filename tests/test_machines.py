@@ -166,3 +166,21 @@ def test_preferences_dialog_round_trip(qapp):
     probs = dlg.machine_problems()
     assert any("Two machines" in s for s in probs)
     assert any("no queue folder" in s for s in probs)
+
+
+# ---- Windows name of the PC, for folder names ----------------------------
+def test_host_name_of_this_pc(monkeypatch):
+    monkeypatch.setattr(M.socket, "gethostname", lambda: "CL-CHENEVEZ-01")
+    assert M.host_name(Preferences(), M.LOCAL_NAME) == "CL-CHENEVEZ-01"
+
+
+def test_host_name_of_a_queue_machine_from_its_agent(tmp_path):
+    q = tmp_path / "queue"
+    q.mkdir()
+    prefs = replace(Preferences(), machines=[
+        {"name": "Compute PC", "kind": "queue", "queue_dir": str(q),
+         "abaqus_cmd": "abaqus.bat"}])
+    assert M.host_name(prefs, "Compute PC") == ""       # agent never ran
+    (q / "agent.json").write_text(json.dumps({"host": "CL-WTS-1"}))
+    assert M.host_name(prefs, "Compute PC") == "CL-WTS-1"
+    assert M.host_name(prefs, "missing") == ""

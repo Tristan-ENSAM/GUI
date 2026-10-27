@@ -3,9 +3,15 @@
 
 Each study launch (mesh GCI, domain sizing, sensitivity, and later inverse
 identification) gets its OWN timestamped folder in the working directory,
-named ``{profile}_{PREFIX}_{machine}_{YYYY-MM-DD_HH-MM-SS}`` (machine left out
-when unknown), containing a ``config.json``
-that records the study type, timestamp and parameters. Every sub-run of the
+named ``{machine}__{profile}__{type}__{YYYY-MM-DD_HH-MM-SS}``, containing a
+``config.json`` that records the study type, timestamp and parameters. A
+single run of the Job tab goes to ``{machine}__{profile}__job__{job name}``.
+Fields are joined by ``__``; the machine, profile, type and job name hold
+only letters, digits and '-' (any other character, '_' included, becomes
+'-') and the date one single '_', so a ``__`` can only separate two
+fields and a name sorts by machine, then profile, then type, then date.
+The machine is the Windows name of the PC that runs Abaqus
+(gui.core.machines.host_name). Every sub-run of the
 study writes inside that folder and its files are prefixed by PREFIX, so GCI,
 domain-sizing and sensitivity runs never collide and stay grouped.
 
@@ -48,18 +54,40 @@ def _um(mm) -> str:
     return num_token(float("%.3g" % (float(mm) * 1000.0)))
 
 
+# Separator of the fields of a folder name; never found inside a field.
+FIELD_SEP = "__"
+# Folder-name type of each study prefix (config.json keeps the prefix).
+TYPE_OF_PREFIX = {"massscaling": "ms", "GCI": "gci", "domainsizing": "domain",
+                  "sensitivity": "sensitivity", "checks": "checks"}
+UNKNOWN_MACHINE = "unknown-PC"
+
+
+def _field(text, default: str) -> str:
+    return safe_token(text) or default
+
+
 def study_folder_name(profile_name: Optional[str], prefix: str,
                       when: Optional[datetime] = None,
                       machine: Optional[str] = None) -> str:
-    """`{profile}_{PREFIX}_{machine}_{YYYY-MM-DD_HH-MM-SS}` (profile defaults
-    to 'Untitled'; no machine part when `machine` is empty)."""
+    """`{machine}__{profile}__{type}__{YYYY-MM-DD_HH-MM-SS}` (profile
+    defaults to 'Untitled', machine to 'unknown-PC'; type from
+    TYPE_OF_PREFIX, else the prefix itself)."""
     when = when or datetime.now()
-    parts = [profile_name or "Untitled", prefix]
-    m = safe_token(machine)
-    if m:
-        parts.append(m)
-    parts.append(when.strftime("%Y-%m-%d_%H-%M-%S"))
-    return "_".join(parts)
+    return FIELD_SEP.join([
+        _field(machine, UNKNOWN_MACHINE),
+        _field(profile_name, "Untitled"),
+        _field(TYPE_OF_PREFIX.get(prefix, prefix), "study"),
+        when.strftime("%Y-%m-%d_%H-%M-%S")])
+
+
+def job_folder_name(profile_name: Optional[str], job: str,
+                    machine: Optional[str] = None) -> str:
+    """`{machine}__{profile}__job__{job}`: the folder of a single run of the
+    Job tab. No date, so a job launched again under the same name finds its
+    earlier files (overwrite or resume)."""
+    return FIELD_SEP.join([_field(machine, UNKNOWN_MACHINE),
+                           _field(profile_name, "Untitled"), "job",
+                           _field(job, "job")])
 
 
 def model_run_tag(job_prefix: str, cfg) -> str:

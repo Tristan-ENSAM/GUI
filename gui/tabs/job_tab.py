@@ -99,14 +99,17 @@ class JobTab(QWidget):
 
     jobChanged = Signal()
 
-    def __init__(self, cfg: ModelConfig, prefs_getter, parent=None):
+    def __init__(self, cfg: ModelConfig, prefs_getter, parent=None,
+                 profile_name_getter=None):
         """`prefs_getter` is a zero-arg callable returning the *current*
         Preferences. We don't store a Preferences instance here — the
         user may change it in the Preferences dialog and we want the
-        next dry-run to reflect the change."""
+        next dry-run to reflect the change. `profile_name_getter` gives the
+        profile name used in the run folder name."""
         super().__init__(parent)
         self.cfg = cfg
         self._get_prefs = prefs_getter
+        self._profile_name_getter = profile_name_getter
 
         # QProcess used for Run. We create it lazily in `_run_abaqus`
         # because the user might never click Run, and a QProcess instance
@@ -190,7 +193,9 @@ class JobTab(QWidget):
         self.lbl_workdir = QLabel(self._get_prefs().default_workdir)
         self.lbl_workdir.setStyleSheet("color: #555;")
         self.lbl_workdir.setToolTip(
-            "Folder where the .inp, .odb, .log and .msg files are written.\n"
+            "Each run gets its own folder in it, named\n"
+            "<PC name>__<profile>__job__<job name>, where the .inp, .odb,\n"
+            ".log and .msg files are written.\n"
             "Set it in Preferences - Settings (it is machine-specific)."
         )
         form.addRow("Working directory:", self.lbl_workdir)
@@ -334,6 +339,18 @@ class JobTab(QWidget):
         self.cfg.job.machine = self.cmb_machine.machine()
         self.jobChanged.emit()
 
+    def _run_folder(self, workdir, job_name) -> Path:
+        """The folder of a single run: {machine}__{profile}__job__{job} in
+        the working directory (gui.core.run_output.job_folder_name)."""
+        from gui.core.run_output import job_folder_name
+        try:
+            profile = (self._profile_name_getter()
+                       if self._profile_name_getter else None)
+        except Exception:
+            profile = None
+        return Path(workdir) / job_folder_name(
+            profile, job_name, self.cmb_machine.machine_host())
+
     def _copy_output(self):
         QGuiApplication.clipboard().setText(self.txt_output.toPlainText())
 
@@ -344,7 +361,7 @@ class JobTab(QWidget):
 
         job_name = self.fld_job_name.text().strip() or "Cutting_job"
         cpus     = int(self.spin_cpus.value())
-        workdir  = prefs.default_workdir
+        workdir  = str(self._run_folder(prefs.default_workdir, job_name))
 
         # The model_params dict that cel_model.py will receive.
         model_params = self.cfg.to_params_dict()
@@ -365,7 +382,7 @@ class JobTab(QWidget):
         lines.append("DRY-RUN — nothing was launched")
         lines.append("=" * 72)
         lines.append("")
-        lines.append(f"Working directory:  {workdir}")
+        lines.append(f"Run folder:         {workdir}")
         lines.append(f"Job name:           {job_name}")
         lines.append(f"CPUs:               {cpus}")
         lines.append("")
@@ -380,7 +397,7 @@ class JobTab(QWidget):
         for label, p in (
             ("Abaqus command",   prefs.abaqus_cmd),
             ("Generator script", prefs.abaqus_script),
-            ("Working directory", workdir),
+            ("Working directory", prefs.default_workdir),
         ):
             if not Path(p).exists():
                 warnings.append(f"  ! {label} not found on disk: {p}")
@@ -482,11 +499,11 @@ class JobTab(QWidget):
         # error as a dialog, not as a cryptic QProcess errorOccurred signal.
         remote = is_remote(prefs)
         problems = launch_problems(prefs, workdir)
-        wd = Path(workdir)
+        wd = self._run_folder(workdir, job_name)
         try:
             wd.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            problems.append(f"Cannot create working directory '{workdir}': {e}")
+            problems.append(f"Cannot create run folder '{wd}': {e}")
         # --- existing job in the working directory -----------------------
         # Abaqus refuses to overwrite a job's files and simply dies. Windows
         # paths are case-insensitive, so "Job1" and "JOB1" collide too --
@@ -574,7 +591,7 @@ class JobTab(QWidget):
             "=" * 72,
             title,
             "=" * 72,
-            f"Working directory:  {workdir}",
+            f"Run folder:         {wd}",
             f"CPUs:               {cpus}",
             f"Machine:            {self.cmb_machine.machine_label()}",
             f"Abaqus command:     {prefs.abaqus_cmd}",

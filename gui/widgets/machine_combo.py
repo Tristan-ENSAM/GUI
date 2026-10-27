@@ -14,7 +14,8 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox
 
-from gui.core.machines import default_name, names, prefs_for_machine
+from gui.core.machines import (LOCAL_NAME, default_name, host_name, names,
+                                prefs_for_machine)
 
 
 class MachineCombo(QComboBox):
@@ -69,6 +70,17 @@ class MachineCombo(QComboBox):
         if prefs is None:
             return "?"
         return self._machine or default_name(prefs)
+
+    def machine_host(self) -> str:
+        """The Windows name of the PC the runs would go to now, for folder
+        names; the machine's name in Preferences when its agent has not
+        told it yet ("" for this PC when even that fails)."""
+        prefs = self._prefs()
+        if prefs is None:
+            return ""
+        label = self.machine_label()
+        return host_name(prefs, self._machine) or (
+            "" if label == LOCAL_NAME else label)
 
     def run_prefs(self):
         """The Preferences set for the chosen machine; None when there are

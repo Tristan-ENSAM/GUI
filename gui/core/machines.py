@@ -24,7 +24,10 @@ machine and the mode chosen becomes the default (`migrate`).
 """
 from __future__ import annotations
 
+import json
+import socket
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import List, Optional
 
 LOCAL = "local"
@@ -133,3 +136,28 @@ def machine_name(prefs) -> str:
     """The machine a copy from `prefs_for_machine` is set for (the default
     machine for the user's own preferences)."""
     return default_name(prefs)
+
+
+def host_name(prefs, name: str = "") -> str:
+    """The Windows name of the PC machine `name` ("" = the default one)
+    runs Abaqus on, for folder names: this PC's own name for the local
+    machine; for a queue machine, the name its agent writes in
+    `<queue>/agent.json` (gui.core.remote_agent heartbeat). "" when it is not
+    known (no such machine, or its agent has never run on that queue)."""
+    m = find(prefs, name or default_name(prefs))
+    if m is None:
+        return ""
+    if m.kind == LOCAL:
+        try:
+            return socket.gethostname()
+        except OSError:
+            return ""
+    if not m.queue_dir:
+        return ""
+    try:
+        data = json.loads((Path(m.queue_dir) / "agent.json").read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    host = data.get("host") if isinstance(data, dict) else None
+    return str(host) if host else ""

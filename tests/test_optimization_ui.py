@@ -127,7 +127,7 @@ class TestRunOutputWiring:
         tab = OptimizationTab(ModelConfig(), profile_name_getter=lambda: "prof")
         d = tab._study_run_dir(tmp_path, "GCI", {"finest": 0.006})
         assert Path(d).parent == Path(tmp_path)
-        assert Path(d).name.startswith("prof_GCI_")
+        assert "__prof__gci__" in Path(d).name
         assert (Path(d) / "config.json").exists()
 
 
