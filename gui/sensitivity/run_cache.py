@@ -280,9 +280,40 @@ class RunCache:
         self.runs: List[CachedRun] = []
         self.failed: List[CachedRun] = []
         self.folders: List[Path] = []
+        self.db = None
+        self._db_host = ""
+        self._db_release = None
+        self._db_release_getter = None
+        self._db_any_release = False
         for f in folders:
             if f:
                 self.add_folder(f)
+
+    def attach_db(self, db, host: str = "", release_getter=None,
+                  any_release: bool = False) -> None:
+        """Look runs up in a simulation database (gui.core.run_db) too, after
+        the folders. `host` and the release returned by `release_getter`
+        (called once, at the first database lookup: reading it can take a
+        few seconds) say which runs may be reused (run_db.release_accepted)."""
+        self.db = db
+        self._db_host = host or ""
+        self._db_release_getter = release_getter
+        self._db_release = None
+        self._db_any_release = bool(any_release)
+
+    def _db_lookup(self, params: dict) -> Optional[CachedRun]:
+        if self.db is None or not self.db.available():
+            return None
+        if self._db_release is None:
+            try:
+                self._db_release = (self._db_release_getter() or ""
+                                    if self._db_release_getter else "")
+            except Exception:
+                self._db_release = ""
+        run = self.db.lookup(params, host=self._db_host,
+                             release=self._db_release,
+                             any_release=self._db_any_release)
+        return run.as_cached() if run is not None else None
 
     def __len__(self) -> int:
         return len(self.runs)
@@ -371,10 +402,11 @@ class RunCache:
 
     def lookup(self, params: dict, prefer=None) -> Optional[CachedRun]:
         """A finished run with exactly these parameters (one in `prefer`,
-        a folder, when there is one), or None."""
+        a folder, when there is one), else one of the attached database,
+        or None."""
         hits = self._index.get(params_key(params))
         if not hits:
-            return None
+            return self._db_lookup(params)
         if prefer is not None:
             for run in hits:
                 if same_folder(run.folder, prefer):

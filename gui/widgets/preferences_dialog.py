@@ -103,6 +103,38 @@ class PreferencesDialog(QDialog):
         f_wd.addRow("Default workdir:", self.fld_workdir)
         outer.addWidget(g_wd)
 
+        # ---- Simulation database group ----
+        g_db = QGroupBox("Simulation database")
+        f_db = QFormLayout(g_db)
+        self.fld_run_db = _PathField(getattr(prefs, "run_db_dir", ""), "dir")
+        self.fld_run_db.edit.setToolTip(
+            "Folder (e.g. on an external drive) where finished runs are kept\n"
+            "and looked up by every study, whatever its folder. Empty = no\n"
+            "database. When the drive is not plugged in, studies run without\n"
+            "it.")
+        f_db.addRow("Database folder:", self.fld_run_db)
+        self.cb_db_archive = QCheckBox(
+            "Copy every finished run into the database")
+        self.cb_db_archive.setChecked(bool(getattr(prefs, "run_db_archive",
+                                                   True)))
+        self.cb_db_keep_odb = QCheckBox(
+            "Copy the .odb too (about 1 GB per run)")
+        self.cb_db_keep_odb.setChecked(bool(getattr(prefs, "run_db_keep_odb",
+                                                    False)))
+        self.cb_db_any_release = QCheckBox(
+            "Reuse runs made with another Abaqus release")
+        self.cb_db_any_release.setChecked(bool(getattr(
+            prefs, "run_db_any_release", False)))
+        self.cb_db_any_release.setToolTip(
+            "Off: a run is reused only if it was made with the same Abaqus\n"
+            "release as the machine of the study (or, when a release is not\n"
+            "known, on that same PC). Two releases do not give the same\n"
+            "results.")
+        for cb in (self.cb_db_archive, self.cb_db_keep_odb,
+                   self.cb_db_any_release):
+            f_db.addRow(cb)
+        outer.addWidget(g_db)
+
         # ---- Machines group ----
         g_exec = QGroupBox("Machines")
         v_exec = QVBoxLayout(g_exec)
@@ -265,6 +297,10 @@ class PreferencesDialog(QDialog):
             abaqus_cmd            = self.fld_cmd.value(),
             abaqus_script         = self.fld_script.value(),
             default_workdir       = self.fld_workdir.value(),
+            run_db_dir            = self.fld_run_db.value(),
+            run_db_archive        = self.cb_db_archive.isChecked(),
+            run_db_keep_odb       = self.cb_db_keep_odb.isChecked(),
+            run_db_any_release    = self.cb_db_any_release.isChecked(),
             temp_unit_default     = "K" if self.cb_kelvin_default.isChecked() else "C",
             machines              = [m.to_dict() for m in ms],
             default_machine       = default,
