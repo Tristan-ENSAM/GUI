@@ -46,9 +46,12 @@ _INC_ROW = re.compile(
 
 # Match the "Output Field Frame Number" row. This is the most reliable
 # progress signal: it explicitly tells us where we are relative to the
-# total number of requested frames.
+# total number of requested frames. The number is right-aligned in a
+# 4-character field, so from frame 1000 on it touches the word
+# ("Output Field Frame Number1000, of 2000, ..."): `\s*`, not `\s+`, or the
+# parser stays on frame 999 and a 2000-frame run reads as 50 % done.
 _FRAME_ROW = re.compile(
-    r"^\s*Output Field Frame Number\s+"
+    r"^\s*Output Field Frame Number\s*"
     r"(?P<current>\d+)"
     r"\s*,\s*of\s+"
     r"(?P<total>\d+)"
