@@ -84,6 +84,13 @@ def token_name(rid):
 # ---------------------------------------------------------------------------
 # small file helpers (Python 2 and 3)
 # ---------------------------------------------------------------------------
+def transfer_manifest_name(job):
+    """File written in the GUI PC's run folder before the results are copied
+    there, {"files": {name: size}}: the GUI's transfer bar compares it with
+    what has arrived. Same name as gui.core.run_progress."""
+    return "%s.transfer.json" % job
+
+
 def _makedirs(path):
     try:
         os.makedirs(path)
@@ -539,7 +546,20 @@ class Agent(object):
                     try:
                         names = self._present(
                             j, RESULT_SUFFIXES + DELIVERY_EXTRA_SUFFIXES)
-                        move_files(j["local"], names, client)
+                        manifest = os.path.join(
+                            client, transfer_manifest_name(j["name"]))
+                        try:
+                            write_json_atomic(manifest, {"files": dict(
+                                (n, os.path.getsize(os.path.join(j["local"],
+                                                                 n)))
+                                for n in names)})
+                        except (IOError, OSError):
+                            manifest = None     # no bar, same delivery
+                        try:
+                            move_files(j["local"], names, client)
+                        finally:
+                            if manifest:
+                                _remove(manifest)
                         d["copied"] = names
                         d["delivered_to"] = client
                     except Exception as e:
