@@ -405,3 +405,87 @@ def test_move_files_keeps_sources_when_a_copy_fails(tmp_path):
     with pytest.raises(Exception):
         ra.move_files(str(src), ["a.odb"], str(tmp_path / "missing_dir"))
     assert (src / "a.odb").read_bytes() == b"a"
+
+
+# ---------------------------------------------------------------------------
+# GUI PC off when a run ended; Windows messages with accents (2026-11-02)
+# ---------------------------------------------------------------------------
+def test_text_decodes_windows_ansi_bytes():
+    # Python 2 + French Windows: the message of an OSError is cp1252 bytes.
+    assert ra._text(b"Impossible de cr\xe9er un fichier") == \
+        u"Impossible de cr\xe9er un fichier"
+    assert ra._text(OSError(u"d\xe9j\xe0")) == u"d\xe9j\xe0"
+    assert ra._text(u"plain") == u"plain"
+
+
+def test_failed_backlog_move_with_accented_error_is_logged(tmp_path,
+                                                           monkeypatch,
+                                                           setup):
+    """The agent's backlog thread died on a UnicodeDecodeError while logging
+    a French Windows error: the failure must be logged and the entry kept."""
+    agent = _agent(setup)
+    local = tmp_path / "loc"
+    local.mkdir()
+    (local / "j.odb").write_bytes(b"odb")
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / ra.token_name("r1")).write_text("x")
+    agent.backlog = [{"id": u"r1", "name": u"j", "local": str(local),
+                      "client_dir": str(client), "files": [u"j.odb"]}]
+
+    def boom(*a, **k):
+        raise OSError(183, u"Impossible de cr\xe9er un fichier d\xe9j\xe0 existant")
+    monkeypatch.setattr(ra, "move_files", boom)
+    agent.retry_backlog()
+    text = agent.out.getvalue()
+    assert u"not delivered yet" in text and u"cr\xe9er" in text
+    assert len(agent.backlog) == 1
+    assert (local / "j.odb").is_file()
+
+
+def _finished_transit(queue, rid, job, params, age=3600.0):
+    import json
+    transit = Path(queue) / "runs" / rid
+    transit.mkdir(parents=True)
+    (transit / (job + ".results.npz")).write_bytes(b"npz")
+    (transit / (job + ".meta.json")).write_text(
+        json.dumps({"model_config": params}))
+    (transit / (job + ".sta")).write_text(
+        "...\n THE ANALYSIS HAS COMPLETED SUCCESSFULLY\n")
+    done = Path(queue) / "done" / (rid + ".json")
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.write_text('{"returncode": 0}')
+    t = time.time() - age
+    os.utime(str(done), (t, t))
+    return transit
+
+
+def test_unclaimed_results_on_the_shared_drive_are_found(tmp_path):
+    """The GUI PC was off when the run ended: its results stay in
+    runs/<id>/ with done/<id>.json. A run just finished (its own GUI is
+    collecting it) and a transit folder without an outcome are left out."""
+    q = tmp_path / "queue"
+    old = _finished_transit(q, "20261029-a-ms_run000_ms1", "ms_run000_ms1",
+                            {"ms": 1})
+    _finished_transit(q, "20261102-b-ms_run001_ms200", "ms_run001_ms200",
+                      {"ms": 200}, age=1.0)
+    (q / "runs" / "20261102-c-running").mkdir()
+    assert rx.unclaimed_result_folders(q) == [old]
+    assert rx.unclaimed_result_folders(tmp_path / "nowhere") == []
+
+
+def test_resume_reuses_a_run_left_on_the_shared_drive(tmp_path):
+    from gui.sensitivity.run_cache import RunCache
+    q = tmp_path / "queue"
+    params = {"step": {"mass_scaling_factor": 1}, "elem_size": 0.002}
+    _finished_transit(q, "20261029-a-ms_run000_ms1", "ms_run000_ms1", params)
+    study = tmp_path / "study"
+    study.mkdir()
+    # What the study folder held: the live copy of an unfinished .sta.
+    (study / "ms_run000_ms1.sta").write_text("STEP TOTAL\n")
+    cache = RunCache([study])
+    assert cache.lookup(params) is None
+    for f in rx.unclaimed_result_folders(q):
+        cache.add_folder(f)
+    hit = cache.lookup(params, prefer=study)
+    assert hit is not None and hit.job == "ms_run000_ms1"

@@ -157,6 +157,34 @@ def _queue_dirs(queue) -> dict:
     return dirs
 
 
+def unclaimed_result_folders(queue, min_age: float = 60.0) -> list:
+    """Transit folders (runs/<id>/) of runs the agent finished but no GUI
+    brought back: their outcome done/<id>.json is still there after
+    `min_age` seconds. Only the `RemoteProcess` that submitted a run collects
+    its results, so when the GUI PC was switched off (or the GUI closed)
+    before the run ended, the results stay on the shared drive. A resumed
+    study adds these folders to its run cache: a run matching one of them
+    by its parameters is copied into the study folder instead of being run
+    again. Read-only: nothing on the shared drive is moved or deleted."""
+    q = Path(queue)
+    out = []
+    try:
+        outcomes = sorted((q / "done").glob("*.json"))
+    except OSError:
+        return out
+    now = time.time()
+    for done in outcomes:
+        try:
+            if now - done.stat().st_mtime < min_age:
+                continue        # its own GUI is probably collecting it now
+        except OSError:
+            continue
+        transit = q / "runs" / done.stem
+        if transit.is_dir():
+            out.append(transit)
+    return out
+
+
 def check_remote_setup(queue_dir: str, workdir: str, scripts_dir) -> list:
     """Problems that make a remote run impossible, as user-readable lines."""
     problems = []
