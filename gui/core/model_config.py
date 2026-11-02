@@ -550,6 +550,10 @@ class OptimizationCfg:
     eps_share_mesh:   str  = "1"
     eps_share_domain: str  = "1"
     ms_search:      str  = "bisection"
+    # "identify": the list stops at the first failed comparison; "sweep":
+    # every listed value is run (whole E_max(ms) curve, same ms*), list
+    # search only (Tristan, 2026-11-02).
+    ms_goal:        str  = "identify"
     ms_factor:      str  = "10"
     ms_stop_ratio:  str  = "1.0201"
     ms_max:         str  = "1e7"

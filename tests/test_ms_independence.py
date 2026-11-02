@@ -200,6 +200,69 @@ class TestStudy:
             _study(0.001, thresholds={})
 
 
+class TestSweep:
+    """goal="sweep": every listed value is run, ms* unchanged (2026-11-02)."""
+    _VALUES = (1, 250, 500, 1000, 2000, 4000)
+
+    def test_runs_every_value_and_keeps_the_same_ms(self):
+        ident = _study(0.012, ms_values=self._VALUES, reference="first")
+        res = _study(0.012, ms_values=self._VALUES, reference="first",
+                     goal="sweep")
+        assert res.run_ms == [float(v) for v in self._VALUES]
+        assert [c.success for c in res.comparisons] == [True, True, False,
+                                                        False, False]
+        assert res.retained == ident.retained == 500.0
+        assert res.status == ident.status == "converged"
+        assert res.settings["goal"] == "sweep"
+        from gui.sensitivity.ms_independence import failure_cause
+        assert failure_cause(res) == "qoi"
+
+    def test_a_pass_after_a_failure_does_not_move_ms(self):
+        # ms = 1000 fails (run missing); 2000 and 4000 pass against 1.
+        res = _study(0.001, ms_values=self._VALUES, reference="first",
+                     run_bundle=_runner(0.001, fail_ms=1000.0), goal="sweep")
+        assert [c.success for c in res.comparisons] == [True, True, False,
+                                                        True, True]
+        assert res.retained == 500.0 and res.status == "converged"
+        from gui.sensitivity.ms_independence import failure_cause
+        assert failure_cause(res) == "run"
+
+    def test_previous_reference_chains_through_a_failure(self):
+        res = _study(0.012, goal="sweep")
+        assert res.run_ms == list(DEFAULT_MS_VALUES)
+        assert [c.ms_from for c in res.comparisons] == [250.0, 500.0, 1000.0,
+                                                        2000.0]
+        assert res.retained == 1000.0 and res.status == "converged"
+
+    def test_first_failure_below_range_is_kept(self):
+        res = _study(1.0, goal="sweep")
+        assert res.status == "below_range" and res.retained is None
+        assert res.n_runs == len(DEFAULT_MS_VALUES)
+
+    def test_cancel_after_the_deciding_failure_keeps_ms(self):
+        calls = []
+
+        def cancel():
+            calls.append(1)
+            return len(calls) > 7        # after the 3rd comparison
+        res = _study(0.012, ms_values=self._VALUES, reference="first",
+                     goal="sweep", should_cancel=cancel)
+        assert res.n_runs < len(self._VALUES)
+        assert res.status == "converged" and res.retained == 500.0
+
+    def test_identify_is_the_default(self):
+        res = _study(0.012)
+        assert res.settings["goal"] == "identify"
+        assert res.n_runs == 4
+
+    def test_sweep_needs_the_list_search(self):
+        with pytest.raises(ValueError):
+            _study(0.001, ms_values=(1.0,), search="bisection",
+                   goal="sweep")
+        with pytest.raises(ValueError):
+            _study(0.001, goal="all")
+
+
 class TestReference:
     _VALUES = (1, 250, 500, 1000, 2000, 4000)
 

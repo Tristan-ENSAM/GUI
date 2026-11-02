@@ -732,6 +732,10 @@ class ModelStepsMixin:
             if search != self.ms_search():
                 self.set_ms_search(search)
                 changed.append("ms search")
+            goal = spec.get("goal") or "identify"
+            if goal != self.ms_goal():
+                self.set_ms_goal(goal)
+                changed.append("ms goal")
             if search == "bisection":
                 for le, key, label in (
                         (self.le_ms_factor, "factor", "bracketing factor"),

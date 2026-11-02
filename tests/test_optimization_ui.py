@@ -594,6 +594,23 @@ class TestMsStudyWiring:
         assert tab.cfg.step.output_filter_verify is False
         assert callable(kw["guard_fn"]) and callable(kw["cost_fn"])
 
+    def test_sweep_goal_forces_the_list_and_reaches_the_study(
+            self, ms_launch):
+        # Identify / sweep choice (Tristan, 2026-11-02).
+        tab = ms_launch
+        _fill_thresholds(tab)
+        assert tab.ms_goal() == "identify"
+        tab.set_ms_goal("sweep")
+        assert tab.ms_search() == "list"
+        assert not tab.cb_ms_search.isEnabled()
+        assert tab.cfg.optimization.ms_goal == "sweep"
+        tab._on_run_ms_independence()
+        kw = _CaptureWorker.last
+        assert kw["goal"] == "sweep" and kw["search"] == "list"
+        tab.set_ms_goal("identify")
+        assert tab.cb_ms_search.isEnabled()
+        assert tab._ms_spec()["goal"] == "identify"
+
     def test_guard_fn_adds_the_filter_checks(self, ms_launch, monkeypatch):
         tab = ms_launch
         _fill_thresholds(tab)
