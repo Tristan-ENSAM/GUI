@@ -60,7 +60,9 @@ copies). When it cannot (window closed, connection lost), the results come
 through the shared drive so the study goes on, and the .odb waits on the
 compute PC until the session is open again: the token is then left in the
 run folder for the agent, which removes it once the .odb is there
-("pending_delivery" in the outcome). The token makes sure
+("pending_delivery" in the outcome). Even with the session open, the .odb
+is moved after the run is reported finished, by a background thread of the
+agent, so the next run does not wait for it ("pending_delivery" too). The token makes sure
 \\\\tsclient is this PC and not another one connected to the session.
 """
 from __future__ import annotations
@@ -464,14 +466,19 @@ class RemoteProcess:
             text = out.get("launcher_output") or ""
             if self.error:
                 text += "\n[REMOTE] %s\n" % self.error
-            if self.delivered_to:
+            if self.delivered_to and pending:
+                text += ("\n[REMOTE] results moved to the run folder through "
+                         "Remote Desktop (%s); %s follows in the background "
+                         "while the next run computes\n"
+                         % (self.delivered_to, ", ".join(pending)))
+            elif self.delivered_to:
                 text += ("\n[REMOTE] results and .odb moved to the run "
                          "folder through Remote Desktop (%s)\n"
                          % self.delivered_to)
             elif out.get("delivery_note"):
                 text += ("\n[REMOTE] not delivered through Remote Desktop: "
                          "%s\n" % out["delivery_note"])
-            if pending:
+            if pending and not self.delivered_to:
                 text += ("\n[REMOTE] %s will be moved to the run folder by "
                          "the agent once Remote Desktop is open again with "
                          "drive C: redirected\n" % ", ".join(pending))

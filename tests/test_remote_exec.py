@@ -309,8 +309,10 @@ def test_results_and_odb_delivered_straight_to_the_gui_pc(setup,
     assert proc.token.is_file()
     assert proc.wait(timeout=30) == 0
     assert proc.delivered_to == str(run_dir)
-    assert (run_dir / "job1.odb").read_bytes() == b"x" * 1000
     assert (run_dir / "job1.results.npz").read_bytes() == b"npz"
+    # The .odb follows in the background, then the token goes.
+    _wait_for(lambda: not running_agent.backlog)
+    assert (run_dir / "job1.odb").read_bytes() == b"x" * 1000
     assert not proc.transit.exists()
     # Moved, not copied: nothing of the run is left on the compute PC.
     local = Path(ra.local_run_dir(setup["local_root"], str(proc.transit)))
@@ -318,7 +320,62 @@ def test_results_and_odb_delivered_straight_to_the_gui_pc(setup,
     assert sorted(p.name for p in run_dir.iterdir()
                   if p.name.startswith(".")) == []      # token removed
     out = proc.stdout.read()
-    assert b"moved to the run folder through Remote Desktop" in out
+    assert b"results moved to the run folder through Remote Desktop" in out
+    assert b"follows in the background" in out
+
+
+def _wait_for(cond, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+def test_next_run_starts_while_the_odb_is_still_being_moved(setup,
+                                                            monkeypatch):
+    """The .odb copy through Remote Desktop takes minutes: the run is
+    reported finished as soon as its results are there, and the next run of
+    the queue runs while the .odb is moved."""
+    gate = threading.Event()
+    real_copy = ra.shutil.copyfile
+
+    def slow_copy(src, dst):
+        if str(src).endswith(".odb"):
+            assert gate.wait(30), "gate never opened"
+        return real_copy(src, dst)
+    monkeypatch.setattr(ra.shutil, "copyfile", slow_copy)
+    agent = _agent(setup)
+    stop = threading.Event()
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
+    th.start()
+    try:
+        run_dir = setup["gui_wd"] / "study"
+        procs = [rx.RemoteProcess(setup["queue"], run_dir, {},
+                                  {"cpus": 1, "job_name": job},
+                                  setup["scripts"],
+                                  remote_abaqus_cmd=setup["abaqus"],
+                                  check_agent=False, client_dir=str(run_dir))
+                 for job in ("job1", "job2")]
+        for p in procs:
+            assert p.wait(timeout=30) == 0      # .odb copies still blocked
+        for job in ("job1", "job2"):
+            assert (run_dir / (job + ".results.npz")).read_bytes() == b"npz"
+            assert not (run_dir / (job + ".odb")).exists()
+        # Token kept for the agent while its .odb is on the way.
+        assert all(p.token.is_file() for p in procs)
+        assert [e["files"] for e in agent.backlog] == [["job1.odb"],
+                                                        ["job2.odb"]]
+        gate.set()
+        _wait_for(lambda: not agent.backlog)
+    finally:
+        gate.set()
+        stop.set()
+        th.join(timeout=5)
+    for p, job in zip(procs, ("job1", "job2")):
+        assert (run_dir / (job + ".odb")).read_bytes() == b"x" * 1000
+        assert not p.token.exists()
+        local = Path(ra.local_run_dir(setup["local_root"], str(p.transit)))
+        assert not (local / (job + ".odb")).exists()
 
 
 def test_falls_back_to_the_shared_drive_without_the_token(setup,
