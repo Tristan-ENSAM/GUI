@@ -437,6 +437,8 @@ class ModelStepsMixin:
             self._last_domain_ok = False    # usable once it ends well
         self._study_cache = RunCache(
             [run_dir] + [f for f in (spec.get("cache_folders") or []) if f])
+        if mode != "load":
+            self._add_unclaimed_remote_runs(prefs)
         run_bundle = self._make_run_bundle(prefs, run_dir, cpus,
                                            JOB_PREFIX[step])
         params = self._model_params()
@@ -474,6 +476,27 @@ class ModelStepsMixin:
         if n:
             self._log_ui("  %d finished run(s) available for reuse" % n)
         return run_bundle
+
+    def _add_unclaimed_remote_runs(self, prefs):
+        """Runs finished on the compute PC while this GUI was not there to
+        bring them back (PC switched off, GUI closed): their results wait in
+        the queue folder on the shared drive. Indexed in the study cache so
+        a resume reuses them instead of running them again."""
+        try:
+            from gui.core.remote_exec import (
+                is_remote, unclaimed_result_folders)
+            if not is_remote(prefs):
+                return
+            folders = unclaimed_result_folders(prefs.remote_queue_dir)
+        except Exception as e:
+            log_swallowed("scanning the remote queue for unclaimed runs: %s"
+                          % e)
+            return
+        n = sum(self._study_cache.add_folder(f) for f in folders)
+        if n:
+            self._log_ui("  %d finished run(s) found on the shared drive "
+                         "(results never brought back, e.g. the PC was off "
+                         "when they ended): reused when they match" % n)
 
     def _log_machine(self, prefs, run_dir):
         """Log the machine the runs go to and record it in the study's

@@ -91,6 +91,22 @@ def transfer_manifest_name(job):
     return "%s.transfer.json" % job
 
 
+def _text(x):
+    """Unicode text of `x` for the log. On Python 2 an exception raised by
+    Windows carries its message as bytes in the ANSI code page (French
+    accents: "Impossible de cr\xe9er..."): mixing it with a unicode string
+    raised UnicodeDecodeError and killed the thread that wanted to log it."""
+    if isinstance(x, bytes):
+        try:
+            return x.decode("utf-8")
+        except UnicodeDecodeError:
+            return x.decode("cp1252", "replace")
+    try:
+        return u"%s" % (x,)
+    except UnicodeError:
+        return _text(str(x))        # Python 2: str(ex) is bytes
+
+
 def _makedirs(path):
     try:
         os.makedirs(path)
@@ -265,7 +281,12 @@ class Agent(object):
         return os.path.join(self.queue, name, *rest)
 
     def say(self, msg):
-        self.out.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+        line = u"[%s] %s\n" % (time.strftime("%H:%M:%S"), _text(msg))
+        try:
+            self.out.write(line)
+        except UnicodeError:
+            enc = getattr(self.out, "encoding", None) or "ascii"
+            self.out.write(line.encode(enc, "replace"))
         self.out.flush()
 
     def heartbeat(self, force=False):
@@ -282,7 +303,7 @@ class Agent(object):
                 "busy_job": self.job["id"] if self.job else None,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S")})
         except (IOError, OSError) as e:
-            self.say("WARNING: heartbeat not written (%s)" % e)
+            self.say(u"WARNING: heartbeat not written (%s)" % _text(e))
 
     def publish(self, rid, outcome):
         outcome.setdefault("agent_host", self.host)
@@ -383,7 +404,7 @@ class Agent(object):
             self.say("could not start %s: %r" % (job, e))
             self.publish(rid, {"returncode": 1, "local_run_dir": local,
                                "error": "could not start Abaqus on the "
-                                        "compute PC: %s" % (e,)})
+                                        "compute PC: %s" % (_text(e),)})
             return
         chunks = []
 
@@ -480,7 +501,7 @@ class Agent(object):
             _makedirs(self.local_root)
             write_json_atomic(self._backlog_path, self.backlog)
         except (IOError, OSError) as e:
-            self.say("WARNING: backlog not saved (%s)" % e)
+            self.say(u"WARNING: backlog not saved (%s)" % _text(e))
 
     def _add_backlog(self, entry):
         with self._backlog_lock:
@@ -515,8 +536,8 @@ class Agent(object):
                     done = True
                     self.say("delivered %s" % ", ".join(names))
                 except Exception as ex:
-                    self.say("waiting %s not delivered yet (%s)"
-                             % (", ".join(names), ex))
+                    self.say(u"waiting %s not delivered yet (%s)"
+                             % (u", ".join(names), _text(ex)))
             if done:
                 _remove(token)      # the client left it for this delivery
                 with self._backlog_lock:
@@ -563,7 +584,7 @@ class Agent(object):
                         d["copied"] = names
                         d["delivered_to"] = client
                     except Exception as e:
-                        d["note"] = "copy to %s failed (%s)" % (client, e)
+                        d["note"] = u"copy to %s failed (%s)" % (_text(client), _text(e))
                 else:
                     d["note"] = ("%s not reachable from this session (Remote "
                                  "Desktop window closed, drive C: not "
@@ -578,8 +599,8 @@ class Agent(object):
                         d["copied"] += self._copy_results(j, j["shared"],
                                                           (suf,))
                     except (IOError, OSError) as e:
-                        self.say("could not copy back %s: %s"
-                                 % (j["name"] + suf, e))
+                        self.say(u"could not copy back %s: %s"
+                                 % (_text(j["name"] + suf), _text(e)))
                 if client:
                     d["pending"] = self._present(j, DELIVERY_EXTRA_SUFFIXES)
                     if d["pending"]:
