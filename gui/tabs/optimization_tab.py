@@ -554,6 +554,22 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "values are added by doubling if every comparison passes.")
         self.cb_ms_search.currentIndexChanged.connect(self._on_ms_search)
         sg.addWidget(self.cb_ms_search, 2, 1)
+        sg.addWidget(QLabel("goal"), 3, 0)
+        self.cb_ms_goal = QComboBox()
+        self.cb_ms_goal.addItem(
+            "identify ms* (stop at the first failure)", "identify")
+        self.cb_ms_goal.addItem(
+            "sweep (run every listed value, even after a failure)", "sweep")
+        self.cb_ms_goal.setToolTip(
+            "Identify: the study stops at the first failed comparison (the\n"
+            "runs after it cannot change ms*).\n"
+            "Sweep: every listed value is run, even after a comparison\n"
+            "fails, to get the whole curve E_max(ms) (e.g. an h × ms grid).\n"
+            "ms* is the same in both: the last value of the unbroken chain\n"
+            "of passes. A sweep runs the listed values: the search is set\n"
+            "to the list.")
+        self.cb_ms_goal.currentIndexChanged.connect(self._on_ms_goal)
+        sg.addWidget(self.cb_ms_goal, 3, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
         mark_primary(self.btn_ms)
         self.btn_ms.setToolTip(
@@ -562,7 +578,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "eps_q of the common settings). A run fails only when its job or an\n"
             "output is missing; R_K, R_HG, the filter check and the\n"
             "reverberation are reported only, to explain a deviation. Keeps the largest ms reached by an unbroken\n"
-            "chain of successes; stops at the first failure. Finished runs of\n"
+            "chain of successes; stops at the first failure (unless the goal\n"
+            "is a sweep). Finished runs of\n"
             "an interrupted study are reused when it is resumed.")
         self.btn_ms.clicked.connect(self._on_run_ms_independence)
         sg.addWidget(self.btn_ms, 0, 2)
@@ -1132,6 +1149,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.cb_ms_reference.currentIndexChanged.connect(
             self._sync_opt_to_cfg)
         self.cb_ms_search.currentIndexChanged.connect(self._sync_opt_to_cfg)
+        self.cb_ms_goal.currentIndexChanged.connect(self._sync_opt_to_cfg)
         self.cb_reuse_runs.toggled.connect(self._sync_opt_to_cfg)
         self.cmb_machine.machineChanged.connect(self._sync_opt_to_cfg)
         self.sp_gci_n.valueChanged.connect(self._sync_opt_to_cfg)
@@ -1194,6 +1212,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.ms_elem_size = self.le_ms_elem.text()
         o.ms_reference = self.ms_reference()
         o.ms_search = self.ms_search()
+        o.ms_goal = self.ms_goal()
         o.ms_factor = self.le_ms_factor.text()
         o.ms_stop_ratio = self.le_ms_stop.text()
         o.ms_max = self.le_ms_max.text()
@@ -1247,6 +1266,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 o, "ms_reference", OptimizationCfgDefaults.ms_reference))
             self.set_ms_search(getattr(
                 o, "ms_search", OptimizationCfgDefaults.ms_search))
+            self.set_ms_goal(getattr(
+                o, "ms_goal", OptimizationCfgDefaults.ms_goal))
             for le, attr in ((self.le_ms_factor, "ms_factor"),
                              (self.le_ms_stop, "ms_stop_ratio"),
                              (self.le_ms_max, "ms_max")):
@@ -2282,6 +2303,25 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.le_ms_values.setEnabled(lst)
         self.cb_ms_reference.setEnabled(lst)
 
+    def ms_goal(self) -> str:
+        """"identify" (stop at the first failure) or "sweep" (run every
+        listed value)."""
+        return self.cb_ms_goal.currentData() or "identify"
+
+    def set_ms_goal(self, goal) -> None:
+        i = self.cb_ms_goal.findData(
+            "sweep" if goal == "sweep" else "identify")
+        if i >= 0 and i != self.cb_ms_goal.currentIndex():
+            self.cb_ms_goal.setCurrentIndex(i)
+        self._on_ms_goal()
+
+    def _on_ms_goal(self, *_):
+        """A sweep runs the listed values: the search is the list."""
+        sweep = self.ms_goal() == "sweep"
+        if sweep and self.ms_search() != "list":
+            self.set_ms_search("list")
+        self.cb_ms_search.setEnabled(not sweep)
+
     def ms_search_settings(self):
         """(factor, stop ratio, largest ms) of the bisection; raises
         ValueError."""
@@ -2364,6 +2404,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "reference": ("first" if search == "bisection"
                           else self.ms_reference()),
             "search": search, **bis, "eps_shares": shares,
+            "goal": self.ms_goal() if search == "list" else "identify",
             "grid_step": self.grid_step(),
             "grid_step_set": self._grid_step_set(),
             "thresholds_abs": self.thresholds(),
@@ -2396,9 +2437,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         reference = spec.get("reference") or "previous"
         # A study started before the bisection search ran its list.
         search = spec.get("search") or "list"
+        # A study started before the goal choice stopped at the first
+        # failure.
+        goal = spec.get("goal") or "identify"
         bis = {}
         if search == "bisection":
             reference = "first"
+            goal = "identify"
             bis = {"factor": float(spec.get("factor", 10.0)),
                    "stop_ratio": float(spec.get("stop_ratio", 1.0201)),
                    "ms_max": float(spec.get("ms_max", 1e7))}
@@ -2455,6 +2500,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                      % ("the first value (ms = %g, reference run)"
                         % ms_values[0] if reference == "first"
                         else "the previous value"))
+        if goal == "sweep":
+            self._log_ui("  goal: sweep (every listed value is run, even "
+                         "after a failed comparison; ms* = end of the "
+                         "unbroken chain of passes)")
         self._log_ui("  eps_q: " + "  ".join("%s=%.4g" % kv
                                               for kv in sorted(thr.items())))
         self._log_ui("  blocking: outputs present | reported: R_K (limit "
@@ -2468,7 +2517,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             thresholds=thr, ms_values=ms_values, window=window,
             evf_threshold=float(spec.get("evf_threshold", 0.5)),
             guard_fn=guard_fn, cost_fn=cost_fn, reference=reference,
-            search=search, metric=spec.get("metric", "pointwise"), **bis)
+            search=search, metric=spec.get("metric", "pointwise"),
+            goal=goal, **bis)
         self._ms_worker.progress.connect(self._on_ms_progress)
         self._ms_worker.finished_ok.connect(self._on_ms_done)
         self._ms_worker.failed.connect(self._on_fail)
@@ -2592,6 +2642,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 why = ("the first comparison could not be judged: one of "
                        "its runs did not finish or misses outputs (see the "
                        "run lines above); fix the run and resume the study")
+        if (res.settings or {}).get("goal") == "sweep":
+            why += ("; sweep: the values after the first failure were run "
+                    "too (curve only, ms* unchanged)")
         self._log_ui("=" * 68)
         self._log_ui("MASS-SCALING RESULT: %s | %d runs" % (why, res.n_runs))
         for w in res.warnings:

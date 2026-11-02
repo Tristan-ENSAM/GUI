@@ -34,6 +34,18 @@ Both modes use the same stop rule:
   in "first" mode, ms_1 must be closer to the reference)
 * cancelled                  -> ms* as reached so far status "cancelled"
 
+Goal: identify or sweep (Tristan, 2026-11-02)
+--------------------------------------------
+"identify" (default) is the stop rule above: the list stops at the first
+failed comparison, since the runs after it cannot change ms*. "sweep" runs
+EVERY value of the list even after a failure, to get the whole curve
+E_max(ms) (e.g. the h x ms grid of the campaign). ms* and the status are
+the same as in "identify" (same rule, decided by the first failure); the
+extra comparisons only add data and monotonicity warnings. In "previous"
+mode each run is then compared with the run just before it, failed or not.
+Sweep applies to the list search only: the bisection chooses its values
+from the pass/fail answers, so it has nothing to sweep.
+
 Time alignment (why the domain study's exact rule is relaxed here)
 -----------------------------------------------------------------
 Abaqus/Explicit writes a field frame at the end of the increment that
@@ -93,6 +105,9 @@ MS_REFERENCES = ("first", "previous")
 # 2026-10-20). From a x10 bracket: ceil(log2(ln 10 / ln 1.0201)) = 7
 # bisection runs.
 MS_SEARCHES = ("list", "bisection")
+# Goal of the study (2026-11-02): stop at the first failure ("identify") or
+# run every listed value ("sweep"); see the module docstring.
+MS_GOALS = ("identify", "sweep")
 DEFAULT_BRACKET_FACTOR = 10.0
 DEFAULT_STOP_RATIO = 1.0201
 DEFAULT_MS_MAX = 1.0e7
@@ -230,10 +245,14 @@ class MsStudyResult:
 def failure_cause(result: MsStudyResult) -> Optional[str]:
     """Why the last comparison failed: "run" (a run of the pair did not
     finish or misses outputs, so the factor was not judged), "qoi"
-    (E_max >= 1), or None when it did not fail."""
-    if not result.comparisons or result.comparisons[-1].success:
+    (E_max >= 1), or None when it did not fail. A sweep goes on after the
+    failure that decides ms*: there it is the FIRST failed comparison."""
+    comps = result.comparisons
+    if (result.settings or {}).get("goal") == "sweep":
+        comps = [c for c in comps if not c.success][:1]
+    if not comps or comps[-1].success:
         return None
-    return "run" if not result.comparisons[-1].guards_ok else "qoi"
+    return "run" if not comps[-1].guards_ok else "qoi"
 
 
 def with_mass_scaling(cfg, ms: float):
@@ -260,7 +279,8 @@ def run_ms_independence(
         stop_ratio: float = DEFAULT_STOP_RATIO,
         ms_max: float = DEFAULT_MS_MAX,
         max_runs: int = DEFAULT_MAX_RUNS,
-        metric: str = "pointwise") -> MsStudyResult:
+        metric: str = "pointwise",
+        goal: str = "identify") -> MsStudyResult:
     """Run the ms sequence and retain the largest independent factor.
 
     run_bundle(cfg) -> ResultsBundle | None. Each config passed is a deep
@@ -277,9 +297,17 @@ def run_ms_independence(
         is then compared with the reference whatever `reference` says, and
         only ms_values[0] is used.
     metric : deviation between two runs, "mean" or "pointwise"
-        (domain_independence.METRICS)."""
+        (domain_independence.METRICS).
+    goal : "identify" stops the list at the first failed comparison;
+        "sweep" runs every listed value (same ms* and status). List search
+        only (MS_GOALS)."""
     if search not in MS_SEARCHES:
         raise ValueError("search must be one of %s" % (MS_SEARCHES,))
+    if goal not in MS_GOALS:
+        raise ValueError("goal must be one of %s" % (MS_GOALS,))
+    if goal == "sweep" and search != "list":
+        raise ValueError("a sweep runs the listed values: use the list "
+                         "search")
     ms_values = [float(v) for v in ms_values]
     if search == "bisection":
         if not ms_values:
@@ -323,6 +351,7 @@ def run_ms_independence(
         "elem_size": elem, "thresholds": dict(thr), "window": tuple(window),
         "evf_threshold": float(evf_threshold), "ms_values": list(ms_values),
         "reference": reference, "search": search, "metric": metric,
+        "goal": goal,
         "domain_dims": {"h_wp": float(domain_dims.h_wp),
                         "h_void": float(domain_dims.h_void),
                         "l_wp": float(domain_dims.l_wp),
@@ -358,14 +387,17 @@ def run_ms_independence(
                           stop_ratio, ms_max, max_runs, cancelled, emit)
     i_prev = 0
     status = "upper_end"
+    broken = False          # sweep: a comparison already failed
     for k in range(1, len(ms_values)):
+        # A sweep cancelled after its deciding failure keeps that ms*: the
+        # runs left only extend the curve.
         if cancelled():
-            status = "cancelled"
+            status = status if broken else "cancelled"
             break
         cur = simulate(ms_values[k])
         if cancelled():
             # A cancel during this run: its failure says nothing about ms.
-            status = "cancelled"
+            status = status if broken else "cancelled"
             break
         (rec_a, s_a), (rec_b, s_b) = prev, cur
         info: Dict[str, float] = {}
@@ -390,12 +422,17 @@ def run_ms_independence(
         result.comparisons.append(comp)
         emit({"phase": "comparison", "comparison": comp,
               "n_runs": len(result.runs)})
-        if not success:
+        if not success and not broken:
             status = "converged" if k >= 2 else "below_range"
+            broken = True
+        if broken and goal != "sweep":
             break
-        result.retained = ms_values[k]
+        if not broken:
+            result.retained = ms_values[k]
         if reference == "previous":
             prev, i_prev = cur, k
+    if goal == "sweep":
+        result.warnings.extend(monotonicity_warnings(result.comparisons))
     result.status = status
     emit({"phase": "done", "result": result, "n_runs": len(result.runs)})
     return result
