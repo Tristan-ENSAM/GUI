@@ -23,30 +23,79 @@ def _vprint(msg):
     sys.stdout.flush()
 
 
+# Progress lines read by the GUI to drive its extraction bar. They are kept
+# out of the visible log (gui/core/run_progress.py filters this tag), so they
+# can be frequent. Format, one line each:
+#   [PROGRESS] extract <fraction 0..1> | <label> <i>/<N> frames | ...
+PROGRESS_TAG = "[PROGRESS]"
+
+# Overall extraction progress, shared by the frame loops (one per field and
+# instance, plus the tool displacements): `k` loops finished out of `n`,
+# `t0` the start of the extraction.
+_EXTRACT = {"k": 0, "n": 1, "t0": None}
+
+
+def _progress_line(frac, detail):
+    t0 = _EXTRACT["t0"]
+    el = (_time.time() - t0) if t0 is not None else 0.0
+    line = "%s extract %.4f | %s | %s elapsed" % (PROGRESS_TAG, frac, detail,
+                                                   _hms(el))
+    if 0.0 < frac < 1.0:
+        # Linear extrapolation of the whole extraction, not of one field.
+        line += " | ~%s left" % _hms(el * (1.0 - frac) / frac)
+    _vprint(line)
+
+
 class _FrameProgress(object):
-    """Print 'frame i/N, elapsed, remaining' about every 10 % of the frames.
+    """Report the progress of one frame loop.
 
     The frame loops below read every value of the instance (through
     bulkDataBlocks when available, else value by value in Python) and can
-    run for hours on a fine mesh without printing anything, which reads as a
-    frozen GUI. These lines show the extraction is moving and how long the
-    current field still needs (remaining = linear extrapolation)."""
+    run for hours on a fine mesh. Every ~1 % of the frames a [PROGRESS] line
+    gives the GUI the overall extraction fraction; the visible log only gets
+    one line per field when its loop is over (frames and time)."""
 
-    def __init__(self, label, n_frames, n_steps=10):
+    def __init__(self, label, n_frames, n_steps=100):
         self.label = label
         self.n = max(int(n_frames), 1)
         self.every = max(self.n // n_steps, 1)
         self.t0 = _time.time()
+
+    def _overall(self, done):
+        n = max(int(_EXTRACT["n"]), 1)
+        k = min(int(_EXTRACT["k"]), n - 1)
+        return min(1.0, (k + done / float(self.n)) / n)
 
     def tick(self, fi):
         """Call at the top of iteration `fi`: frames 0..fi-1 are done."""
         done = fi
         if done == 0 or done % self.every:
             return
-        el = _time.time() - self.t0
-        rem = el * (self.n - done) / float(done)
-        _vprint("    %s: %d/%d frames read, %s elapsed, ~%s remaining"
-                % (self.label, done, self.n, _hms(el), _hms(rem)))
+        _progress_line(self._overall(done), "%s %d/%d frames"
+                       % (self.label, done, self.n))
+
+    def close(self):
+        """Call once the loop is over."""
+        _vprint("    %s: %d frames read in %s"
+                % (self.label, self.n, _hms(_time.time() - self.t0)))
+        _EXTRACT["k"] += 1
+        n = max(int(_EXTRACT["n"]), 1)
+        _progress_line(min(1.0, _EXTRACT["k"] / float(n)),
+                       "%s done" % self.label)
+
+
+def _n_frame_loops(kind, field_vars):
+    """Frame loops the extraction runs on one instance: every field on the
+    Eulerian one; the element fields plus the displacements on a Lagrangian
+    one (nodal vector fields are skipped there)."""
+    if kind == "eulerian":
+        return len(field_vars)
+    return len([v for v in field_vars if v not in _NODAL_VECTOR_VARS]) + 1
+
+
+def _skip_frame_loop():
+    """A planned frame loop that will not run (field not in the ODB)."""
+    _EXTRACT["n"] = max(int(_EXTRACT["n"]) - 1, 1)
 
 
 def _hms(seconds):
@@ -388,6 +437,7 @@ def _extract_field(step, var, inst_name, kept_elem_ids, root_assembly,
             pos = elem_id_to_pos.get(lbl)
             if pos is not None:
                 out[fi, pos] = scalars[k]
+    _prog.close()
     return out
 
 
@@ -418,6 +468,7 @@ def _extract_displacements(step, inst_name, kept_node_ids, root_assembly):
                 out[fi, pos, 0] = d[0]
                 out[fi, pos, 1] = d[1]
                 out[fi, pos, 2] = d[2] if len(d) > 2 else 0.0
+    _prog.close()
     return out
 
 
@@ -491,6 +542,7 @@ def _extract_nodal_vector_to_elem(step, var, inst_name, kept_node_ids,
         v1_out[fi] = nodal_v1[elements].mean(axis=1)
         v2_out[fi] = nodal_v2[elements].mean(axis=1)
     mag = _np.sqrt(v1_out * v1_out + v2_out * v2_out).astype(_np.float32)
+    _prog.close()
     return {var + "1": v1_out, var + "2": v2_out, var: mag}
 
 
@@ -631,6 +683,7 @@ def extract_results(job_name, model_cfg, full_domain=False):
     print("EXTRACTING results from %s.odb" % job_name)
     print("=" * 72)
     sys.stdout.flush()
+    _EXTRACT.update(k=0, n=1, t0=_time.time())
 
     _roi = _resolve_roi(model_cfg)
     if full_domain:
@@ -679,6 +732,17 @@ def extract_results(job_name, model_cfg, full_domain=False):
 
         _npz_payload = {"times": _times}
         _instances_meta = {}
+
+        # Planned frame loops, for the overall fraction of the progress bar.
+        _n_loops = 0
+        for _inst_name in _odb.rootAssembly.instances.keys():
+            _inst = _odb.rootAssembly.instances[_inst_name]
+            if len(_inst.elements) == 0:
+                continue
+            _n_loops += _n_frame_loops(
+                "eulerian" if _inst.elements[0].type.startswith("EC")
+                else "lagrangian", _field_vars)
+        _EXTRACT["n"] = max(_n_loops, 1)
 
         for _inst_name in _odb.rootAssembly.instances.keys():
             _inst = _odb.rootAssembly.instances[_inst_name]
@@ -732,6 +796,8 @@ def extract_results(job_name, model_cfg, full_domain=False):
                 _odb.close()
                 sys.exit(2)
             if _n_kept_elem == 0:
+                for _ in range(_n_frame_loops(_kind, _field_vars)):
+                    _skip_frame_loop()
                 continue
 
             _npz_payload["%s__nodes_init" % _inst_name] = _nodes_init
@@ -752,6 +818,7 @@ def extract_results(job_name, model_cfg, full_domain=False):
                             filter_suffix=_fo_filter_suffix)
                     except KeyError:
                         _vprint("    not available, skipping.")
+                        _skip_frame_loop()
                         continue
                     for _vk in (_var + "1", _var + "2", _var):
                         _npz_payload["%s__fields__%s" % (_inst_name, _vk)] = _vf[_vk]
@@ -763,6 +830,7 @@ def extract_results(job_name, model_cfg, full_domain=False):
                                            filter_suffix=_fo_filter_suffix)
                 except KeyError:
                     _vprint("    not available, skipping.")
+                    _skip_frame_loop()
                     continue
                 _npz_payload["%s__fields__%s" % (_inst_name, _var)] = _arr
                 _stored_vars.append(_var)
@@ -789,6 +857,7 @@ def extract_results(job_name, model_cfg, full_domain=False):
             }
 
         _vprint("\nExtracting history...")
+        _progress_line(1.0, "fields done, reading the history")
         _h_t, _rf1, _rf2 = _extract_history_rf(_step, _ho_filter_suffix)
         _history_vars = []
         if _h_t is not None:
@@ -883,6 +952,7 @@ def extract_results(job_name, model_cfg, full_domain=False):
 
         _out_npz  = job_name + ".results.npz"
         _out_json = job_name + ".meta.json"
+        _progress_line(1.0, "writing the results bundle")
         _vprint("\nWriting %s ..." % _out_npz)
         _np.savez_compressed(_out_npz, **_npz_payload)
         _vprint("Writing %s ..." % _out_json)

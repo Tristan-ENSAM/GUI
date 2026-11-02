@@ -15,6 +15,7 @@ A future iteration will:
   - Optionally chain `ABQ.extract()` after a successful run.
 """
 from __future__ import annotations
+import logging
 from pathlib import Path
 from PySide6.QtCore import (Signal, Qt, QProcess, QProcessEnvironment,
                             QTimer)
@@ -22,15 +23,17 @@ from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QSpinBox,
     QPushButton, QPlainTextEdit, QFormLayout, QFrame, QScrollArea, QMessageBox,
-    QProgressBar
 )
 
 from gui.core.async_call import run_async
+from gui.core.logging_util import log_swallowed
 from gui.core.sta_parser import parse_sta
 
 from gui.core.model_config import ModelConfig
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.theme import mark_primary
+from gui.widgets.run_progress import RunProgressBars
+from gui.core.run_progress import LogLineFilter
 from gui.core.remote_exec import (is_remote, launch_problems,
                                   request_cancel_by_job, submit_command)
 from gui.sensitivity.run_worker import (abaqus_terminate_job,
@@ -256,8 +259,9 @@ class JobTab(QWidget):
     def _build_progress_panel(self) -> QGroupBox:
         """Build the run-progress panel.
 
-        Two lines:
-          1. A `QProgressBar` going from 0 to 100 (percent).
+          1. One bar per stage, each from 0 to 100 %: Simulation (the
+             .sta), Extraction (the script log) and, in remote mode,
+             Transfer (the files coming back to the run folder).
           2. A `QLabel` with the latest .sta info: stage marker,
              increment number, step time, wall time, KE, dt.
 
@@ -270,14 +274,8 @@ class JobTab(QWidget):
         v.setContentsMargins(8, 4, 8, 4)
         v.setSpacing(4)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
-        # Show the percent textually on the bar — easier to read for
-        # long runs than the bar fill alone.
-        self.progress_bar.setFormat("%p%")
-        v.addWidget(self.progress_bar)
+        self.progress_bars = RunProgressBars()
+        v.addWidget(self.progress_bars)
 
         self.progress_label = QLabel("waiting for solver…")
         # Monospace so columns of numbers don't dance around as the
@@ -634,10 +632,11 @@ class JobTab(QWidget):
         except OSError:
             pass
 
+        self._log_filter = LogLineFilter()
+        self.progress_bars.start(remote=remote)
         if write_inp_only:
             # No solver -> no .sta to poll, but the script log still needs
             # tailing: this is where the model-build diagnostics appear.
-            self.progress_bar.setValue(0)
             self.progress_label.setText("building model and writing .inp…")
             self._progress_group.setVisible(True)
             self._sta_timer.start()
@@ -646,7 +645,6 @@ class JobTab(QWidget):
             # The .sta won't exist for the first few seconds (Abaqus is busy
             # generating the .inp and parsing it); the parser handles missing
             # files gracefully, so we just keep polling until it appears.
-            self.progress_bar.setValue(0)
             self.progress_label.setText("starting Abaqus (waiting for solver)…")
             self._progress_group.setVisible(True)
             self._sta_timer.start()
@@ -673,14 +671,14 @@ class JobTab(QWidget):
         the Abaqus run is over (success or failure)."""
         # Drain the script log BEFORE stopping the timer: whatever was written
         # since the last tick includes the very lines that explain a failure.
-        self._poll_script_log()
+        self._poll_script_log(final=True)
         self._sta_timer.stop()
         if success:
-            self.progress_bar.setValue(100)
+            self.progress_bars.finish(True)
             self.progress_label.setText("done.")
         else:
-            # Leave the bar where it was so the user can see how far
-            # we got before the failure.
+            # Leave the bars where they were so the user can see which
+            # stage stopped.
             self.progress_label.setText("failed — see output below.")
 
         self.btn_run.setEnabled(True)
@@ -723,21 +721,16 @@ class JobTab(QWidget):
         sta_path = pipe.get("sta_path")
         if not sta_path:
             return
+        # The bars: solver from the .sta (frame ratio, else
+        # step_time / sim_time), extraction from the script log, transfer
+        # from the manifest the remote side leaves in the run folder.
+        self.progress_bars.poll(
+            sta_path=sta_path, log_path=pipe.get("log_path"),
+            run_dir=pipe.get("workdir"), job=pipe.get("job_name"),
+            sim_time=pipe.get("sim_time") or None)
         snap = parse_sta(sta_path)
         if not snap.is_ready():
             return
-
-        # Compute the percentage. Prefer the explicit frame ratio from
-        # the "Output Field Frame Number" rows (most reliable). Fall
-        # back to step_time / sim_time if only the inc row is parsed.
-        frac = snap.fraction()
-        if frac is None and snap.step_time is not None:
-            sim_time = pipe.get("sim_time", 0.0) or 0.0
-            if sim_time > 0:
-                frac = snap.step_time / sim_time
-        if frac is not None:
-            pct = max(0, min(100, int(round(frac * 100))))
-            self.progress_bar.setValue(pct)
 
         # Build the one-line status string. We pick the most useful
         # fields (inc, step time, wall, dt, KE) and format them tight.
@@ -756,7 +749,7 @@ class JobTab(QWidget):
             parts.append(f"KE = {snap.kinetic_energy:.2e}")
         self.progress_label.setText("   ·   ".join(parts))
 
-    def _poll_script_log(self):
+    def _poll_script_log(self, final: bool = False):
         """Append whatever run_simul.py has written since the last tick.
 
         Reads from a byte offset rather than re-reading the file, so a long
@@ -776,9 +769,16 @@ class JobTab(QWidget):
                 self._log_offset = handle.tell()
         except OSError:
             # Not created yet, or vanished: nothing to show this tick.
-            return
-        if chunk:
-            self._append_output(chunk.decode("latin-1", errors="replace"))
+            chunk = b""
+        filt = getattr(self, "_log_filter", None)
+        if filt is None:
+            filt = self._log_filter = LogLineFilter()
+        # The extraction's [PROGRESS] lines feed the bar, not the panel.
+        text = filt.feed(chunk.decode("latin-1", errors="replace"))
+        if final:
+            text += filt.flush()
+        if text:
+            self._append_output(text)
 
     def _ask_existing_job(self, job_name, existing, has_restart):
         """Overwrite / resume / cancel when the job already exists.

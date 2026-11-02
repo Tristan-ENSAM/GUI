@@ -81,6 +81,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from gui.core.run_progress import transfer_manifest_name
+
 log = logging.getLogger(__name__)
 
 HEARTBEAT_PERIOD = 2.0          # s, agent heartbeat
@@ -357,6 +359,33 @@ class RemoteProcess:
     # -- Popen-like API ----------------------------------------------------
     def _bring_back(self, suffixes, only_changed: bool) -> None:
         name = self.job_name
+        manifest = None
+        if not only_changed:
+            # The final copy: announce it for the transfer bar
+            # (gui.core.run_progress.transfer_progress).
+            sizes = {}
+            for suf in suffixes:
+                try:
+                    sizes[name + suf] = (self.transit / (name + suf)).stat().st_size
+                except OSError:
+                    pass
+            try:
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                manifest = self.run_dir / transfer_manifest_name(name)
+                _write_json_atomic(manifest, {"files": sizes})
+            except OSError:
+                manifest = None
+        try:
+            self._copy_back(suffixes, only_changed)
+        finally:
+            if manifest is not None:
+                try:
+                    manifest.unlink()
+                except OSError:
+                    pass
+
+    def _copy_back(self, suffixes, only_changed: bool) -> None:
+        name = self.job_name
         for suf in suffixes:
             src = self.transit / (name + suf)
             try:
@@ -370,8 +399,14 @@ class RemoteProcess:
                 self.run_dir.mkdir(parents=True, exist_ok=True)
                 dst = self.run_dir / src.name
                 tmp = dst.with_name(dst.name + ".tmp-%s" % uuid.uuid4().hex[:8])
-                shutil.copyfile(str(src), str(tmp))
-                os.replace(str(tmp), str(dst))
+                try:
+                    shutil.copyfile(str(src), str(tmp))
+                    os.replace(str(tmp), str(dst))
+                finally:
+                    if tmp.exists():
+                        # A failed replace (the GUI reading the .sta at
+                        # that instant, on Windows) used to leave the copy.
+                        tmp.unlink()
                 self._seen[suf] = key
             except OSError:
                 pass            # busy or not readable yet: next poll

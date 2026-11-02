@@ -43,7 +43,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QProgressBar, QSplitter,
+    QTableWidgetItem, QHeaderView, QMessageBox, QSplitter,
     QScrollArea, QFrame, QComboBox
 )
 
@@ -55,7 +55,6 @@ from gui.core.async_call import run_async
 from gui.core.domain_sizing import DomainDims
 from gui.core.model_config import OptimizationCfg as _OptimizationCfg
 from gui.core.logging_util import log_swallowed
-from gui.core.sta_parser import parse_sta
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
 from gui.core.tool_geometry_calc import tool_nose_points
 from gui.sensitivity.domain_independence import (
@@ -70,6 +69,8 @@ from gui.sensitivity.run_record import (
 from gui.sensitivity.run_worker import (
     abaqus_terminate_job, build_abaqus_args, kill_process_tree_by_pid,
     script_log_path)
+from gui.widgets.run_progress import RunProgressBars
+from gui.core.run_progress import LogLineFilter
 from gui.core.remote_exec import (
     RemoteProcess, is_remote, launch_problems, submit_remote)
 from gui.results.reader import ResultsBundle
@@ -220,6 +221,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._last_checks = None         # ChecksResult
         self._last_ms = None             # (MsStudyResult, folder)
         self._current_sta = None        # current job's .sta path (for progress)
+        self._progress_job = None       # job shown on the progress bars
+        self._progress_remote = False
         # Steps, resume/load, pipeline (gui/tabs/model_steps.py)
         self._active = None             # context of the running study
         self._pipeline = False          # True while "Run all steps" runs
@@ -895,12 +898,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
         bar.addWidget(self.btn_cancel)
-        # Live per-simulation progress bar (fed by parsing the current job's
-        # .sta file, step_time/sim_time).
-        self.sim_progress = QProgressBar()
-        self.sim_progress.setRange(0, 100)
-        self.sim_progress.setFormat("current simulation: %p%")
-        self.sim_progress.setFixedWidth(300)
+        # Live bars of the current run: solver (.sta), extraction (script
+        # log) and, in remote mode, transfer of the files back.
+        self.sim_progress = RunProgressBars(horizontal=True, bar_width=230)
         self.sim_progress.setVisible(False)
         bar.addWidget(self.sim_progress)
         self.lbl_status = QLabel("")
@@ -1709,20 +1709,25 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             return Path(workdir)
 
     # -- Abaqus launcher (replicates the Sensitivity run mechanism) --------
-    def _emit_log_tail(self, log_path, offset: int) -> int:
+    def _emit_log_tail(self, log_path, offset: int, filt=None,
+                       final: bool = False) -> int:
         """Emit whatever run_simul.py appended since `offset`; return the new
         offset. Same contract as SensitivityRunWorker._emit_log_tail: read from
         a byte position rather than re-reading, and latin-1 so a decode error
-        cannot silently stop the live log."""
+        cannot silently stop the live log. `filt` (a LogLineFilter) keeps the
+        extraction's [PROGRESS] lines out of the log: they feed the bar."""
         try:
             with open(log_path, "rb") as handle:
                 handle.seek(offset)
                 chunk = handle.read()
                 offset = handle.tell()
         except OSError:
-            return offset          # not created yet, or already gone
-        if chunk:
-            self._log_ui(chunk.decode("latin-1", errors="replace"))
+            chunk = b""            # not created yet, or already gone
+        text = chunk.decode("latin-1", errors="replace") if chunk else ""
+        if filt is not None:
+            text = filt.feed(text) + (filt.flush() if final else "")
+        if text:
+            self._log_ui(text)
         return offset
 
     def _make_run_bundle(self, prefs, run_dir, cpus, prefix):
@@ -1899,23 +1904,25 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             # nothing: the cancel test sat inside a loop no line ever woke.
             log_path = script_log_path(run_dir, job)
             offset = 0
+            log_filter = LogLineFilter()
             while proc.poll() is None:
                 if self._cancel_evt.is_set():
                     break
-                offset = self._emit_log_tail(log_path, offset)
+                offset = self._emit_log_tail(log_path, offset, log_filter)
                 time.sleep(0.4)
             if self._cancel_evt.is_set() and isinstance(proc, RemoteProcess):
                 # A Cancel that landed while the run was being submitted saw
                 # no process to stop; stop it now (no-op if already done).
                 proc.cancel()
             # The lines written since the last tick explain how the run ended.
-            self._emit_log_tail(log_path, offset)
+            self._emit_log_tail(log_path, offset, log_filter, final=True)
             # Whatever the launcher itself put on stdout (licence banner, a
             # fatal error before the script starts). Read once, after exit.
             try:
                 rest = proc.stdout.read()
                 if rest:
-                    self._log_ui(rest.decode("cp1252", errors="replace"))
+                    self._log_ui(LogLineFilter().feed(
+                        rest.decode("cp1252", errors="replace") + "\n"))
             except Exception:
                 log_swallowed("reading Abaqus launcher output",
                               level=logging.DEBUG)
@@ -1986,29 +1993,29 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
     # -- worker callbacks --------------------------------------------------
     def _poll_sta(self):
-        """Update the per-simulation progress bar from the current job's .sta."""
+        """Update the bars of the current run from its files: <job>.sta,
+        <job>.gui.log and, in remote mode, <job>.transfer.json."""
         p = self._current_sta
-        if p is None or not Path(p).exists():
+        if p is None:
             return
-        try:
-            prog = parse_sta(p)
-        except Exception:
-            return
-        frac = prog.fraction() if prog.is_ready() else None
-        if frac is not None:
-            from gui.sensitivity.cost_model import (
-                fmt_duration, remaining_from_progress)
-            left = remaining_from_progress(prog.wall_time_seconds(), frac)
-            self.sim_progress.setFormat(
-                "current simulation: %p%" if left is None else
-                "current simulation: %%p%% · ~%s left" % fmt_duration(left))
-            self.sim_progress.setVisible(True)
-            self.sim_progress.setValue(int(max(0.0, min(1.0, frac)) * 100))
+        p = Path(p)
+        job, run_dir = p.stem, p.parent
+        if job != self._progress_job:
+            # A new run: every stage starts again from 0.
+            self._progress_job = job
+            self.sim_progress.start(remote=self._progress_remote)
+        self.sim_progress.poll(sta_path=p,
+                               log_path=script_log_path(run_dir, job),
+                               run_dir=run_dir, job=job)
 
     def _start_progress(self):
         self._current_sta = None
-        self.sim_progress.setFormat("current simulation: %p%")
-        self.sim_progress.setValue(0)
+        self._progress_job = None
+        try:
+            self._progress_remote = is_remote(self._prefs_getter())
+        except Exception:
+            self._progress_remote = False
+        self.sim_progress.start(remote=self._progress_remote)
         self.sim_progress.setVisible(True)
         self._sim_timer.start()
 

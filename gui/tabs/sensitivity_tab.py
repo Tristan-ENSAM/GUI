@@ -43,8 +43,9 @@ from gui.sensitivity import export_results as xr
 from gui.sensitivity import map_export as mx
 from gui.sensitivity import zoi_proposal as zp
 from gui.sensitivity import model_qoi as mq
-from gui.sensitivity.run_worker import SensitivityRunWorker
+from gui.sensitivity.run_worker import SensitivityRunWorker, script_log_path
 from gui.core.remote_exec import is_remote, launch_problems
+from gui.widgets.run_progress import RunProgressBars
 from gui.widgets.field_viewer import FieldViewer
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.workdir_button import workdir_button
@@ -113,6 +114,8 @@ class SensitivityTab(QWidget):
         self._run_workdir = None         # workdir of the active run batch
         self._run_total = 0
         self._sta_timer = None           # live .sta poller during a run
+        self._bars_job = None            # job shown on the run_bars
+        self._bars_remote = False
         self._row_spec = {}              # table row -> ParamSpec
         self._table_units = None         # UnitSystem the table is shown in
         self._run_field_vars = None      # ROI fields of the active/last run
@@ -359,6 +362,10 @@ class SensitivityTab(QWidget):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         bl.addWidget(self.progress)
+        # Stages of the run in progress (solver, extraction, transfer).
+        self.run_bars = RunProgressBars(horizontal=True)
+        self.run_bars.setVisible(False)
+        bl.addWidget(self.run_bars)
 
         # Bottom sub-panel: Plan preview | live run log | results ranking.
         self.tabs_out = QTabWidget()
@@ -1122,6 +1129,10 @@ class SensitivityTab(QWidget):
         self._cur_frame = None
         self._failed_live = []           # run indices reported failed live
         self._run_clock0 = time.monotonic()
+        self._bars_job = None
+        self._bars_remote = is_remote(prefs)
+        self.run_bars.start(remote=self._bars_remote)
+        self.run_bars.setVisible(True)
         self._sta_timer = QTimer(self)
         self._sta_timer.setInterval(3000)
         self._sta_timer.timeout.connect(self._poll_sta)
@@ -1274,8 +1285,16 @@ class SensitivityTab(QWidget):
         fraction of the current run already done."""
         if self._running_index is None or self._run_workdir is None:
             return
-        sta = self._run_workdir / ("sensitivity_run%03d.sta"
-                                   % self._running_index)
+        job = "sensitivity_run%03d" % self._running_index
+        sta = self._run_workdir / ("%s.sta" % job)
+        if job != self._bars_job:
+            self._bars_job = job
+            self.run_bars.start(remote=self._bars_remote)
+        self.run_bars.poll(sta_path=sta,
+                           log_path=script_log_path(self._run_workdir, job),
+                           run_dir=self._run_workdir, job=job,
+                           sim_time=float(getattr(self.cfg.step, "sim_time",
+                                                  0.0) or 0.0) or None)
         cur_frac = 0.0
         try:
             snap = parse_sta(sta)
@@ -1891,6 +1910,7 @@ class SensitivityTab(QWidget):
         self._thread = None
         self._worker = None
         self.progress.setVisible(False)
+        self.run_bars.setVisible(False)
         self.btn_run.setEnabled(True)
         self.btn_gen.setEnabled(True)
         self.btn_cancel.setEnabled(False)

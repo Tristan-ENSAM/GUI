@@ -28,6 +28,7 @@ from PySide6.QtCore import QObject, Signal
 
 from gui.sensitivity import runner_core as rc
 from gui.core.logging_util import log_swallowed
+from gui.core.run_progress import LogLineFilter
 from gui.core.filter_check import (check_bundle, format_report,
                                    window_from_cfg)
 from gui.results.reader import ResultsBundle
@@ -347,20 +348,26 @@ class SensitivityRunWorker(QObject):
         except Exception as e:                          # pragma: no cover
             self.failed.emit("%s" % e)
 
-    def _emit_log_tail(self, log_path, offset: int) -> int:
+    def _emit_log_tail(self, log_path, offset: int, filt=None,
+                       final: bool = False) -> int:
         """Emit whatever run_simul.py appended since `offset`; return the new
         offset. Reads from a byte position rather than re-reading, so a long
         campaign does not replay what the panel already shows. Latin-1 decodes
-        any byte: a decode error here would silently stop the live log."""
+        any byte: a decode error here would silently stop the live log.
+        `filt` (a LogLineFilter) keeps the extraction's [PROGRESS] lines out
+        of the log: they feed the progress bar."""
         try:
             with open(log_path, "rb") as handle:
                 handle.seek(offset)
                 chunk = handle.read()
                 offset = handle.tell()
         except OSError:
-            return offset          # not created yet, or already gone
-        if chunk:
-            self.log.emit(chunk.decode("latin-1", errors="replace"))
+            chunk = b""            # not created yet, or already gone
+        text = chunk.decode("latin-1", errors="replace") if chunk else ""
+        if filt is not None:
+            text = filt.feed(text) + (filt.flush() if final else "")
+        if text:
+            self.log.emit(text)
         return offset
 
     # -- the Abaqus per-profile solve (default solve_fn) ---------------
@@ -422,10 +429,11 @@ class SensitivityRunWorker(QObject):
                                   args=(self._proc.stdout, out_chunks),
                                   daemon=True)
         reader.start()
+        log_filter = LogLineFilter()
         while self._proc.poll() is None:
             if self._cancel:
                 break
-            offset = self._emit_log_tail(log_path, offset)
+            offset = self._emit_log_tail(log_path, offset, log_filter)
             time.sleep(0.4)
         if self._cancel and hasattr(self._proc, "cancel"):
             # Remote run: a Cancel that landed during the submission found no
@@ -433,14 +441,15 @@ class SensitivityRunWorker(QObject):
             self._proc.cancel()
         # Final drain: the lines written since the last tick are the ones that
         # explain how the run ended.
-        self._emit_log_tail(log_path, offset)
+        self._emit_log_tail(log_path, offset, log_filter, final=True)
         self._proc.wait()
         # Whatever the launcher itself put on stdout (licence banner, a fatal
         # error before the script starts), shown once the run has ended.
         reader.join(timeout=5.0)
         rest = b"".join(out_chunks)
         if rest:
-            self.log.emit(rest.decode("cp1252", errors="replace"))
+            self.log.emit(LogLineFilter().feed(
+                rest.decode("cp1252", errors="replace") + "\n"))
         rc_code = self._proc.returncode
         self._proc = None
         self._current_job = None
