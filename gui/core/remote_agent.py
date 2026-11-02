@@ -26,6 +26,11 @@ which exists while the user's Remote Desktop window is open with the C:
 drive redirected) and the token file the GUI left there is visible, the
 results AND the .odb are moved straight into that folder (copied, size
 checked, then deleted here), so they never use the small shared drive.
+Only the results are moved before the run is reported finished: the .odb
+(several GB, ~17 min through Remote Desktop) is moved by a background thread
+afterwards, so the next run of the queue starts at once and the copy runs
+while it computes. The run's local folder is its own (runs/<id>), so the next
+run never touches the .odb being copied.
 Otherwise (window closed, drive not redirected, another PC connected, copy
 cut by a lost connection) the results go through the shared drive as before,
 so a study keeps going, and the .odb waits here in a backlog
@@ -503,10 +508,12 @@ class Agent(object):
         except (IOError, OSError) as e:
             self.say(u"WARNING: backlog not saved (%s)" % _text(e))
 
-    def _add_backlog(self, entry):
+    def _add_backlog(self, entry, now=False):
         with self._backlog_lock:
             self.backlog.append(entry)
             self._save_backlog()
+        if now:
+            self._last_backlog = 0.0    # next step() starts the mover
 
     def retry_backlog(self):
         """Move every waiting .odb whose GUI PC folder and token are visible.
@@ -520,8 +527,12 @@ class Agent(object):
             done = not names
             token = os.path.join(e["client_dir"], token_name(e["id"]))
             if names and os.path.isfile(token):
-                clash = [n for n in names if os.path.exists(
-                    os.path.join(e["client_dir"], n))]
+                # "overwrite": the .odb of a run delivered straight to the
+                # GUI PC, moved after the results; it replaces an older file
+                # of the same name exactly as the results did.
+                clash = [] if e.get("overwrite") else [
+                    n for n in names if os.path.exists(
+                        os.path.join(e["client_dir"], n))]
                 if clash:
                     if not e.get("clash_reported"):
                         e["clash_reported"] = True
@@ -530,11 +541,13 @@ class Agent(object):
                                     e["local"]))
                     continue
                 try:
-                    self.say("moving waiting %s to %s"
+                    t0 = time.time()
+                    self.say("moving %s to %s in the background"
                              % (", ".join(names), e["client_dir"]))
                     move_files(e["local"], names, e["client_dir"])
                     done = True
-                    self.say("delivered %s" % ", ".join(names))
+                    self.say("delivered %s (%.0f s)"
+                             % (", ".join(names), time.time() - t0))
                 except Exception as ex:
                     self.say(u"waiting %s not delivered yet (%s)"
                              % (u", ".join(names), _text(ex)))
@@ -562,11 +575,10 @@ class Agent(object):
             client = j["client_dir"]
             if client:
                 if os.path.isfile(os.path.join(client, token_name(j["id"]))):
-                    self.say("moving results and .odb of %s to %s"
+                    self.say("moving results of %s to %s"
                              % (j["name"], client))
                     try:
-                        names = self._present(
-                            j, RESULT_SUFFIXES + DELIVERY_EXTRA_SUFFIXES)
+                        names = self._present(j, RESULT_SUFFIXES)
                         manifest = os.path.join(
                             client, transfer_manifest_name(j["name"]))
                         try:
@@ -583,6 +595,16 @@ class Agent(object):
                                 _remove(manifest)
                         d["copied"] = names
                         d["delivered_to"] = client
+                        # The .odb follows in the background: the run is
+                        # reported finished now and the next one starts.
+                        d["pending"] = self._present(j,
+                                                     DELIVERY_EXTRA_SUFFIXES)
+                        if d["pending"]:
+                            self._add_backlog({
+                                "id": j["id"], "name": j["name"],
+                                "local": j["local"], "client_dir": client,
+                                "files": d["pending"], "overwrite": True},
+                                now=True)
                     except Exception as e:
                         d["note"] = u"copy to %s failed (%s)" % (_text(client), _text(e))
                 else:
@@ -636,6 +658,9 @@ class Agent(object):
                     ("moved to " + d["delivered_to"]) if d["delivered_to"]
                     else "copied back",
                     ", ".join(d["copied"]) or "nothing"))
+        if d["delivered_to"] and d["pending"]:
+            self.say("%s follows in the background; next run can start"
+                     % ", ".join(d["pending"]))
         self.job = None
 
 
