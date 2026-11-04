@@ -545,9 +545,27 @@ class MainWindow(QMainWindow):
         if self.opt_tabs.currentWidget() is self.compare_tab:
             try:
                 self.compare_tab.add_folders(
-                    self.optimization_tab.known_folders())
+                    self.optimization_tab.known_folders()
+                    + self._plan_folders())
             except Exception:
                 log_swallowed("listing the study folders for Compare runs")
+
+    def _plan_folders(self) -> list:
+        """Parameter plans folders (sweep, grid, Jacobian / Morris) of the
+        working directory, oldest first by name."""
+        from gui.sensitivity.deviation_maps import PLAN_STUDIES
+        wd = str(getattr(self.prefs, "default_workdir", "") or "")
+        if not wd:
+            return []
+        out = []
+        try:
+            for d in sorted(Path(wd).iterdir()):
+                if d.is_dir() and any("__%s__" % s in d.name
+                                      for s in PLAN_STUDIES):
+                    out.append(str(d))
+        except OSError:
+            return []
+        return out
 
     def _show_compare(self):
         """'Compare runs…' of the Model sizing tab."""

@@ -257,6 +257,111 @@ def settings_of_folder(folder) -> CompareSettings:
 
 
 # ---------------------------------------------------------------------------
+# Runs of a parameter plan (sweep, grid, Jacobian, Morris)
+# ---------------------------------------------------------------------------
+# Study names (config.json "study") of the Parameter plans tab.
+PLAN_STUDIES = ("sweep", "grid", "sensitivity")
+
+
+@dataclass
+class PlanInfo:
+    """What the config.json of a parameter plan folder says of its runs."""
+    study: str                       # "sweep" | "grid" | "sensitivity"
+    params: List[dict]               # [{"path", "label", "unit"}], varied
+    runs: Dict[str, dict]            # job -> {"kind", "values": {path: v}}
+    base_job: Optional[str] = None   # the reference run (kind "base")
+    model_qoi: Optional[dict] = None  # ZOI, window, EVF threshold, eps_q
+
+
+def plan_of_folder(folder) -> Optional[PlanInfo]:
+    """PlanInfo of a Parameter plans folder, None for any other folder (no
+    config.json, another study, or no run list)."""
+    try:
+        data = json.loads((Path(folder) / "config.json").read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("study") not in PLAN_STUDIES:
+        return None
+    rec = data.get("parameters") or {}
+    runs = {}
+    for r in rec.get("runs") or []:
+        if isinstance(r, dict) and r.get("job"):
+            runs[str(r["job"])] = {"kind": r.get("kind"),
+                                   "values": dict(r.get("values") or {})}
+    if not runs:
+        return None
+    params = [p for p in rec.get("varied_parameters") or []
+              if isinstance(p, dict) and p.get("path")]
+    base = next((j for j, r in runs.items() if r["kind"] == "base"), None)
+    mq = rec.get("model_qoi")
+    return PlanInfo(study=str(data["study"]), params=params, runs=runs,
+                    base_job=base,
+                    model_qoi=mq if isinstance(mq, dict) else None)
+
+
+def plan_run_label(info: PlanInfo, job: str) -> Optional[str]:
+    """'Coefficient de frottement 0.2, Vitesse de coupe 40 | grid_run003
+    (Ref)': the values of the varied parameters (the plan's units). None
+    when the job is not in the plan."""
+    r = info.runs.get(job)
+    if r is None:
+        return None
+    cells = []
+    for p in info.params:
+        v = r["values"].get(p["path"])
+        if v is None:
+            continue
+        cells.append("%s %s%s" % (p.get("label") or p["path"],
+                                  "%g" % float(v),
+                                  (" " + p["unit"]) if p.get("unit") else ""))
+    text = "%s | %s" % (", ".join(cells) or "–", job)
+    return text + " (Ref)" if r["kind"] == "base" else text
+
+
+def plan_settings(info: PlanInfo, folder, setup: Optional[CompareSettings]
+                  ) -> CompareSettings:
+    """Comparison settings of two runs of a parameter plan: the ZOI, the
+    window T, the EVF threshold and eps_q frozen with the plan (when its
+    QoI were those of Model sizing), the sampling step and the other eps_q
+    from the Setup tab; threshold eps_q itself (a plan is not a sizing step,
+    no share). ValueError when neither gives a ZOI."""
+    mq = info.model_qoi or {}
+    if setup is None and not mq.get("zoi"):
+        raise ValueError("%s: the plan has no ZOI of its own and the Setup "
+                         "tab settings are not available."
+                         % Path(folder).name)
+    thr = dict(setup.thresholds) if setup is not None else {}
+    for q, v in (mq.get("eps") or {}).items():
+        try:
+            thr[q] = float(v)
+        except (TypeError, ValueError):
+            pass
+    if setup is not None:
+        grid = setup.grid_step
+    else:
+        z = _zoi_tuple(mq["zoi"])
+        grid = min(z[1] - z[0], z[3] - z[2]) / 50.0   # fallback, see source
+    own = bool(mq.get("zoi"))
+    return CompareSettings(
+        step=None,
+        zoi=_zoi_tuple(mq["zoi"]) if own else setup.zoi,
+        grid_step=float(grid),
+        window=tuple(float(v) for v in (mq.get("window")
+                                        or (setup.window if setup
+                                            else (0.3, 1.0)))),
+        thresholds=thr,
+        evf_threshold=float(mq.get("evf_threshold",
+                                   setup.evf_threshold if setup else 0.5)),
+        share=1.0,
+        source=("config.json of %s (ZOI, T, \u03b5_q of the plan)%s"
+                % (Path(folder).name,
+                   " + Setup tab (sampling step)" if setup is not None
+                   else ", sampling step = ZOI side / 50")
+                if own else "Setup tab (the plan has no ZOI of its own)"))
+
+
+# ---------------------------------------------------------------------------
 # Sampling
 # ---------------------------------------------------------------------------
 def grid_shape(zoi, grid_step: float) -> Tuple[int, int]:

@@ -76,6 +76,7 @@ class CompareRunsPanel(QWidget):
         super().__init__(parent)
         self._folders = []               # study folders, in the Study list
         self._folder_runs = {}           # str(folder) -> its finished runs
+        self._plans = {}                 # str(folder) -> dm.PlanInfo | None
         self._runs = []                  # runs of the chosen Study entry
         self._pair = None
         self._pair_jobs = ("a", "b")
@@ -88,7 +89,9 @@ class CompareRunsPanel(QWidget):
 
         lay = QVBoxLayout(self)
         intro = QLabel(
-            "Where and when two runs of a study differ. Pick the study "
+            "Where and when two runs of a study or of a parameter plan "
+            "differ (the runs of a plan are named by the values of its "
+            "parameters, its Ref run is the default (a)). Pick the "
             "folder (or add result files), the reference run (a) and the "
             "compared run (b), then "
             "Compare. The value shown is |b − a| / ε_q: 1 means a deviation "
@@ -270,6 +273,7 @@ class CompareRunsPanel(QWidget):
             return 0
         self._folders.append(folder)
         self._folder_runs[str(folder)] = runs
+        self._plans[str(folder)] = dm.plan_of_folder(folder)
         self._rebuild_study_list(select=folder if select else None)
         return len(runs)
 
@@ -376,20 +380,57 @@ class CompareRunsPanel(QWidget):
             cb.blockSignals(False)
         if not self._runs:
             return
-        step = None
-        for f in dict.fromkeys(r.folder for r in self._runs):
-            try:
-                step = dm.settings_of_folder(f).step
-                break
-            except Exception:
-                continue
-        ia = max(dm.default_reference(self._runs, step), 0)
+        ia = self._plan_reference()
+        if ia is None:
+            step = None
+            for f in dict.fromkeys(r.folder for r in self._runs):
+                try:
+                    step = dm.settings_of_folder(f).step
+                    break
+                except Exception:
+                    continue
+            ia = max(dm.default_reference(self._runs, step), 0)
         ib = 1 if ia == 0 and len(self._runs) > 1 else 0
         for cb, i in ((self.cb_a, ia), (self.cb_b, ib)):
             cb.blockSignals(True)
             cb.setCurrentIndex(cb.findData(i))
             cb.blockSignals(False)
         self._mark_taken()
+
+    def _plan_of(self, run):
+        """PlanInfo of the run's folder (Parameter plans), else None."""
+        if self._is_file(run):
+            return None
+        return self._plans.get(str(run.folder))
+
+    def _plan_reference(self):
+        """Index of the Ref run of a parameter plan when every listed run
+        belongs to one plan folder; None otherwise."""
+        folders = {str(r.folder) for r in self._runs}
+        if len(folders) != 1:
+            return None
+        info = self._plan_of(self._runs[0])
+        if info is None or info.base_job is None:
+            return None
+        for i, r in enumerate(self._runs):
+            if r.job == info.base_job:
+                return i
+        return None
+
+    def select_pair(self, folder, job_a, job_b) -> bool:
+        """Show the folder and pick run job_a as (a) and job_b as (b);
+        False when the folder or a run is not found."""
+        if not self.add_folder(folder, quiet=True, select=True):
+            return False
+        idx = {r.job: i for i, r in enumerate(self._runs)}
+        if job_a not in idx or job_b not in idx or job_a == job_b:
+            return False
+        for cb, j in ((self.cb_a, job_a), (self.cb_b, job_b)):
+            cb.blockSignals(True)
+            cb.setCurrentIndex(cb.findData(idx[j]))
+            cb.blockSignals(False)
+        self._mark_taken()
+        return True
 
     def _is_file(self, run) -> bool:
         return any(r is run for r in self._folder_runs.get(_FILES, ()))
@@ -400,7 +441,13 @@ class CompareRunsPanel(QWidget):
     def _label(self, run, folder=True) -> str:
         """dm.run_label, or the file name when the run's parameters are
         unknown (a result file without its .meta.json)."""
-        if run.params:
+        info = self._plan_of(run)
+        plan_text = dm.plan_run_label(info, run.job) if info else None
+        if plan_text:
+            text = plan_text
+            if folder:
+                text += " (%s)" % run.folder.name
+        elif run.params:
             text = dm.run_label(run, folder=folder)
         else:
             text = "%s | parameters unknown (none in its .meta.json)" % run.job
@@ -447,7 +494,20 @@ class CompareRunsPanel(QWidget):
 
     def _settings_for(self, run):
         """Settings of the reference run's folder, else the Setup tab's
-        current ones; (settings, None) or (None, reason)."""
+        current ones; (settings, None) or (None, reason). A parameter plan
+        folder: its frozen ZOI, T and eps_q, completed by the Setup tab."""
+        info = self._plan_of(run)
+        if info is not None:
+            setup = None
+            if self._settings_getter is not None:
+                try:
+                    setup = self._settings_getter()
+                except Exception:
+                    setup = None
+            try:
+                return dm.plan_settings(info, run.folder, setup), None
+            except Exception as e:
+                return None, str(e)
         try:
             return dm.settings_of_folder(run.folder), None
         except Exception as e:
@@ -538,11 +598,15 @@ class CompareRunsPanel(QWidget):
         self.lbl_summary.setText(
             "<b>E/ε of the means (decides the studies) / E/ε (all samples)"
             " / bias E/ε (time means per point):</b> %s<br>"
-            "Threshold of the step: %s ε_q (its share of ε_q).<br>"
+            "%s<br>"
             "a = %s<br>b = %s<br>ZOI x[%g, %g] y[%g, %g] mm, step %g mm, "
             "T = %g–%g of the simulated time, sampling %s, largest frame "
             "offset %s of a frame interval. Settings: %s."
-            % ("&nbsp;&nbsp; ".join(cells), _fmt(s.share, "%.3g"),
+            % ("&nbsp;&nbsp; ".join(cells),
+               ("Threshold of the step: %s ε_q (its share of ε_q)."
+                % _fmt(s.share, "%.3g")) if s.step else
+               "Threshold: ε_q itself (not a step of Model sizing, so no "
+               "share of ε_q).",
                p.label_a, p.label_b,
                *s.zoi, s.grid_step, s.window[0], s.window[1],
                "linear (different meshes)" if p.linear else
@@ -728,7 +792,8 @@ class CompareRunsPanel(QWidget):
                 ax.axvline(d.times[self.sl_frame.value()], color="grey",
                            lw=0.8, ls="--")
         ax.axhline(thr, color=_C_THR, lw=1.0,
-                   label="threshold of the step = %s ε" % _fmt(thr, "%.3g"))
+                   label=("threshold of the step = %s ε" % _fmt(thr, "%.3g")
+                          if self._pair.settings.step else "threshold = ε"))
         if not math.isclose(thr, 1.0):
             ax.axhline(1.0, color=_C_THR, lw=0.8, ls=":", label="ε_q")
         ax.set_title("%s\nvalue that decides the study: %s"
