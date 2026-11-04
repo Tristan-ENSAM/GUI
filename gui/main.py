@@ -109,6 +109,9 @@ class MainWindow(QMainWindow):
         self.sensitivity_tab.set_model_settings_getter(
             self.optimization_tab.model_settings)
         self.sensitivity_tab.zoiProposed.connect(self.optimization_tab.set_zoi)
+        # Sweep / grid plans may reuse the finished runs of the sizing studies.
+        self.sensitivity_tab.set_known_folders_getter(
+            self.optimization_tab.known_folders)
         # "Use in model" / "Run all steps" write ms*, h* and D* into the cfg;
         # the tabs that show them are reloaded here.
         self.optimization_tab.set_model_refresher(self._reload_sized_model)

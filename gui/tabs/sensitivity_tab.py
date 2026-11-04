@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Parameter plans tab (attribute `sensitivity_tab` of the main window) —
-local Jacobian (finite differences) or Morris screening.
+sweep (one parameter at a time), grid (all combinations), local Jacobian
+(finite differences) or Morris screening.
 
 Lets the user:
   * tick which model parameters to vary (Ref = current model value, in
-    displayed units), set the FD step (Jacobian) or Min/Max (Morris),
+    displayed units), set the FD step (Jacobian), Min/Max (Morris), or the
+    levels (sweep / grid: n values from Min to Max, or typed in Values),
   * choose the scalar QoI and, for the Jacobian, the ROI fields,
   * generate the plan, run it through Abaqus in a background thread, then
     read the results table, the ranking chart and the per-element maps.
@@ -33,12 +35,14 @@ from PySide6.QtWidgets import (
     QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QCheckBox, QPlainTextEdit, QAbstractItemView, QSplitter, QComboBox,
     QProgressBar, QTabWidget, QFileDialog, QSlider, QDoubleSpinBox,
+    QListWidget, QListWidgetItem,
 )
 from PySide6.QtCore import QThread, QTimer
 
 from gui.sensitivity import param_registry as pr
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
+from gui.sensitivity import sweep_plan as sw
 from gui.sensitivity import runner_core as rc
 from gui.sensitivity import export_results as xr
 from gui.sensitivity import map_export as mx
@@ -136,16 +140,29 @@ class SensitivityTab(QWidget):
         # Callable -> {"eps": {Vx, Vy, T, EVF, ...}, "window": (a, b)} from
         # the Model tab (set by the main window); None in standalone use.
         self._model_settings_getter = None
+        # Callable -> study folders of Model sizing (runs that a sweep / grid
+        # plan may reuse); set by the main window.
+        self._known_folders_getter = None
+        self._run_job_prefix = "sensitivity"   # job names of the active run
+        self._series_zone_used = None    # ZOI of the time curves of the run
         self._mapsExported.connect(self._on_maps_exported)
 
         root = QVBoxLayout(self)
 
         intro = QLabel(
-            "Local sensitivity (Jacobian by finite differences): tick the "
-            "parameters to vary, set the step (Delta or Delta%), pick the "
-            "QoI, then generate and run. The Ref column is the base point; "
-            "Min/Max define a trust region. Cost = k+1 runs (forward/"
-            "backward) or 2k+1 (central)."
+            "Tick the parameters to vary, pick the QoI, then generate and "
+            "run the plan. The Ref column is the current model value.\n"
+            "Sweep: each parameter takes its values in turn, the others stay "
+            "at Ref; the Ref run is shared (cost 1 + the values different "
+            "from Ref). Shows QoI = f(parameter), blind to interactions.\n"
+            "Grid: every combination of the values (cost = product of the "
+            "numbers of values, + 1 when Ref is not one of them). Shows "
+            "interactions; meant for 2 or 3 parameters.\n"
+            "Values: n values from Min to Max (Levels, Spacing), or the "
+            "Values cell typed by hand (e.g. 1; 100; 1000).\n"
+            "Jacobian: finite differences around Ref with the step Delta, "
+            "Min/Max a trust region; cost k+1 (forward/backward) or 2k+1 "
+            "(central). Morris: global screening over Min..Max."
         )
         intro.setWordWrap(True)
         # Grey help, hidden until "Show help" (as in the Model sizing tab).
@@ -167,10 +184,13 @@ class SensitivityTab(QWidget):
         # ---- Parameters table ------------------------------------------
         param_box = QGroupBox("Parameters to vary")
         pv = QVBoxLayout(param_box)
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             ["Vary", "Parameter", "Ref", "Min", "Max", "Delta", "Delta%",
-             "Norm", "Unit"])
+             "Norm", "Unit", "Values"])
+        self.table.horizontalHeaderItem(9).setToolTip(
+            "Sweep / grid: values typed by hand, separated by ';' or spaces "
+            "(use a dot for decimals). Empty: Levels values from Min to Max.")
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
@@ -194,7 +214,9 @@ class SensitivityTab(QWidget):
         method_row.addWidget(QLabel("Method:"))
         self.cb_method = QComboBox()
         self.cb_method.addItems(["Jacobian (finite differences)",
-                                 "Morris (global screening)"])
+                                 "Morris (global screening)",
+                                 "Sweep (one parameter at a time)",
+                                 "Grid (all combinations)"])
         self.cb_method.currentIndexChanged.connect(self._on_method_changed)
         self.cb_method.currentIndexChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.cb_method)
@@ -230,12 +252,36 @@ class SensitivityTab(QWidget):
         self.spin_levels.valueChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.spin_levels)
 
+        # Sweep / grid controls: n levels from Min to Max, linear or
+        # geometric (a "Values" cell typed by hand wins for its row).
+        self.lbl_nlev = QLabel("Levels:")
+        method_row.addWidget(self.lbl_nlev)
+        self.spin_nlev = QSpinBox()
+        self.spin_nlev.setRange(2, 50)
+        self.spin_nlev.setValue(sw.DEFAULT_LEVELS)
+        self.spin_nlev.setToolTip(
+            "Number of values of each parameter, from Min to Max (both\n"
+            "included). A row whose Values cell is filled uses those values.")
+        self.spin_nlev.valueChanged.connect(self._update_cost)
+        self.spin_nlev.valueChanged.connect(self._mark_plan_stale)
+        method_row.addWidget(self.spin_nlev)
+        self.lbl_spacing = QLabel("Spacing:")
+        method_row.addWidget(self.lbl_spacing)
+        self.cb_spacing = QComboBox()
+        self.cb_spacing.addItem("linear", "linear")
+        self.cb_spacing.addItem("geometric", "geometric")
+        self.cb_spacing.setToolTip(
+            "linear: evenly spaced values. geometric: constant ratio between\n"
+            "two values (Min and Max > 0), e.g. a mass-scaling factor.")
+        self.cb_spacing.currentIndexChanged.connect(self._update_cost)
+        self.cb_spacing.currentIndexChanged.connect(self._mark_plan_stale)
+        method_row.addWidget(self.cb_spacing)
+
         self.lbl_hint = QLabel("step = Delta per parameter")
         self.lbl_hint.setStyleSheet("color: #6b7280;")
         method_row.addWidget(self.lbl_hint)
         method_row.addStretch(1)
         bl.addLayout(method_row)
-        self._on_method_changed()   # set initial visibility
 
         # QoI of the Model tab (same reduction, same eps_q) + other QoI.
         qoi_row = QHBoxLayout()
@@ -248,16 +294,15 @@ class SensitivityTab(QWidget):
             cb.setEnabled(False)          # until the Model tab is connected
             cb.setToolTip(
                 "Computed exactly as the ms / mesh / domain studies of "
-                "Optimization > Model sizing: ZOI, window T and EVF threshold of that "
-                "tab. Fields: area mean over the ZOI of the time mean of each "
+                "Model sizing, with the ZOI, window T and EVF threshold of "
+                "the Setup tab. Fields: area mean over the ZOI of the time mean of each "
                 "element over its material frames in T. Forces: mean of F/w "
                 "over T. A \"/\u03b5_q\" column is added to the results.")
             cb.toggled.connect(self._mark_plan_stale)
             self._model_qoi_checks[q] = cb
             mg.addWidget(cb, i // 2, i % 2)
         self.lbl_model_qoi = QLabel(
-            "Settings read from Optimization > Model sizing when the plan is "
-            "generated.")
+            "Settings read from the Setup tab when the plan is generated.")
         self.lbl_model_qoi.setWordWrap(True)
         self.lbl_model_qoi.setStyleSheet("color: #6b7280;")
         mg.addWidget(self.lbl_model_qoi, (len(mq.MODEL_QOIS) + 1) // 2, 0,
@@ -325,6 +370,16 @@ class SensitivityTab(QWidget):
         ctrl.addWidget(QLabel("Machine:"))
         self.cmb_machine = MachineCombo(self._prefs_getter)
         ctrl.addWidget(self.cmb_machine)
+        self.chk_reuse = QCheckBox("Reuse finished runs")
+        self.chk_reuse.setChecked(True)
+        self.chk_reuse.setToolTip(
+            "Sweep / grid: a run whose model parameters are EXACTLY those of\n"
+            "a finished run (earlier sweep / grid plans in the working\n"
+            "directory, studies of Model sizing) is not launched again: its\n"
+            "results are read back and copied into the new plan folder.\n"
+            "The number of CPUs, the machine and the Abaqus version are not\n"
+            "compared.")
+        ctrl.addWidget(self.chk_reuse)
         ctrl.addStretch(1)
         self.lbl_cost = QLabel("—")
         f = QFont(); f.setBold(True); self.lbl_cost.setFont(f)
@@ -406,6 +461,14 @@ class SensitivityTab(QWidget):
             "in kelvin).")
         self.cb_chart_rank.currentIndexChanged.connect(self._draw_chart)
         crow.addWidget(self.cb_chart_rank)
+        # Sweep / grid: QoI against one parameter.
+        self.lbl_chart_param = QLabel("Parameter:")
+        crow.addWidget(self.lbl_chart_param)
+        self.cb_chart_param = QComboBox()
+        self.cb_chart_param.currentIndexChanged.connect(self._draw_chart)
+        crow.addWidget(self.cb_chart_param)
+        self.lbl_chart_param.setVisible(False)
+        self.cb_chart_param.setVisible(False)
         crow.addStretch(1)
         cv.addLayout(crow)
         self.lbl_chart_note = QLabel("")
@@ -416,6 +479,33 @@ class SensitivityTab(QWidget):
         self._canvas = FigureCanvas(self._fig)
         cv.addWidget(self._canvas, 1)
         self.tabs_out.addTab(chart_w, "Chart")
+
+        # ---- Time curves (sweep / grid): one QoI over time, per run -----
+        tc_w = QWidget(); tcl = QHBoxLayout(tc_w)
+        tc_left = QVBoxLayout()
+        trow = QHBoxLayout()
+        trow.addWidget(QLabel("Quantity:"))
+        self.cb_series_qty = QComboBox()
+        self.cb_series_qty.currentIndexChanged.connect(self._draw_series)
+        trow.addWidget(self.cb_series_qty)
+        trow.addStretch(1)
+        tc_left.addLayout(trow)
+        self.lbl_series_note = QLabel(
+            "Run a sweep or grid plan to compare the runs over time.")
+        self.lbl_series_note.setWordWrap(True)
+        self.lbl_series_note.setStyleSheet("color: #6b7280;")
+        tc_left.addWidget(self.lbl_series_note)
+        self._fig_series = Figure(figsize=(5, 3))
+        self._canvas_series = FigureCanvas(self._fig_series)
+        tc_left.addWidget(self._canvas_series, 1)
+        tcl.addLayout(tc_left, 1)
+        self.lst_series_runs = QListWidget()
+        self.lst_series_runs.setToolTip("Runs drawn (tick / untick).")
+        self.lst_series_runs.setMaximumWidth(260)
+        self.lst_series_runs.itemChanged.connect(self._draw_series)
+        tcl.addWidget(self.lst_series_runs)
+        self.tabs_out.addTab(tc_w, "Time curves")
+        self._series_tab = tc_w
 
         # ---- Sensitivity maps tab (per-element dF/dparam) ---------------
         # Reuses the Results FieldViewer. Two dropdowns pick the (parameter x
@@ -504,7 +594,7 @@ class SensitivityTab(QWidget):
         split.setSizes([300, 480])
 
         self._populate_table()
-        self._update_cost()
+        self._on_method_changed()   # visibility of the method controls
 
     # ------------------------------------------------------------------
     # Build the parameter table from the registry
@@ -530,7 +620,7 @@ class SensitivityTab(QWidget):
             fnt = head.font(); fnt.setBold(True); head.setFont(fnt)
             head.setFlags(Qt.ItemIsEnabled)
             self.table.setItem(r, 0, head)
-            self.table.setSpan(r, 0, 1, 9)
+            self.table.setSpan(r, 0, 1, 10)
 
             for spec in specs:
                 r = self.table.rowCount()
@@ -586,6 +676,8 @@ class SensitivityTab(QWidget):
                 unit = QTableWidgetItem(spec.unit_str(tu))
                 unit.setFlags(Qt.ItemIsEnabled)
                 self.table.setItem(r, 8, unit)
+                # col 9: values typed by hand (sweep / grid), empty
+                self.table.setItem(r, 9, QTableWidgetItem(""))
         self.table.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -601,16 +693,17 @@ class SensitivityTab(QWidget):
 
     def _on_item_changed(self, item):
         col = item.column()
-        if col in (0, 3, 4, 5, 6, 7):      # anything the plan is built from
+        if col in (0, 3, 4, 5, 6, 7, 9):   # anything the plan is built from
             self._mark_plan_stale()
-        if col == 0:                       # "vary" checkbox toggled
+        if col in (0, 3, 4, 9):            # changes the number of runs
             self._update_cost()
+        if col in (0, 9):
             return
         if col in (5, 6, 3, 4, 7):         # delta / delta% / min / max / norm
             self._sync_row(item.row(), col)
 
     # Columns: 0 Vary | 1 Parameter | 2 Ref | 3 Min | 4 Max | 5 Delta |
-    #          6 Delta% | 7 Norm | 8 Unit
+    #          6 Delta% | 7 Norm | 8 Unit | 9 Values (sweep / grid)
     def _sync_row(self, row, col):
         spec = self._row_spec.get(row)
         if spec is None:
@@ -781,7 +874,7 @@ class SensitivityTab(QWidget):
         """True if a varied parameter's model value (the Jacobian base point)
         is no longer the one the plan was generated from."""
         plan = self.plan
-        if plan is None or self.plan_kind != "jacobian":
+        if plan is None or self.plan_kind not in ("jacobian", "sweep"):
             return False
         for spec, x0 in zip(plan.specs, plan.base):
             try:
@@ -816,22 +909,49 @@ class SensitivityTab(QWidget):
         k = len(self._selected_rows())
         if not k:
             return 0
-        if self._method() == "morris":
+        method = self._method()
+        if method == "morris":
             return mp.n_runs(k, self.spin_traj.value())
+        if method in sw.DESIGNS:
+            sel, _sp = self._collect_sweep()
+            return sw.n_runs([lv for _s, _r, lv in sel],
+                             [r for _s, r, _lv in sel], method)
         return jac.n_runs(k, self._scheme())
 
+    _METHODS = ("jacobian", "morris", "sweep", "grid")
+
     def _method(self) -> str:
-        return "morris" if self.cb_method.currentIndex() == 1 else "jacobian"
+        """jacobian | morris | sweep | grid (the combo entry)."""
+        i = self.cb_method.currentIndex()
+        return self._METHODS[i] if 0 <= i < len(self._METHODS) \
+            else "jacobian"
+
+    @staticmethod
+    def _plan_kind_of(method: str) -> str:
+        """The plan module of a method: sweep and grid share sweep_plan."""
+        return "sweep" if method in sw.DESIGNS else method
 
     def _on_method_changed(self, *_):
-        morris = self._method() == "morris"
+        method = self._method()
+        morris = method == "morris"
+        sweep = method in sw.DESIGNS
         for w in (self.lbl_scheme, self.cb_scheme):
-            w.setVisible(not morris)
+            w.setVisible(method == "jacobian")
         for w in (self.lbl_traj, self.spin_traj, self.lbl_levels, self.spin_levels):
             w.setVisible(morris)
-        self.lbl_hint.setText(
-            "screens Min..Max globally (mu*, sigma)" if morris
-            else "step = Delta per parameter")
+        for w in (self.lbl_nlev, self.spin_nlev, self.lbl_spacing,
+                  self.cb_spacing):
+            w.setVisible(sweep)
+        # Delta / Delta% / Norm are the Jacobian step; Values the levels.
+        for c in (5, 6, 7):
+            self.table.setColumnHidden(c, method != "jacobian")
+        self.table.setColumnHidden(9, not sweep)
+        self.chk_reuse.setVisible(sweep)
+        self.lbl_hint.setText({
+            "morris": "screens Min..Max globally (mu*, sigma)",
+            "sweep": "each parameter in turn, the others at Ref",
+            "grid": "every combination of the values",
+        }.get(method, "step = Delta per parameter"))
         self._update_cost()
 
     def _update_cost(self):
@@ -842,10 +962,19 @@ class SensitivityTab(QWidget):
         if k == 0:
             self.lbl_cost.setText("0 parameters selected")
             return
-        if self._method() == "morris":
+        method = self._method()
+        if method == "morris":
             runs = mp.n_runs(k, self.spin_traj.value())
             base = "k=%d  →  %d runs (Morris N=%d × (k+1))" % (
                 k, runs, self.spin_traj.value())
+        elif method in sw.DESIGNS:
+            try:
+                runs = self._n_runs()
+            except ValueError:
+                self.lbl_cost.setText("k=%d  →  ? runs (check Min/Max/Values)"
+                                      % k)
+                return
+            base = "k=%d  →  %d runs (%s)" % (k, runs, method)
         else:
             runs = jac.n_runs(k, self._scheme())
             base = "k=%d  →  %d runs (%s FD)" % (k, runs, self._scheme())
@@ -883,6 +1012,32 @@ class SensitivityTab(QWidget):
             x0 = pr.get_display(self.cfg, spec, tu, system=self._table_units)
             selected.append((spec, x0, delta, norm))
         return selected
+
+    def _collect_sweep(self):
+        """[(spec, Ref, levels)] of the ticked rows, in displayed units, and
+        how each row's levels were made ("linear", "geometric", "typed").
+        ValueError naming the row when Min/Max/Values are not usable."""
+        selected, spacing = [], []
+        tu = self._temp_unit()
+        n = self.spin_nlev.value()
+        how = self.cb_spacing.currentData() or "linear"
+        for r, spec in self._selected_rows():
+            x0 = pr.get_display(self.cfg, spec, tu, system=self._table_units)
+            it = self.table.item(r, 9)
+            try:
+                lv = sw.parse_values(it.text() if it is not None else "")
+                if lv is not None:
+                    spacing.append("typed")
+                else:
+                    lo, hi = self._cell_float(r, 3), self._cell_float(r, 4)
+                    if lo is None or hi is None:
+                        raise ValueError("Min and Max must be numbers.")
+                    lv = sw.levels(lo, hi, n, how)
+                    spacing.append(how)
+            except ValueError as e:
+                raise ValueError("%s: %s" % (spec.label, e))
+            selected.append((spec, x0, lv))
+        return selected, spacing
 
     def _outside_trust_region(self, selected):
         """Labels of the parameters whose FD points leave [Min, Max]. Only
@@ -937,15 +1092,15 @@ class SensitivityTab(QWidget):
             window = tuple(float(v) for v in st["window"])
             zoi = tuple(float(v) for v in st["zoi"])
         except Exception as e:
-            raise ValueError("Set the ZOI and the window T in Optimization "
-                             "> Model first (%s)." % e)
+            raise ValueError("Set the ZOI and the window T in the Setup tab "
+                             "first (%s)." % e)
         eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
         missing = [q for q in qois if not (eps.get(q) or 0) > 0]
         if missing:
-            raise ValueError("Set \u03b5_q of %s in Optimization > Model sizing "
-                             "first." % ", ".join(missing))
+            raise ValueError("Set \u03b5_q of %s in the Setup tab first."
+                             % ", ".join(missing))
         if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
-            raise ValueError("The ZOI of Optimization > Model sizing is empty.")
+            raise ValueError("The ZOI of the Setup tab is empty.")
         if any(q in mq.FIELD_QUANTITIES for q in qois) \
                 and not self.chk_full_domain.isChecked():
             b = self.cfg.bbox
@@ -953,7 +1108,7 @@ class SensitivityTab(QWidget):
                     "ymin": float(b.ymin), "ymax": float(b.ymax)}
             if not mq.zoi_within_crop(zoi, crop):
                 raise ValueError(
-                    "The ZOI of Optimization > Model sizing x[%g, %g] y[%g, %g] is "
+                    "The ZOI of the Setup tab x[%g, %g] y[%g, %g] is "
                     "not inside the ROI the runs extract x[%g, %g] y[%g, %g]: "
                     "widen the ROI (Geometry tab) or tick 'Whole Eulerian "
                     "domain'." % (zoi + (crop["xmin"], crop["xmax"],
@@ -971,7 +1126,25 @@ class SensitivityTab(QWidget):
         try:
             qois = self._selected_qoi_specs()
             field_vars = self._selected_field_vars()
-            if method == "morris":
+            if method in sw.DESIGNS:
+                if field_vars:
+                    self._warn("Field (ROI) screening is only available with "
+                               "the Jacobian method; ignoring the field "
+                               "selection for the %s." % method)
+                    field_vars = []
+                if not qois:
+                    self._warn("Tick at least one scalar QoI for the %s."
+                               % method)
+                    return
+                selected, spacing = self._collect_sweep()
+                if not selected:
+                    self._warn("Tick at least one parameter to vary.")
+                    return
+                plan = sw.build_plan(selected, method,
+                                     temp_unit=self._temp_unit(),
+                                     unit_system=self._table_units,
+                                     spacing=spacing)
+            elif method == "morris":
                 # Morris screens scalar QoI globally (mu*, sigma). The field
                 # (ROI) sensitivity is a Jacobian-only construction.
                 if field_vars:
@@ -1016,12 +1189,25 @@ class SensitivityTab(QWidget):
             return
 
         self.plan = plan
-        self.plan_kind = method
+        self.plan_kind = self._plan_kind_of(method)
         self.selected_qois = qois
         self.plan_field_vars = list(field_vars)
         qoi_names = [q.id for q in qois] + ["%s[field]" % v for v in field_vars]
         self.status.setStyleSheet("color: #15803d;")
-        if method == "morris":
+        if method in sw.DESIGNS:
+            msg = ("%s plan ready: %d parameters, %d runs, %d QoI (%s)."
+                   % ("Sweep" if method == "sweep" else "Grid", plan.k,
+                      plan.n_runs, len(qoi_names),
+                      ", ".join(qoi_names) if qoi_names else "—"))
+            if method == "grid" and not plan.base_on_grid:
+                msg += (" The Ref point is not one of the combinations: it "
+                        "is run in addition (run 1).")
+            if method == "grid" and plan.k > 3:
+                self.status.setStyleSheet("color: #b45309;")
+                msg += (" A grid of %d parameters grows fast: a sweep, or "
+                        "Morris, screens them for fewer runs." % plan.k)
+            self.status.setText(msg + " Ready for the run step.")
+        elif method == "morris":
             self.status.setText(
                 "Morris plan ready: %d parameters, N=%d trajectories, "
                 "%d runs, %d QoI (%s), seed %d. Ready for the run step." % (
@@ -1111,12 +1297,21 @@ class SensitivityTab(QWidget):
         # record or pass them, so config.json says what was really run.
         field_vars = list(getattr(self, "plan_field_vars", []))
         cpus = self._current_cpus()
+        # Sweep / grid campaigns: folder and job names "sweep" / "grid".
+        sweep = self.plan_kind == "sweep"
+        self._run_job_prefix = self.plan.design if sweep else "sensitivity"
+        root_wd = wd
         _study_cfg = self._plan_record(field_vars, cpus)
         try:
-            wd = create_study_dir(wd, _pname, "sensitivity", _study_cfg,
+            wd = create_study_dir(wd, _pname, self._run_job_prefix,
+                                  _study_cfg,
                                   machine=self.cmb_machine.machine_host())
         except OSError:
             pass   # fall back to the flat working directory
+        cache_folders = (self._reuse_folders(root_wd, exclude=wd)
+                         if sweep and self.chk_reuse.isChecked() else None)
+        series_zone, evf_thr = self._series_zone() if sweep else (None, 0.5)
+        self._series_zone_used = series_zone
 
         import time
         self._run_workdir = wd
@@ -1151,10 +1346,12 @@ class SensitivityTab(QWidget):
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
             workdir=str(wd), cpus=cpus,
             warmup_frac=float(self.spin_warmup.value()),
-            job_prefix="sensitivity", field_vars=field_vars,
+            job_prefix=self._run_job_prefix, field_vars=field_vars,
             eps=(self._plan_model_qoi or {}).get("eps"),
             remote_prefs=prefs if is_remote(prefs) else None,
-            extract_full_domain=self._run_full_domain)
+            extract_full_domain=self._run_full_domain,
+            series_zone=series_zone, evf_threshold=evf_thr,
+            cache_folders=cache_folders)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -1164,6 +1361,52 @@ class SensitivityTab(QWidget):
         self._worker.finished.connect(self._on_run_finished)
         self._worker.failed.connect(self._on_run_failed)
         self._thread.start()
+
+    def set_known_folders_getter(self, fn):
+        """fn() -> study folders of Model sizing, whose finished runs a
+        sweep / grid plan may reuse."""
+        self._known_folders_getter = fn
+
+    def _reuse_folders(self, root, exclude=None) -> list:
+        """Folders whose finished runs a sweep / grid plan may reuse: the
+        earlier sweep / grid plan folders of the working directory and the
+        study folders of Model sizing."""
+        out = []
+        try:
+            for d in sorted(Path(root).iterdir()):
+                if d.is_dir() and ("__sweep__" in d.name
+                                   or "__grid__" in d.name) \
+                        and (exclude is None or d != Path(exclude)):
+                    out.append(str(d))
+        except OSError:
+            log_swallowed("listing earlier plan folders", level=logging.DEBUG)
+        if self._known_folders_getter is not None:
+            try:
+                for f in self._known_folders_getter() or []:
+                    if f and str(f) not in out:
+                        out.append(str(f))
+            except Exception:
+                log_swallowed("reading the Model sizing study folders",
+                              level=logging.DEBUG)
+        return out
+
+    def _series_zone(self):
+        """(ZOI, EVF threshold) of the time curves: those frozen with the
+        plan's Model sizing QoI, else the current Setup settings, else no
+        zone (forces only)."""
+        st = self._plan_model_qoi
+        if not st and self._model_settings_getter is not None:
+            try:
+                st = self._model_settings_getter()
+            except Exception:
+                st = None
+        try:
+            zoi = tuple(float(v) for v in st["zoi"])
+            if zoi[0] < zoi[1] and zoi[2] < zoi[3]:
+                return zoi, float(st.get("evf_threshold", 0.5))
+        except Exception:
+            pass
+        return None, 0.5
 
     def _plan_record(self, field_vars, cpus) -> dict:
         """Everything needed to understand -- and regenerate -- this campaign,
@@ -1181,6 +1424,11 @@ class SensitivityTab(QWidget):
             if self.plan_kind == "jacobian":
                 d.update(base=float(plan.base[i]), delta=float(plan.deltas[i]),
                          normalize=bool(plan.normalize[i]))
+            elif self.plan_kind == "sweep":
+                d.update(base=float(plan.base[i]),
+                         levels=[float(v) for v in plan.level_values[i]],
+                         spacing=(plan.spacing[i] if i < len(plan.spacing)
+                                  else "linear"))
             else:
                 lo, hi = plan.bounds[i]
                 d.update(min=float(lo), max=float(hi))
@@ -1201,15 +1449,27 @@ class SensitivityTab(QWidget):
         if self.plan_kind == "jacobian":
             rec["scheme"] = plan.scheme
             rows = jac.profile_table(plan)
+        elif self.plan_kind == "sweep":
+            zone, thr = self._series_zone()
+            rec.update(design=plan.design, base_on_grid=bool(
+                plan.base_on_grid), reuse_runs=bool(self.chk_reuse.isChecked()),
+                time_curves_zoi=list(zone) if zone else None,
+                time_curves_evf_threshold=thr)
+            rows = sw.profile_table(plan)
         else:
             rec.update(N=int(plan.N), num_levels=int(plan.num_levels),
                        seed=plan.seed)
             rows = mp.profile_table(plan)
         runs = []
         for d in rows:
-            run = {"run": d["run"], "job": "sensitivity_run%03d" % (d["run"] - 1)}
+            run = {"run": d["run"],
+                   "job": "%s_run%03d" % (self._job_prefix_of_plan(),
+                                          d["run"] - 1)}
             if "kind" in d:
-                run["kind"] = d["kind"]
+                k_ = d["kind"]
+                if self.plan_kind == "sweep" and k_ not in ("base", "grid"):
+                    k_ = plan.param_paths[int(k_)]     # the varied parameter
+                run["kind"] = k_
             run["values"] = {p: float(d[p]) for p in plan.param_paths}
             runs.append(run)
         rec["runs"] = runs
@@ -1222,6 +1482,11 @@ class SensitivityTab(QWidget):
                                 "evf_threshold": st["evf_threshold"],
                                 "eps": dict(st["eps"])}
         return rec
+
+    def _job_prefix_of_plan(self) -> str:
+        if self.plan_kind == "sweep" and self.plan is not None:
+            return self.plan.design
+        return "sensitivity"
 
     def _on_cancel(self):
         if self._worker is not None:
@@ -1286,7 +1551,7 @@ class SensitivityTab(QWidget):
         fraction of the current run already done."""
         if self._running_index is None or self._run_workdir is None:
             return
-        job = "sensitivity_run%03d" % self._running_index
+        job = "%s_run%03d" % (self._run_job_prefix, self._running_index)
         from gui.sensitivity.run_cache import job_dir
         run_dir = job_dir(self._run_workdir, job)     # <campaign>/<job>/
         sta = run_dir / ("%s.sta" % job)
@@ -1890,14 +2155,25 @@ class SensitivityTab(QWidget):
             "sensitivity_results.csv", "CSV files (*.csv);;All files (*)")
         if not path:
             return
+        written = [path]
         try:
             label_for = lambda p: pr.spec_for(p).label
             xr.write_csv(self._last_result, path, label_for=label_for)
+            plan = self._sweep_plan()
+            if self._last_result.plan_kind == "sweep" and plan is not None:
+                # one row per run next to the trends
+                p_runs = str(Path(path).with_name(
+                    Path(path).stem + "_runs" + (Path(path).suffix or ".csv")))
+                jobs = ["%s_run%03d" % (plan.design, i)
+                        for i in range(plan.n_runs)]
+                xr.write_runs_csv(self._last_result, plan, p_runs, jobs=jobs,
+                                  label_for=label_for)
+                written.append(p_runs)
         except Exception as e:
             self._warn("Export failed: %s" % e)
             return
         self.status.setStyleSheet("color: #15803d;")
-        self.status.setText("Results exported to %s" % path)
+        self.status.setText("Results exported to %s" % " and ".join(written))
 
     def _on_run_failed(self, msg):
         self._teardown_thread()
@@ -1920,7 +2196,15 @@ class SensitivityTab(QWidget):
 
     def _show_results(self, result):
         """Fill the results table: one row per parameter, columns per QoI.
-        Morris shows mu* (sigma); Jacobian shows the sensitivity value."""
+        Morris shows mu* (sigma); Jacobian shows the sensitivity value.
+        Sweep / grid: one row per run (parameter values and QoI)."""
+        sweep = result.plan_kind == "sweep"
+        self.lbl_chart_param.setVisible(sweep)
+        self.cb_chart_param.setVisible(sweep)
+        if sweep:
+            self._show_sweep_results(result)
+            return
+        self._clear_series()
         paths = result.param_paths
         qoi_ids = result.qoi_ids
         labels = {p: pr.spec_for(p).label for p in paths}
@@ -1945,12 +2229,270 @@ class SensitivityTab(QWidget):
         self.cb_chart_qoi.blockSignals(False)
         self._draw_chart()
 
+    # ------------------------------------------------------------------
+    # Sweep / grid results: runs table, trend chart, time curves
+    # ------------------------------------------------------------------
+    def _sweep_plan(self):
+        plan = self._run_plan or self.plan
+        return plan if isinstance(plan, sw.SweepPlan) else None
+
+    def _show_sweep_results(self, result):
+        plan = self._sweep_plan()
+        tbl = self.results_table
+        tbl.clear()
+        if plan is None:
+            tbl.setRowCount(0)
+            tbl.setColumnCount(0)
+            return
+        n_q = int(result.Y.shape[1])
+        qoi_ids = list(result.qoi_ids[:n_q])
+        header = (["Run", "Varied"]
+                  + ["%s [%s]" % (sp_.label, self._plan_unit(plan, sp_))
+                     for sp_ in plan.specs] + qoi_ids)
+        tbl.setColumnCount(len(header))
+        tbl.setHorizontalHeaderLabels(header)
+        tbl.setRowCount(plan.n_runs)
+        failed = set(result.failures)
+        n_att = getattr(result, "n_attempted", plan.n_runs)
+        for r in range(plan.n_runs):
+            tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+            tbl.setItem(r, 1, QTableWidgetItem(
+                self._run_kind_label(plan, plan.run_kind[r])))
+            for j, v in enumerate(plan.X[r]):
+                tbl.setItem(r, 2 + j, QTableWidgetItem(_fmt(float(v))))
+            for j in range(n_q):
+                v = float(result.Y[r, j]) if r < result.Y.shape[0] else \
+                    float("nan")
+                if np.isfinite(v):
+                    txt = _fmt(v)
+                elif r in failed:
+                    txt = "failed"
+                elif r >= n_att:
+                    txt = "not run"
+                else:
+                    txt = "—"
+                tbl.setItem(r, 2 + plan.k + j, QTableWidgetItem(txt))
+        tbl.resizeColumnsToContents()
+        self.cb_chart_qoi.blockSignals(True)
+        self.cb_chart_qoi.clear()
+        self.cb_chart_qoi.addItems(qoi_ids)
+        self.cb_chart_qoi.blockSignals(False)
+        self.cb_chart_param.blockSignals(True)
+        self.cb_chart_param.clear()
+        for sp_ in plan.specs:
+            self.cb_chart_param.addItem(sp_.label, sp_.path)
+        self.cb_chart_param.blockSignals(False)
+        self._draw_chart()
+        self._fill_series(result, plan)
+
+    def _qoi_eps(self, qid):
+        """eps_q of a QoI of the run (Model sizing QoI only), else None."""
+        eps = (self._plan_model_qoi or {}).get("eps") or {}
+        for q in self.selected_qois:
+            if q.id == qid and getattr(q, "eps_key", "") in eps:
+                return float(eps[q.eps_key])
+        return None
+
+    def _qoi_unit(self, qid) -> str:
+        for q in self.selected_qois:
+            if q.id == qid:
+                return getattr(q, "unit", "") or ""
+        return ""
+
+    def _draw_sweep_chart(self, result, qid):
+        plan = self._sweep_plan()
+        idx = self.cb_chart_param.currentIndex()
+        if plan is None or idx < 0 or idx >= plan.k:
+            self._canvas.draw_idle()
+            return
+        spec = plan.specs[idx]
+        a = (result.analyses.get(qid) or {}).get(spec.path)
+        ax = self._fig.add_subplot(111)
+        unit_q = self._qoi_unit(qid)
+        if not isinstance(a, dict):
+            self.lbl_chart_note.setText("No result for %s." % qid)
+            self._canvas.draw_idle()
+            return
+        j = list(result.qoi_ids).index(qid)
+        y = np.asarray(result.Y[:, j], dtype=float)
+        eps = self._qoi_eps(qid)
+        q_ref = a.get("q_ref", float("nan"))
+        x_ref = float(plan.base[idx])
+        if eps and np.isfinite(q_ref):
+            ax.axhspan(q_ref - eps, q_ref + eps, color="#16a34a", alpha=0.12,
+                       label="Ref ± ε_q")
+        if plan.design == "grid" and plan.k > 1:
+            # One thin line per combination of the other parameters: lines
+            # that are not parallel show an interaction.
+            first = 0 if plan.base_on_grid else 1
+            others = [c for c in range(plan.k) if c != idx]
+            groups = {}
+            for r in range(first, plan.n_runs):
+                key = tuple(round(float(plan.X[r, c]), 12) for c in others)
+                groups.setdefault(key, []).append(r)
+            for key, rows in sorted(groups.items()):
+                rows = [r for r in rows if np.isfinite(y[r])]
+                if not rows:
+                    continue
+                rows.sort(key=lambda r: plan.X[r, idx])
+                lab = ", ".join("%s=%s" % (plan.specs[c].label, _fmt(v))
+                                for c, v in zip(others, key))
+                ax.plot(plan.X[rows, idx], y[rows], "o-", linewidth=0.9,
+                        markersize=3, alpha=0.7, label=lab)
+            ax.plot(a["x"], a["q"], "s-", color="#111827", linewidth=2,
+                    label="main effect (mean)")
+        else:
+            ax.plot(a["x"], a["q"], "o-", color="#2563eb", label=qid)
+        if np.isfinite(q_ref):
+            ax.plot([x_ref], [q_ref], "*", color="#b91c1c", markersize=12,
+                    label="Ref run")
+        sp_i = plan.spacing[idx] if idx < len(plan.spacing) else "linear"
+        if sp_i == "geometric" or (
+                sp_i == "typed" and np.all(np.asarray(a["x"]) > 0)
+                and len(a["x"]) > 2
+                and np.max(a["x"]) / np.min(a["x"]) >= 100):
+            ax.set_xscale("log")
+        ax.set_xlabel("%s [%s]" % (spec.label, self._plan_unit(plan, spec)),
+                      fontsize=9)
+        ax.set_ylabel("%s%s" % (qid, " [%s]" % unit_q if unit_q else ""),
+                      fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, loc="best")
+        parts = ["%d points" % a.get("n", 0)]
+        if np.isfinite(a.get("slope", np.nan)):
+            parts.append("slope of the least-squares line %s %s/%s" % (
+                _fmt(a["slope"]), unit_q or "QoI unit",
+                self._plan_unit(plan, spec) or "unit"))
+        if np.isfinite(a.get("r2", np.nan)):
+            parts.append("R² %.3f" % a["r2"])
+        if np.isfinite(a.get("spearman", np.nan)):
+            parts.append("Spearman ρ %.2f (±1 = monotone)"
+                         % a["spearman"])
+        if np.isfinite(a.get("max_dev_eps", np.nan)):
+            parts.append("max |q − q_ref| / ε_q = %.2f"
+                         % a["max_dev_eps"])
+        note = "; ".join(parts) + "."
+        if plan.design == "grid":
+            note += (" Main effect: mean of the QoI over the other "
+                     "parameters at each value.")
+        self.lbl_chart_note.setStyleSheet("color: #374151;")
+        self.lbl_chart_note.setText(note)
+        self._fig.tight_layout()
+        self._canvas.draw_idle()
+
+    def _clear_series(self):
+        self.lst_series_runs.blockSignals(True)
+        self.lst_series_runs.clear()
+        self.lst_series_runs.blockSignals(False)
+        self.cb_series_qty.blockSignals(True)
+        self.cb_series_qty.clear()
+        self.cb_series_qty.blockSignals(False)
+        self._fig_series.clear()
+        self._canvas_series.draw_idle()
+        self.lbl_series_note.setText(
+            "Run a sweep or grid plan to compare the runs over time.")
+
+    def _fill_series(self, result, plan):
+        series = getattr(result, "series", None) or []
+        qtys = []
+        for d in series:
+            for q in (d or {}):
+                if q not in ("t", "t_force") and q not in qtys:
+                    qtys.append(q)
+        order = list(mq.MODEL_QOIS)
+        qtys.sort(key=lambda q: order.index(q) if q in order else 99)
+        keep = self.cb_series_qty.currentText()
+        self.cb_series_qty.blockSignals(True)
+        self.cb_series_qty.clear()
+        self.cb_series_qty.addItems(qtys)
+        if keep in qtys:
+            self.cb_series_qty.setCurrentText(keep)
+        self.cb_series_qty.blockSignals(False)
+        self.lst_series_runs.blockSignals(True)
+        self.lst_series_runs.clear()
+        for r in range(plan.n_runs):
+            vals = ", ".join("%s=%s" % (sp_.label, _fmt(float(v)))
+                             for sp_, v in zip(plan.specs, plan.X[r]))
+            it = QListWidgetItem("%d · %s" % (r + 1, vals))
+            it.setToolTip("Run %d (%s): %s" % (
+                r + 1, self._run_kind_label(plan, plan.run_kind[r]), vals))
+            it.setData(Qt.UserRole, r)
+            ok = r < len(series) and series[r]
+            it.setFlags((Qt.ItemIsUserCheckable | Qt.ItemIsEnabled) if ok
+                        else Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if ok else Qt.Unchecked)
+            self.lst_series_runs.addItem(it)
+        self.lst_series_runs.blockSignals(False)
+        self._draw_series()
+
+    def _draw_series(self, *_):
+        self._fig_series.clear()
+        result = self._last_result
+        plan = self._sweep_plan()
+        q = self.cb_series_qty.currentText()
+        series = getattr(result, "series", None) if result else None
+        if not series or plan is None or not q:
+            self._canvas_series.draw_idle()
+            return
+        ax = self._fig_series.add_subplot(111)
+        tkey = "t_force" if q in ("Fc", "Ff") else "t"
+        t_end = None
+        drawn = 0
+        for k in range(self.lst_series_runs.count()):
+            it = self.lst_series_runs.item(k)
+            if it.checkState() != Qt.Checked:
+                continue
+            r = int(it.data(Qt.UserRole))
+            d = series[r] if r < len(series) else None
+            if not d or q not in d or tkey not in d:
+                continue
+            t = np.asarray(d[tkey], dtype=float)
+            v = np.asarray(d[q], dtype=float)
+            if t.size != v.size or not t.size:
+                continue
+            t_end = float(t[-1]) if t_end is None else max(t_end, float(t[-1]))
+            base = r == plan.base_row
+            ax.plot(t, v, color="#111827" if base else None,
+                    linewidth=1.8 if base else 0.9,
+                    label=("%d (Ref)" % (r + 1)) if base else str(r + 1))
+            drawn += 1
+        window = (self._plan_model_qoi or {}).get("window")
+        if window and t_end:
+            ax.axvspan(float(window[0]) * t_end, float(window[1]) * t_end,
+                       color="#2563eb", alpha=0.07, label="window T")
+        ax.set_xlabel("time [s]", fontsize=9)
+        unit = mq.UNITS.get(q, "")
+        ax.set_ylabel("%s [%s]" % (q, unit) if unit else q, fontsize=9)
+        ax.grid(True, alpha=0.3)
+        if drawn and drawn <= 12:
+            ax.legend(fontsize=7, loc="best", title="run", title_fontsize=7)
+        note = ("%s over time: area mean over the ZOI at each frame (Vx, Vy, "
+                "T over the material elements, EVF ≥ threshold)"
+                % q if tkey == "t" else
+                "%s over time: reaction force / width at each history sample"
+                % q)
+        note += ". The Table tab gives each run's parameter values."
+        if not any(d and "Vx" in d for d in series):
+            note += (" No ZOI was set when the plan ran: the fields have no "
+                     "time curves.")
+        self.lbl_series_note.setText(note)
+        self._fig_series.tight_layout()
+        self._canvas_series.draw_idle()
+
     def _draw_chart(self):
         self._fig.clear()
         result = self._last_result
         if result is None or not result.qoi_ids:
             self._canvas.draw_idle()
             return
+        if result.plan_kind == "sweep":
+            self.lbl_chart_rank.setVisible(False)
+            self.cb_chart_rank.setVisible(False)
+            self.lbl_chart_note.setText("")
+            qid = self.cb_chart_qoi.currentText() or result.qoi_ids[0]
+            self._draw_sweep_chart(result, qid)
+            return
+        self.lbl_chart_note.setStyleSheet("color: #b45309;")
         qid = self.cb_chart_qoi.currentText() or result.qoi_ids[0]
         jacobian = result.plan_kind == "jacobian"
         self.lbl_chart_rank.setVisible(jacobian)
@@ -2061,10 +2603,15 @@ class SensitivityTab(QWidget):
         return "%s (%s)" % (_fmt(mu_star[k]), _fmt(sigma[k]))
 
     def _show_preview(self, plan):
-        rows = (jac.profile_table(plan) if self.plan_kind == "jacobian"
-                else mp.profile_table(plan))
+        mod = {"jacobian": jac, "sweep": sw}.get(self.plan_kind, mp)
+        rows = mod.profile_table(plan)
+        if self.plan_kind == "sweep":
+            # "base", "grid", or the label of the parameter varied
+            rows = [dict(d, kind=self._run_kind_label(plan, d["kind"]))
+                    for d in rows]
         paths = plan.param_paths
         has_kind = "kind" in rows[0] if rows else False
+        kind_w = max([5] + [len(str(d.get("kind", ""))) for d in rows])
         head_cells = ["run"]
         if has_kind:
             head_cells.append("kind")
@@ -2075,10 +2622,21 @@ class SensitivityTab(QWidget):
         for d in rows:
             cells = ["%4d" % d["run"]]
             if has_kind:
-                cells.append("%-5s" % d["kind"])
+                cells.append("%-*s" % (kind_w, d["kind"]))
             cells += [_fmt(d[p]) for p in paths]
             lines.append(" | ".join(cells))
         self.preview.setPlainText("\n".join(lines))
+
+    @staticmethod
+    def _run_kind_label(plan, kind) -> str:
+        """Sweep run kind for display: "base", "grid", or the label of the
+        parameter that run varies."""
+        if kind in ("base", "grid"):
+            return kind
+        try:
+            return plan.specs[int(kind)].label
+        except (ValueError, IndexError):
+            return str(kind)
 
     @staticmethod
     def _plan_unit(plan, spec) -> str:
