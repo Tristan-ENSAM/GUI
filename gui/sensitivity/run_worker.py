@@ -240,8 +240,20 @@ class SensitivityRunWorker(QObject):
                  field_vars=None, field_metric: str = "ssd",
                  solve_fn=None, remote_prefs=None,
                  extract_full_domain: bool = False, eps=None,
-                 parent=None):
+                 series_zone=None, evf_threshold: float = 0.5,
+                 cache_folders=(), parent=None):
         super().__init__(parent)
+        # Sweep plans: zone (ZOI) of the time curves kept per run.
+        self._series_zone = (tuple(float(v) for v in series_zone)
+                             if series_zone is not None else None)
+        self._evf_threshold = float(evf_threshold)
+        # Finished runs with the same model parameters, in the campaign
+        # folder or in these folders, are read back instead of launched
+        # (gui.sensitivity.run_cache); None = no reuse.
+        self._cache_folders = (None if cache_folders is None
+                               else [str(f) for f in cache_folders])
+        self._cache = None
+        self.n_reused = 0
         # True: the extraction keeps the whole Eulerian instance instead of
         # the ROI crop (sensitivity maps over the whole domain).
         self._full_domain = bool(extract_full_domain)
@@ -337,7 +349,7 @@ class SensitivityRunWorker(QObject):
     # -- entry point (run inside the QThread) --------------------------
     def run(self):
         try:
-            solve = self._solve_fn or self._abaqus_solve
+            solve = self._solve_fn or self._solve_with_cache
             result = rc.run_plan(
                 self._plan, self._plan_kind, self._qoi_specs, solve,
                 self._base_cfg, warmup_frac=self._warmup,
@@ -345,7 +357,8 @@ class SensitivityRunWorker(QObject):
                 should_cancel=lambda: self._cancel,
                 keep_bundles=self._keep_bundles,
                 field_vars=self._field_vars, field_metric=self._field_metric,
-                eps=self._eps)
+                eps=self._eps, series_zone=self._series_zone,
+                evf_threshold=self._evf_threshold)
             self.finished.emit(result)
         except Exception as e:                          # pragma: no cover
             self.failed.emit("%s" % e)
@@ -373,6 +386,50 @@ class SensitivityRunWorker(QObject):
         return offset
 
     # -- the Abaqus per-profile solve (default solve_fn) ---------------
+    def _solve_with_cache(self, cfg, i):
+        """A finished run with the same model parameters (this campaign's
+        folder first, then the cache folders) is read back and copied into
+        this campaign under this run's job name; otherwise Abaqus runs."""
+        if self._cache_folders is None:
+            return self._abaqus_solve(cfg, i)
+        from gui.sensitivity.run_cache import RunCache, copy_run, same_folder
+        if self._cache is None:
+            try:
+                self._cache = RunCache([self._workdir] + self._cache_folders)
+            except Exception:
+                log_swallowed("indexing finished runs", level=logging.DEBUG)
+                self._cache = RunCache([])
+        params = cfg.to_params_dict()
+        hit = self._cache.lookup(params, prefer=self._workdir)
+        if hit is None:
+            bundle = self._abaqus_solve(cfg, i)
+            if bundle is not None:
+                try:
+                    self._cache.add_run(self._workdir,
+                                        "%s_run%03d" % (self._job_prefix, i))
+                except Exception:
+                    log_swallowed("indexing a finished run",
+                                  level=logging.DEBUG)
+            return bundle
+        job = "%s_run%03d" % (self._job_prefix, i)
+        src = hit.npz
+        if not same_folder(hit.folder, self._workdir):
+            if copy_run(hit.folder, hit.job, self._workdir, job):
+                copied = self._cache.add_run(self._workdir, job)
+                if copied is not None:
+                    src = copied.npz
+        try:
+            bundle = ResultsBundle.load(src)
+        except Exception as e:
+            self.log.emit("[run %d] saved run %s unreadable (%s): launching "
+                          "it again\n" % (i + 1, hit.job, e))
+            return self._abaqus_solve(cfg, i)
+        self.n_reused += 1
+        self.log.emit("[run %d] already computed (%s in %s): reused\n"
+                      % (i + 1, hit.job, Path(hit.folder).name))
+        self.runDone.emit(i, True)
+        return bundle
+
     def _abaqus_solve(self, cfg, i):
         job_name = "%s_run%03d" % (self._job_prefix, i)
         # Every file of the run goes to its own folder <campaign>/<job>/.

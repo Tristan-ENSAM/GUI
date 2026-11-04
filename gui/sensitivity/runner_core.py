@@ -28,6 +28,7 @@ import numpy as np
 
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
+from gui.sensitivity import sweep_plan as sw
 from gui.sensitivity import field_metrics as fm
 from gui.core.logging_util import log_swallowed
 
@@ -201,7 +202,7 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None,
 
 @dataclass
 class RunResult:
-    plan_kind: str                 # "morris" | "jacobian"
+    plan_kind: str                 # "morris" | "jacobian" | "sweep"
     qoi_ids: List[str]
     param_paths: List[str]
     Y: np.ndarray                  # (n_runs, n_qoi), NaN where a run failed
@@ -213,6 +214,9 @@ class RunResult:
     # successes nor failures.
     n_attempted: int = 0
     cancelled: bool = False
+    # Sweep / grid plans: per run, the QoI over time (`run_series`), None
+    # for a failed or unrun row.
+    series: Optional[list] = None
 
     @property
     def n_ok(self) -> int:
@@ -237,13 +241,37 @@ def extract_qois(bundle, qoi_specs, warmup_frac: float = 0.0) -> dict:
     return out
 
 
+def run_series(bundle, zone, evf_threshold: float = 0.5) -> dict:
+    """The QoI of one run over time, for the time curves of the sweep
+    plans: {"t": frame times, "Vx", "Vy", "T", "EVF": area mean over the
+    zone at each frame (same masking as the zone means of the preliminary
+    checks), "t_force": history times, "Fc", "Ff": F / w}. What cannot be
+    computed is left out (never raises)."""
+    from gui.sensitivity import preliminary_checks as pc
+    out = {}
+    try:
+        out["t"] = np.asarray(bundle.times, dtype=float)
+        if zone is not None:
+            out.update(pc.zone_series(bundle, zone, evf_threshold))
+    except Exception:
+        log_swallowed("zone means over time", level=logging.DEBUG)
+    try:
+        t, forces = pc.force_series(bundle)
+        out["t_force"] = t
+        out.update(forces)
+    except Exception:
+        log_swallowed("forces over time", level=logging.DEBUG)
+    return out
+
+
 def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
              base_cfg, warmup_frac: float = 0.0,
              progress: Optional[Callable[[int, int], None]] = None,
              should_cancel: Optional[Callable[[], bool]] = None,
              keep_bundles: bool = False,
              field_vars=None, field_metric: str = "ssd",
-             eps: Optional[dict] = None) -> RunResult:
+             eps: Optional[dict] = None,
+             series_zone=None, evf_threshold: float = 0.5) -> RunResult:
     """Run every profile of `plan` and analyse the result.
 
     solve_fn(cfg, run_index) -> bundle | None
@@ -256,13 +284,15 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
        eps                            optional {eps_key: eps_q} of the Model
                                    tab: adds a "<qoi> /\u03b5_q" column per
                                    QoI that has an eps_key (add_eps_ratios).
+    series_zone                    sweep plans: zone (ZOI) of the time
+                                   curves kept per run (`run_series`).
     """
-    if plan_kind not in ("morris", "jacobian"):
-        raise ValueError("plan_kind must be 'morris' or 'jacobian'")
+    if plan_kind not in ("morris", "jacobian", "sweep"):
+        raise ValueError("plan_kind must be 'morris', 'jacobian' or 'sweep'")
     want_fields = bool(field_vars) and plan_kind == "jacobian"
     if want_fields:
         keep_bundles = True
-    mod = jac if plan_kind == "jacobian" else mp
+    mod = {"jacobian": jac, "morris": mp, "sweep": sw}[plan_kind]
     configs = mod.plan_to_configs(base_cfg, plan)
     n = len(configs)
 
@@ -270,6 +300,7 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
     Y = np.full((n, len(qoi_ids)), np.nan, dtype=float)
     failures: List[int] = []
     bundles = [None] * n if keep_bundles else None
+    series = [None] * n if plan_kind == "sweep" else None
     n_attempted = 0
     cancelled = False
 
@@ -286,6 +317,8 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
             continue
         if keep_bundles:
             bundles[i] = bundle
+        if series is not None:
+            series[i] = run_series(bundle, series_zone, evf_threshold)
         q = extract_qois(bundle, qoi_specs, warmup_frac)
         for j, qid in enumerate(qoi_ids):
             Y[i, j] = q[qid]
@@ -303,7 +336,11 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
     for j, qid in enumerate(qoi_ids):
         y = Y[:, j]
         try:
-            if plan_kind == "jacobian":
+            if plan_kind == "sweep":
+                key = getattr(qoi_specs[j], "eps_key", "")
+                analyses[qid] = sw.analyze(
+                    plan, y, eps=(eps or {}).get(key) if key else None)
+            elif plan_kind == "jacobian":
                 analyses[qid] = jac.analyze(plan, y,
                                             q_is_temp=_qoi_is_temperature(
                                                 qoi_specs[j]))
@@ -324,7 +361,7 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
             analyses[qid] = {"error": str(e)}
 
     qoi_ids_all = list(qoi_ids)
-    if eps:
+    if eps and plan_kind != "sweep":   # sweep: max |q - q_ref| / eps_q inside
         qoi_ids_all += add_eps_ratios(analyses, qoi_specs, plan, plan_kind,
                                       eps)
     if want_fields and bundles is not None:
@@ -350,7 +387,8 @@ def run_plan(plan, plan_kind: str, qoi_specs, solve_fn: Callable,
     return RunResult(plan_kind=plan_kind, qoi_ids=qoi_ids_all,
                      param_paths=list(plan.param_paths), Y=Y,
                      analyses=analyses, failures=failures, bundles=bundles,
-                     n_attempted=n_attempted, cancelled=cancelled)
+                     n_attempted=n_attempted, cancelled=cancelled,
+                     series=series)
 
 
 EPS_SUFFIX = " /\u03b5_q"

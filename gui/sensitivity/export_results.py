@@ -15,6 +15,11 @@ Morris results have their own columns (mu_star, sigma, mu, mu_star_conf and
 the trajectories used / total), sorted by mu_star; a QoI that could not be
 analysed gets one row per parameter with the reason in `note`.
 
+Sweep / grid results: one row per (QoI, parameter) with the trend (slope
+of the least-squares line, R^2, Spearman's rho, max |q - q_ref| / eps_q,
+points used, q_ref); `runs_to_csv` writes one row per run (parameter
+values and QoI).
+
 Pure functions (no Qt) so they are unit-testable; the tab wires a
 "Save results…" button that calls `write_csv`.
 """
@@ -33,7 +38,10 @@ _COLUMNS = ["qoi", "parameter", "label", "sensitivity",
 _MORRIS_COLUMNS = ["qoi", "parameter", "label", "mu_star", "sigma", "mu",
                    "mu_star_conf", "trajectories_used", "trajectories_total",
                    "note"]
-_FLOAT_KEYS = ("sensitivity", "abs_sensitivity", "dQdx", "elasticity",
+_SWEEP_COLUMNS = ["qoi", "parameter", "label", "n_points", "slope", "r2",
+                  "spearman", "max_dev_eps", "q_ref"]
+_FLOAT_KEYS = ("slope", "r2", "spearman", "max_dev_eps", "q_ref",
+               "sensitivity", "abs_sensitivity", "dQdx", "elasticity",
                "x0", "Q0", "mu_star", "sigma", "mu", "mu_star_conf")
 
 
@@ -73,12 +81,68 @@ def _morris_rows(result, label_for):
     return rows
 
 
+def _sweep_rows(result, label_for):
+    rows = []
+    for qid in result.qoi_ids:
+        a = result.analyses.get(qid, {})
+        if not isinstance(a, dict) or "error" in a:
+            continue
+        for path in result.param_paths:
+            d = a.get(path)
+            if not isinstance(d, dict):
+                continue
+            rows.append({"qoi": qid, "parameter": path,
+                         "label": label_for(path) if label_for else path,
+                         "n_points": d.get("n", ""),
+                         "slope": float(d.get("slope", float("nan"))),
+                         "r2": float(d.get("r2", float("nan"))),
+                         "spearman": float(d.get("spearman", float("nan"))),
+                         "max_dev_eps": float(d.get("max_dev_eps",
+                                                    float("nan"))),
+                         "q_ref": float(d.get("q_ref", float("nan")))})
+    return rows
+
+
+def runs_to_csv(result, plan, jobs=None,
+                label_for: Optional[Callable[[str], str]] = None) -> str:
+    """One row per run of a sweep / grid plan: run number, job name, kind
+    ("base", the varied parameter, or "grid"), the parameter values (the
+    plan's displayed units) and every QoI (empty for a failed run)."""
+    buf = io.StringIO()
+    paths = list(plan.param_paths)
+    heads = [label_for(p) if label_for else p for p in paths]
+    w = csv.writer(buf)
+    w.writerow(["run", "job", "kind"] + heads + list(result.qoi_ids[
+        :result.Y.shape[1]]))
+    for i in range(plan.n_runs):
+        kind = plan.run_kind[i]
+        if kind not in ("base", "grid"):
+            kind = paths[int(kind)]
+        y = result.Y[i] if i < result.Y.shape[0] else []
+        w.writerow([i + 1, (jobs[i] if jobs else ""), kind]
+                   + [repr(float(v)) for v in plan.X[i]]
+                   + ["" if not math.isfinite(float(v)) else repr(float(v))
+                      for v in y])
+    return buf.getvalue()
+
+
+def write_runs_csv(result, plan, path, jobs=None,
+                   label_for: Optional[Callable[[str], str]] = None) -> str:
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(runs_to_csv(result, plan, jobs, label_for))
+    if str(path).lower().endswith(".csv"):
+        excel_copy(path)
+    return str(path)
+
+
 def result_rows(result, label_for: Optional[Callable[[str], str]] = None):
     """Flatten a RunResult into a list of dict rows, one per (QoI, param),
     sorted within each QoI by descending |sensitivity| (NaN last) -- or by
     descending mu_star for a Morris result."""
     if getattr(result, "plan_kind", "jacobian") == "morris":
         return _morris_rows(result, label_for)
+    if getattr(result, "plan_kind", "jacobian") == "sweep":
+        return _sweep_rows(result, label_for)
     rows = []
     for qid in result.qoi_ids:
         analysis = result.analyses.get(qid, {})
@@ -115,9 +179,9 @@ def result_to_csv(result, label_for: Optional[Callable[[str], str]] = None
                   ) -> str:
     """Return the CSV text for a RunResult."""
     buf = io.StringIO()
-    cols = (_MORRIS_COLUMNS
-            if getattr(result, "plan_kind", "jacobian") == "morris"
-            else _COLUMNS)
+    kind = getattr(result, "plan_kind", "jacobian")
+    cols = {"morris": _MORRIS_COLUMNS, "sweep": _SWEEP_COLUMNS}.get(
+        kind, _COLUMNS)
     w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for row in result_rows(result, label_for):
