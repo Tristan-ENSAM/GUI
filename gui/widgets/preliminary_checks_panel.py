@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Preliminary checks on one finished run (Model tab).
+"""Preliminary checks on one finished run (Setup tab).
 
 Before the sizing studies, reads ONE saved run and shows
 (gui.sensitivity.preliminary_checks):
@@ -24,7 +24,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QCheckBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
@@ -53,8 +53,8 @@ def _num(le, default=None):
         return default
 
 
-class PreliminaryChecksDialog(QDialog):
-    """Non-modal window. `settings_getter()` returns the Model tab settings
+class PreliminaryChecksPanel(QWidget):
+    """Part of the Setup tab. `settings_getter()` returns the Setup tab settings
     {"eps", "window", "zoi", ...} (eps_q and the default zone).
 
     Left: the inputs, each with a short explanation, the buttons and the
@@ -63,9 +63,9 @@ class PreliminaryChecksDialog(QDialog):
 
     def __init__(self, settings_getter=None, start_dir="", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Preliminary checks on one run")
         self._settings_getter = settings_getter
-        self._start_dir = start_dir
+        # A path, or a callable returning it (read when a file dialog opens).
+        self._start_dir_src = start_dir
         self._result = None
         v = QVBoxLayout(self)
 
@@ -95,7 +95,6 @@ class PreliminaryChecksDialog(QDialog):
         split.setSizes([430, 820])
         v.addWidget(split, 1)
         self._fill_zone_from_model()
-        self._fit_to_screen(parent)
 
     # ---- layout --------------------------------------------------------
     def _help(self, text):
@@ -143,12 +142,16 @@ class PreliminaryChecksDialog(QDialog):
             self.le_zone[k] = le
             zg.addWidget(QLabel(k), i // 2, 2 * (i % 2))
             zg.addWidget(le, i // 2, 2 * (i % 2) + 1)
+        b = QPushButton("Zone = ZOI")
+        b.setToolTip("Copy the ZOI of the comparison settings into the zone.")
+        b.clicked.connect(self._fill_zone_from_model)
+        zg.addWidget(b, 0, 4)
         f.addRow("Zone [mm]", zg)
         f.addRow(self._help(
             "The run file gives everything else (element size, filter, tool "
             "and workpiece position). The zone is the rectangle over which "
             "Vx, Vy, T and EVF are averaged at each frame; it starts as the "
-            "ZOI of the Model tab. Before the ZOI is fixed, take a wide zone "
+            "ZOI of the Setup tab. Before the ZOI is fixed, take a wide zone "
             "around the tool. It must lie inside the extracted region."))
         lv.addWidget(box)
 
@@ -294,19 +297,14 @@ class PreliminaryChecksDialog(QDialog):
             self.tabs.addTab(w, title)
         return self.tabs
 
-    def _fit_to_screen(self, parent):
-        """Open at 1300 x 900, or at 90 % of the available screen when that
-        is smaller, centred on the screen."""
-        screen = (parent.screen() if parent is not None else None) \
-            or QApplication.primaryScreen()
-        if screen is None:
-            self.resize(1300, 900)
-            return
-        g = screen.availableGeometry()
-        w = min(1300, int(0.9 * g.width()))
-        h = min(900, int(0.9 * g.height()))
-        self.resize(w, h)
-        self.move(g.x() + (g.width() - w) // 2, g.y() + (g.height() - h) // 2)
+    @property
+    def _start_dir(self) -> str:
+        src = self._start_dir_src
+        try:
+            src = src() if callable(src) else src
+        except Exception:
+            src = ""
+        return str(src or "")
 
     # ------------------------------------------------------------------
     def _model(self) -> dict:

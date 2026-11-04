@@ -15,10 +15,12 @@ def test_optimization_sub_tabs_in_work_order(qapp):
     from gui.main import MainWindow
     w = MainWindow(); w._dirty = False
     names = [w.opt_tabs.tabText(i) for i in range(w.opt_tabs.count())]
-    assert names == ["1 · Model sizing", "2 · Sensitivity",
-                     "3 · Inverse identification"]
-    assert w.opt_tabs.widget(0) is w.optimization_tab
-    assert w.opt_tabs.widget(1) is w.sensitivity_tab
+    assert names == ["1 · Setup", "2 · Model sizing", "3 · Parameter plans",
+                     "4 · Compare runs", "5 · Inverse identification"]
+    assert w.opt_tabs.widget(0) is w.setup_tab
+    assert w.opt_tabs.widget(1) is w.optimization_tab
+    assert w.opt_tabs.widget(2) is w.sensitivity_tab
+    assert w.opt_tabs.widget(3) is w.compare_tab
 
 
 def test_style_sheet_is_complete():
@@ -52,10 +54,3 @@ def test_group_titles_bold_and_disabled_colours():
     assert theme.DISABLED_BG in theme.style_sheet()
 
 
-def test_deviation_window_fits_the_screen(qapp):
-    from gui.widgets.deviation_maps_dialog import DeviationMapsDialog
-    d = DeviationMapsDialog()
-    g = qapp.primaryScreen().availableGeometry()
-    assert d.height() == min(900, int(0.9 * g.height()))
-    assert d.width() <= max(min(1250, int(0.9 * g.width())),
-                            d.minimumSizeHint().width())

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Deviation maps between two runs of the sizing studies (Model tab).
+"""Compare runs tab: deviation maps between two runs of one study or plan.
 
 Shows, for a reference run and a compared run of the mass-scaling, mesh or
 domain studies, where in the ZOI and when in the time window T the two runs
@@ -28,7 +28,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget)
 
 from matplotlib.figure import Figure
@@ -64,17 +64,16 @@ def _plot_panel(canvas):
     return w, tb
 
 
-class DeviationMapsDialog(QDialog):
-    """Non-modal window; `folders` are the study folders listed at start.
-    `settings_getter` returns the Model tab's current comparison settings
-    (dm.CompareSettings), used when the folder of the reference run is not
-    a study of the Model tab (e.g. a Sensitivity-tab folder)."""
+class CompareRunsPanel(QWidget):
+    """The Compare runs tab; `folders` are the study folders listed at
+    start (`add_folders` adds the later ones). `settings_getter` returns the
+    current comparison settings of the Setup tab (dm.CompareSettings), used
+    when the folder of the reference run is not a Model sizing study (e.g. a
+    Parameter plans folder)."""
 
     def __init__(self, folders=(), start_dir="", parent=None,
                  settings_getter=None):
         super().__init__(parent)
-        self.setWindowTitle("Deviation maps between two runs")
-        self._fit_to_screen(parent)
         self._folders = []               # study folders, in the Study list
         self._folder_runs = {}           # str(folder) -> its finished runs
         self._runs = []                  # runs of the chosen Study entry
@@ -82,7 +81,9 @@ class DeviationMapsDialog(QDialog):
         self._pair_jobs = ("a", "b")
         self._point = None
         self._busy = False
-        self._start_dir = str(start_dir or "")
+        # A path, or a callable returning it (the working directory of the
+        # Preferences, read when a file dialog opens).
+        self._start_dir_src = start_dir
         self._settings_getter = settings_getter
 
         lay = QVBoxLayout(self)
@@ -116,8 +117,8 @@ class DeviationMapsDialog(QDialog):
             "<job>.meta.json; both must be in the same folder), e.g. two\n"
             "runs made with the same parameters to show their\n"
             "repeatability. They are listed under 'Result files'. Outside a\n"
-            "study folder, the comparison uses the Model sizing tab's\n"
-            "settings (ZOI, sampling step, T, ε_q).")
+            "Model sizing study folder, the comparison uses the settings of\n"
+            "the Setup tab (ZOI, sampling step, T, ε_q).")
         b.clicked.connect(self._on_add_files)
         row.addWidget(b)
         lay.addLayout(row)
@@ -207,20 +208,14 @@ class DeviationMapsDialog(QDialog):
             self.cb_study.setCurrentIndex(self._study_index(self._folders[-1]))
         self._redraw()
 
-    def _fit_to_screen(self, parent):
-        """Open at 1250 x 900, or at 90 % of the available screen when that
-        is smaller (a 1920 x 1080 screen at 125-150 % scaling has only
-        about 700-830 px of height), centred on the screen."""
-        screen = (parent.screen() if parent is not None else None) \
-            or QApplication.primaryScreen()
-        if screen is None:
-            self.resize(1250, 900)
-            return
-        g = screen.availableGeometry()
-        w = min(1250, int(0.9 * g.width()))
-        h = min(900, int(0.9 * g.height()))
-        self.resize(w, h)
-        self.move(g.x() + (g.width() - w) // 2, g.y() + (g.height() - h) // 2)
+    @property
+    def _start_dir(self) -> str:
+        src = self._start_dir_src
+        try:
+            src = src() if callable(src) else src
+        except Exception:
+            src = ""
+        return str(src or "")
 
     # ---- study folders -------------------------------------------------
     def _study_index(self, folder) -> int:
@@ -277,6 +272,15 @@ class DeviationMapsDialog(QDialog):
         self._folder_runs[str(folder)] = runs
         self._rebuild_study_list(select=folder if select else None)
         return len(runs)
+
+    def add_folders(self, folders) -> None:
+        """Add the study folders not listed yet, without a message and
+        without changing the chosen entry (the first folder is chosen when
+        nothing is)."""
+        for f in folders or ():
+            self.add_folder(f, quiet=True, select=False)
+        if self.cb_study.currentData() is None and self._folders:
+            self.cb_study.setCurrentIndex(self._study_index(self._folders[-1]))
 
     def _on_add_folder(self):
         cur = self.cb_study.currentData()
@@ -442,7 +446,7 @@ class DeviationMapsDialog(QDialog):
                     item.setEnabled(True)
 
     def _settings_for(self, run):
-        """Settings of the reference run's folder, else the Model tab's
+        """Settings of the reference run's folder, else the Setup tab's
         current ones; (settings, None) or (None, reason)."""
         try:
             return dm.settings_of_folder(run.folder), None
@@ -454,7 +458,7 @@ class DeviationMapsDialog(QDialog):
                 if s is not None:
                     return s, None
             except Exception as e:
-                err += "; Model sizing tab: %s" % e
+                err += "; Setup tab: %s" % e
         return None, err
 
     # ---- comparison ----------------------------------------------------
