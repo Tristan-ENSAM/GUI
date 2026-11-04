@@ -34,7 +34,7 @@ def test_gci_plan_defaults_to_four_meshes(tab):
 
 
 def test_advanced_sections_start_collapsed_and_unchanged(tab):
-    assert set(tab._advanced) == {"common", "ms", "mesh", "domain"}
+    assert set(tab._advanced) == {"common", "sizing", "ms", "mesh", "domain"}
     for sec, _fields in tab._advanced.values():
         assert not sec.is_expanded()
         assert sec.body.isHidden()
@@ -73,8 +73,11 @@ def test_count_ignores_number_formatting(tab):
     sec = tab._advanced["common"][0]
     tab._dom_texts["window_start"].setText("0,30")     # = default 0.3
     assert sec.n_changed() == 0
-    tab._dom_texts["rk_max"].setText("0.01")
+    tab._dom_texts["window_end"].setText("0.9")
     assert sec.n_changed() == 1
+    # the guards are counted in the sizing section (moved 2026-11-04)
+    tab._dom_texts["rk_max"].setText("0.01")
+    assert tab._advanced["sizing"][0].n_changed() == 1
 
 
 def test_loaded_profile_with_non_default_values_is_flagged(qapp):
@@ -82,7 +85,7 @@ def test_loaded_profile_with_non_default_values_is_flagged(qapp):
     cfg.optimization.rk_max = "0.01"
     cfg.optimization.gci_ratio = "1.5"
     t = OptimizationTab(cfg)
-    assert t._advanced["common"][0].n_changed() == 1
+    assert t._advanced["sizing"][0].n_changed() == 1
     assert t._advanced["mesh"][0].n_changed() == 1
 
 
