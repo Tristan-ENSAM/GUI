@@ -46,6 +46,31 @@ ANY quantity, every quantity falls back to the successive criterion
 E_max < 1 held `n_hold` consecutive times. No decision is taken before
 `m_ratios + 1` comparisons exist (the hypothesis cannot be tested earlier).
 
+DRIFT (decision of 2026-11-04): a pass of one step says nothing about the
+residual influence when the increments do not decrease (e.g. the workpiece
+bending that grows with h_wp). If, for some quantity, every ratio of the test
+window is >= 1 (or an increment grew from exactly zero) and its last
+increment is not negligible (>= 1e-6 eps_q, round-off), the fallback does
+not accept a pass: the side keeps growing, up to `n_max` or its cap, and ends
+with status "drift" when no decision was taken. Ratios below 1 that are only
+not monotone (noise) keep the fallback.
+
+DESCENT (decision of 2026-11-04): with `floor_dims` (the smallest admissible
+domain: ZOI + margin + tool nose) and a start above it, the constant-step
+series of a side starts at the lowest p0 - k*D >= floor (ZOI still inside),
+with `n_max` raised by k. The tail bound is unchanged (same constant step);
+the retained value may fall below the start.
+
+FIXED POINT (decision of 2026-11-04): the sides are sized one after the
+other, so a side sized early (l_wp at a small h_wp) is never revisited. With
+`fixed_point_iters` = N > 0, after the sequential pass every side alone is
+grown by one step from D* and compared with D* (same metric, E_max < 1 and
+safeguards). If every side passes, the fixed point is reached; otherwise the
+failing sides are sized again from D* (no descent), in `order`, and the check
+is repeated, at most N times (status "max_iterations" otherwise; the study
+is then "partial"). There is no general guarantee that this block-coordinate
+iteration converges, hence the cap.
+
 Admissibility, retained value, statuses
 ---------------------------------------
 * tail bound: the retained value is the SMALLEST p_j whose bound satisfies
@@ -131,6 +156,14 @@ DEFAULT_DIAGONAL_COEFF = 90.6
 _TIME_RTOL = 1e-9
 # Floating-point slack in the "ratios are non-increasing" test (round-off only).
 _RATIO_RTOL = 1e-9
+# Floating-point slack of the drift test (is_drift): a ratio of increments
+# within 1e-6 of 1 counts as 1 (equal increments, round-off only).
+_DRIFT_RTOL = 1e-6
+# A drift whose last increment is below this fraction of eps_q is ignored:
+# at a constant increment it would need more than 10^6 steps to reach eps_q
+# (n_max is at most 50 in the GUI). It keeps round-off noise (e.g. EVF
+# differences of 1e-16 between two material runs) from blocking a side.
+_DRIFT_NEGLIGIBLE = 1e-6
 
 
 class AlignmentError(ValueError):
@@ -532,6 +565,22 @@ def tail_bound(errors: Sequence[float], j: int, rho: float) -> float:
     return observed + float(errors[-1]) * rho / (1.0 - rho)
 
 
+def is_drift(check: DecayCheck, m_ratios: int) -> bool:
+    """True when the increments of one quantity do not decrease: every ratio
+    of the test window is >= 1, or an increment grew from exactly zero.
+    Ratios below 1 that are merely not monotone (noise) are not a drift."""
+    if check.accepted:
+        return False
+    if check.reason == "growth_from_zero":
+        return True
+    r = check.ratios
+    # _DRIFT_RTOL: round-off only (equal increments give ratios of 1 +- a
+    # few 1e-10), not a tolerance on the decay.
+    return (check.reason in ("ratio_not_below_1", "decay_slowing")
+            and len(r) >= m_ratios
+            and all(v >= 1.0 - _DRIFT_RTOL for v in r))
+
+
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
@@ -578,12 +627,31 @@ class DimensionResult:
     name: str
     initial: float
     retained: float
-    status: str          # tail_bound | successive | not_converged | cap | cancelled
+    status: str          # tail_bound | successive | drift | not_converged | cap | cancelled
     values: List[float] = field(default_factory=list)
     comparisons: List[Comparison] = field(default_factory=list)
     retained_index: int = -1
     q_crit: Optional[str] = None
     criterion: float = float("nan")          # max_q R_q/eps_q or E_max retained
+    descent: int = 0                         # steps below the start (descent)
+    iteration: int = 0                       # 0 = sequential pass, k = fixed point
+
+
+@dataclass
+class FixedPointCheck:
+    """One fixed-point check: D* against D* grown by one step on ONE side."""
+    iteration: int
+    dimension: str
+    value_from: float
+    value_to: float
+    errors: Dict[str, float] = field(default_factory=dict)
+    e_max: float = float("nan")
+    q_crit: Optional[str] = None
+    guards_ok: bool = True
+    passed: bool = False
+    at_cap: bool = False                     # side already at its cap: skipped
+    run_from: int = -1
+    run_to: int = -1
 
 
 @dataclass
@@ -594,6 +662,12 @@ class StudyResult:
     runs: List[RunRecord] = field(default_factory=list)
     status: str = ""     # converged | partial | zoi_outside | cancelled
     warnings: List[str] = field(default_factory=list)
+    # Every DimensionResult in execution order (sequential pass, then the
+    # fixed-point re-sizings); per_dimension keeps the latest of each side.
+    history: List["DimensionResult"] = field(default_factory=list)
+    fixed_point: List["FixedPointCheck"] = field(default_factory=list)
+    fixed_point_iterations: int = 0
+    fixed_point_status: str = "off"   # off | converged | max_iterations
     # domain key (whole elements) -> (RunRecord, ZoiSample or None). Kept so
     # the interaction checks can compare against an already simulated domain
     # without running it again; not meant for export.
@@ -701,7 +775,10 @@ def run_domain_independence(
         cost_fn: Optional[Callable] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
-        metric: str = "pointwise") -> StudyResult:
+        metric: str = "pointwise",
+        fixed_point_iters: int = 0,
+        floor_dims: Optional[DomainDims] = None,
+        drift_refused: bool = True) -> StudyResult:
     """Size the four Eulerian-domain dimensions one after the other.
 
     run_bundle(cfg) -> ResultsBundle | None. The config passed is a deep copy
@@ -721,6 +798,15 @@ def run_domain_independence(
         (optional; see gui.sensitivity.run_record.cost_record). The host wall
         time of each run is measured here around run_bundle.
     metric : deviation between two runs, "mean" or "pointwise" (METRICS).
+    fixed_point_iters : after the sequential pass, at most this many
+        fixed-point iterations over the four dimensions (0 = off, the
+        behaviour before 2026-11-04). See the module docstring.
+    floor_dims : smallest admissible domain (ZOI + margin + tool nose). When
+        given and the start of a dimension is above it, the constant-step
+        series is extended DOWNWARDS to it (descent), so the retained value
+        can fall below the start. None = no descent.
+    drift_refused : in the fallback, refuse a single pass while the
+        increments of a quantity do not decrease (status "drift").
 
     Every run is cached by its dimensions (whole elements): a domain already
     simulated is never run again."""
@@ -733,6 +819,8 @@ def run_domain_independence(
                          "hypothesis needs m_ratios + 1 comparisons)")
     if n_hold < 1:
         raise ValueError("n_hold must be >= 1")
+    if fixed_point_iters < 0:
+        raise ValueError("fixed_point_iters must be >= 0")
     if metric not in METRICS:
         raise ValueError("metric must be one of %s" % (METRICS,))
     if elem_size <= 0 or grid_step <= 0:
@@ -765,7 +853,9 @@ def run_domain_independence(
         "m_ratios": int(m_ratios), "caps": dict(caps),
         "order": tuple(order), "margin_elems": int(margin_elems),
         "offset": tuple(offset), "diagonal_coeff": float(diagonal_coeff),
-        "metric": metric}
+        "metric": metric, "fixed_point_iters": int(fixed_point_iters),
+        "floor_dims": None if floor_dims is None else _dims_dict(floor_dims),
+        "drift_refused": bool(drift_refused)}
     if not zoi_inside(initial_dims, zoi, margin_elems * elem, offset):
         result.status = "zoi_outside"
         return result
@@ -787,23 +877,36 @@ def run_domain_independence(
         emit({"phase": "run", "record": rec, "n_runs": len(result.runs)})
         return rec, sample
 
-    dims = initial_dims
-    all_converged = True
-    for name in order:
-        if cancelled():
-            result.status = "cancelled"
-            break
+    def size_dimension(dims: DomainDims, name: str,
+                       floor_value: Optional[float]) -> DimensionResult:
+        """Grow `name` from its current value (or from the lowest grid value
+        p0 - k*delta >= floor_value, the descent) until a decision."""
         p0 = float(getattr(dims, name))
+        start, k_down = p0, 0
+        if floor_value is not None and floor_value < p0 - 1e-12:
+            k_down = int(math.floor((p0 - float(floor_value)) / delta + 1e-9))
+            # never below one element, and the ZOI must stay inside
+            while k_down > 0:
+                cand0 = p0 - k_down * delta
+                if (cand0 >= elem - 1e-12 and zoi_inside(
+                        _with(dims, name, cand0), zoi, margin_elems * elem,
+                        offset)):
+                    break
+                k_down -= 1
+            start = p0 - k_down * delta
         cap = caps.get(name)
-        dres = DimensionResult(name=name, initial=p0, retained=p0,
-                               status="not_converged", values=[p0])
-        runs: List[Tuple[RunRecord, Optional[ZoiSample]]] = [simulate(dims)]
+        dres = DimensionResult(name=name, initial=p0, retained=start,
+                               status="not_converged", values=[start],
+                               descent=k_down)
+        dims_s = _with(dims, name, start)
+        runs: List[Tuple[RunRecord, Optional[ZoiSample]]] = [simulate(dims_s)]
         series: Dict[str, List[float]] = {q: [] for q in quantities}
         consecutive = 0
         decided = False
         stop_status = "not_converged"
+        drifting = False
 
-        for n in range(1, n_max + 1):
+        for n in range(1, n_max + k_down + 1):
             if cancelled():
                 stop_status = "cancelled"
                 break
@@ -841,6 +944,7 @@ def run_domain_independence(
                               run_to=rec_b.index)
             dres.comparisons.append(comp)
 
+            drifting = False
             if n >= m_ratios + 1:
                 checks = {q: check_geometric_decay(series[q], m_ratios)
                           for q in quantities}
@@ -858,6 +962,15 @@ def run_domain_independence(
                             dres.q_crit, dres.criterion = qcrit, crit
                             stop_status, decided = "tail_bound", True
                             break
+                elif drift_refused and any(
+                        is_drift(c, m_ratios)
+                        and series[q][-1] >= _DRIFT_NEGLIGIBLE * thr[q]
+                        for q, c in checks.items()):
+                    # The increments do not decrease: a pass of one step
+                    # says nothing about the residual influence (decision
+                    # of 2026-11-04). Keep growing.
+                    comp.mode = "drift"
+                    drifting = True
                 else:
                     comp.mode = "successive"     # GLOBAL fallback
                     if consecutive >= n_hold:
@@ -876,17 +989,111 @@ def run_domain_independence(
             # D5-a: no plateau (or cap / cancel): keep the largest tested value.
             dres.retained = dres.values[-1]
             dres.retained_index = len(dres.values) - 1
-            all_converged = False
+            if drifting and stop_status == "not_converged":
+                stop_status = "drift"
         dres.status = stop_status
-        result.per_dimension[name] = dres
-        dims = _with(dims, name, dres.retained)
-        result.final = dims
-        emit({"phase": "dimension", "result": dres, "dims": _dims_dict(dims),
-              "n_runs": len(result.runs)})
-        if stop_status == "cancelled":
-            result.status = "cancelled"
-            break
+        return dres
 
+    dims = initial_dims
+    all_converged = True
+
+    def run_pass(dims: DomainDims, names: Sequence[str], descend: bool,
+                 iteration: int) -> Tuple[DomainDims, bool, bool]:
+        """Size `names` one after the other. Returns (dims, all converged,
+        cancelled)."""
+        ok = True
+        for name in names:
+            if cancelled():
+                return dims, ok, True
+            fl = (float(getattr(floor_dims, name))
+                  if (descend and floor_dims is not None) else None)
+            dres = size_dimension(dims, name, fl)
+            dres.iteration = iteration
+            result.history.append(dres)
+            result.per_dimension[name] = dres
+            if dres.status not in ("tail_bound", "successive"):
+                ok = False
+            dims = _with(dims, name, dres.retained)
+            result.final = dims
+            emit({"phase": "dimension", "result": dres,
+                  "dims": _dims_dict(dims), "n_runs": len(result.runs)})
+            if dres.status == "cancelled":
+                return dims, ok, True
+        return dims, ok, False
+
+    dims, all_converged, was_cancelled = run_pass(dims, order, True, 0)
+
+    # Fixed point over the four dimensions (decision of 2026-11-04): each
+    # dimension alone is grown by one step from D*; every one must stay
+    # within the tolerance, otherwise the failing ones are sized again from
+    # D* and the check is repeated, at most `fixed_point_iters` times.
+    if fixed_point_iters > 0 and not was_cancelled:
+        result.fixed_point_status = "max_iterations"
+        for it in range(1, int(fixed_point_iters) + 1):
+            if cancelled():
+                was_cancelled = True
+                break
+            emit({"phase": "fixed_point", "iteration": it,
+                  "dims": _dims_dict(dims), "n_runs": len(result.runs)})
+            rec_a, s_a = simulate(dims)
+            failing: List[str] = []
+            for name in order:
+                if cancelled():
+                    was_cancelled = True
+                    break
+                v0 = float(getattr(dims, name))
+                v1 = v0 + delta
+                cap = caps.get(name)
+                if cap is not None and v1 > cap + 1e-12:
+                    chk = FixedPointCheck(iteration=it, dimension=name,
+                                          value_from=v0, value_to=v0,
+                                          passed=True, at_cap=True)
+                    result.fixed_point.append(chk)
+                    emit({"phase": "fixed_point_check", "check": chk,
+                          "n_runs": len(result.runs)})
+                    continue
+                rec_b, s_b = simulate(_with(dims, name, v1))
+                if s_a is None or s_b is None:
+                    errs = {q: float("nan") for q in quantities}
+                else:
+                    try:
+                        errs = errors_by(s_b, s_a, quantities, metric)
+                    except AlignmentError as exc:
+                        errs = {q: float("nan") for q in quantities}
+                        result.warnings.append("fixed point %s: %s"
+                                               % (name, exc))
+                em, qc = e_max(errs, thr)
+                pair_ok = rec_a.guards_ok and rec_b.guards_ok
+                passed = bool(math.isfinite(em) and em < 1.0 and pair_ok)
+                chk = FixedPointCheck(iteration=it, dimension=name,
+                                      value_from=v0, value_to=v1,
+                                      errors=errs, e_max=em, q_crit=qc,
+                                      guards_ok=pair_ok, passed=passed,
+                                      run_from=rec_a.index,
+                                      run_to=rec_b.index)
+                result.fixed_point.append(chk)
+                emit({"phase": "fixed_point_check", "check": chk,
+                      "n_runs": len(result.runs)})
+                if not passed:
+                    failing.append(name)
+            if was_cancelled:
+                break
+            result.fixed_point_iterations = it
+            if not failing:
+                result.fixed_point_status = "converged"
+                break
+            dims, ok, was_cancelled = run_pass(dims, failing, False, it)
+            all_converged = all(
+                d.status in ("tail_bound", "successive")
+                for d in result.per_dimension.values())
+            if was_cancelled:
+                break
+        if result.fixed_point_status != "converged":
+            all_converged = False
+    result.final = dims
+
+    if was_cancelled:
+        result.status = "cancelled"
     if not result.status:
         result.status = "converged" if all_converged else "partial"
     emit({"phase": "done", "result": result, "n_runs": len(result.runs)})

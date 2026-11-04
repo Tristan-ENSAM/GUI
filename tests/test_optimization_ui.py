@@ -182,7 +182,8 @@ def launch(tab, monkeypatch, tmp_path):
 class TestDomainIndependenceWiring:
     def test_defaults_match_the_decisions(self, tab):
         assert tab.domain_settings() == {"dom_step_elems": 10, "dom_n_max": 8,
-                                         "dom_n_hold": 1, "dom_m_ratios": 2}
+                                         "dom_n_hold": 1, "dom_m_ratios": 2,
+                                         "dom_fp_iters": 3}
         assert tab.window() == (0.3, 1.0)
         g = tab.guard_settings()
         assert (g.rk_max, g.rhg_max) == (0.05, 0.05)
@@ -360,7 +361,7 @@ def test_end_to_end_through_the_tab(qapp, monkeypatch, tmp_path):
         qapp.processEvents()
     res = tab._last_domain_result
     assert res is not None, tab.log.toPlainText()
-    assert res.status == "converged"
+    assert res.status == "converged", tab.log.toPlainText()
     assert all(r.guards_ok for r in res.runs)
     # ZOI half-width 0.03 + 1 elem (0.01) = 0.04 mm per side -> 8 x 8 elems
     assert res.runs[0].cost.n_elem_euler == 8 * 8

@@ -121,6 +121,12 @@ _DOM_SPINS = [
      "Number of successive E_max ratios used to bound the residual\n"
      "influence by a geometric tail. Must be at most the max comparisons\n"
      "minus 1. Default 2."),
+    ("dom_fp_iters", "fixed-point iterations (0 = off)", 0, 10,
+     "After the four sides are sized one after the other, each side alone\n"
+     "is grown by one step from D* and compared with D*. Sides that fail\n"
+     "are sized again from D*, then the check is repeated, at most this\n"
+     "many times. Catches a side sized too early (e.g. l_wp chosen while\n"
+     "h_wp was still small). Default 3 (a choice); 0 = no fixed point."),
 ]
 # Shared text settings: (attribute, label, tooltip).
 _DOM_TEXTS = [
@@ -2725,6 +2731,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "metric": "mean",
             "step_elems": ds["dom_step_elems"], "n_max": ds["dom_n_max"],
             "n_hold": ds["dom_n_hold"], "m_ratios": ds["dom_m_ratios"],
+            "fixed_point_iters": ds["dom_fp_iters"],
+            # Smallest admissible domain (ZOI + margin + tool nose): a start
+            # set above it is first extended downwards (descent).
+            "floor_dims": self._dims_dict(self._zoi_initial_dims()),
             "rk_max": guards.rk_max, "rhg_max": guards.rhg_max,
             "caps": self.caps(),
             "initial_dims": self._dims_dict(dims0),
@@ -2759,7 +2769,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         ds = {"dom_step_elems": int(spec["step_elems"]),
               "dom_n_max": int(spec["n_max"]),
               "dom_n_hold": int(spec["n_hold"]),
-              "dom_m_ratios": int(spec["m_ratios"])}
+              "dom_m_ratios": int(spec["m_ratios"]),
+              # absent in folders written before 2026-11-04: no fixed point
+              "dom_fp_iters": int(spec.get("fixed_point_iters", 0) or 0)}
+        fl = spec.get("floor_dims")
+        floor_dims = (None if not fl else
+                      DomainDims(**{k: float(fl[k]) for k in DIM_KEYS}))
         # The runs take the element size from the cfg (the core only uses
         # its elem_size argument to sample), so both are the study's.
         base_cfg = self._study_base_cfg(spec, elem=elem)
@@ -2807,6 +2822,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("  blocking: outputs present | reported: R_K (limit "
                      "%.4g), R_HG (limit %.4g)"
                      % (guards.rk_max, guards.rhg_max))
+        self._log_ui("  fixed point: %s | descent to: %s"
+                     % ("%d iteration(s) max" % ds["dom_fp_iters"]
+                        if ds["dom_fp_iters"] else "off",
+                        "none" if floor_dims is None else
+                        "h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g"
+                        % (floor_dims.h_wp, floor_dims.h_void,
+                           floor_dims.l_wp, floor_dims.l_void)))
         self._log_ui("=" * 68)
         self._retire_worker("_di_worker")
         self._di_worker = DomainIndependenceWorker(
@@ -2818,7 +2840,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             n_hold=ds["dom_n_hold"], m_ratios=ds["dom_m_ratios"],
             caps=caps, margin_elems=margin, offset=offset,
             guard_fn=guard_fn, cost_fn=cost_fn,
-            metric=spec.get("metric", "pointwise"))
+            metric=spec.get("metric", "pointwise"),
+            fixed_point_iters=ds["dom_fp_iters"], floor_dims=floor_dims)
         self._di_worker.progress.connect(self._on_di_progress)
         self._di_worker.finished_ok.connect(self._on_di_done)
         self._di_worker.failed.connect(self._on_fail)
@@ -2883,8 +2906,29 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                             "success" if c.success else "not independent",
                             "" if c.guards_ok else " (safeguards)",
                             c.mode))
+        elif phase == "fixed_point":
+            d = ev["dims"]
+            self._log_ui("  FIXED POINT iteration %d at h_wp=%.4g h_void=%.4g "
+                         "l_wp=%.4g l_void=%.4g: each side + 1 step"
+                         % (ev["iteration"], d["h_wp"], d["h_void"],
+                            d["l_wp"], d["l_void"]))
+        elif phase == "fixed_point_check":
+            c = ev["check"]
+            if c.at_cap:
+                self._log_ui("  [fixed point] %s at its cap: skipped"
+                             % c.dimension)
+            else:
+                self._log_ui("  [fixed point] %s %.4g->%.4g | E_max=%s (%s) | "
+                             "%s%s" % (c.dimension, c.value_from, c.value_to,
+                                       self._fmt(c.e_max, "%.3g"),
+                                       c.q_crit or "-",
+                                       "passed" if c.passed else "FAILED",
+                                       "" if c.guards_ok else " (safeguards)"))
         elif phase == "dimension":
             r = ev["result"]
+            if getattr(r, "descent", 0):
+                self._log_ui("  (%s: descent of %d step(s) below the start "
+                             "%.4g mm)" % (r.name, r.descent, r.initial))
             self._log_ui("  => %s retained %.4g mm (%s%s)"
                          % (r.name, r.retained, r.status,
                             ", q_crit %s, criterion %s"
@@ -2903,7 +2947,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         why = {
             "converged": "every dimension independent",
             "partial": "at least one dimension NOT converged (largest tested "
-                       "value kept)",
+                       "value kept) or fixed point not reached",
             "zoi_outside": "the ZOI is not inside the starting domain (with "
                            "the margin, for ZOI + margin)",
             "cancelled": "cancelled",
@@ -2917,6 +2961,16 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._log_ui("  final: h_wp=%.4g h_void=%.4g l_wp=%.4g l_void=%.4g | "
                      "%d runs" % (d.h_wp, d.h_void, d.l_wp, d.l_void,
                                   res.n_runs))
+        fps = getattr(res, "fixed_point_status", "off")
+        if fps != "off":
+            self._log_ui("  fixed point: %s after %d iteration(s)"
+                         % ({"converged": "reached",
+                             "max_iterations": "NOT reached (cap)"}.get(
+                                 fps, fps), res.fixed_point_iterations))
+        if any(r.status == "drift" for r in res.per_dimension.values()):
+            self._log_ui("  [WARNING] drift: the increments of at least one "
+                         "side do not decrease; its largest tested value is "
+                         "kept and is NOT proven independent.")
         for w in res.warnings:
             self._log_ui("  [WARNING] %s" % w)
         if self._exports_allowed("domain", res):
@@ -2972,20 +3026,36 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         res = self._last_domain_result
         runs = {r.index: r for r in res.runs} if res is not None else {}
         if res is not None:
-            for name, d in res.per_dimension.items():
+            sizings = list(getattr(res, "history", None) or
+                           res.per_dimension.values())
+            for d in sizings:
+                name = d.name
+                tag = ("domain" if not getattr(d, "iteration", 0)
+                       else "domain (fp %d)" % d.iteration)
                 for c in d.comparisons:
                     rf = runs.get(c.run_from)
                     cost = getattr(getattr(rf, "cost", None), "c_cpu_s", None)
                     self._add_table_row([
-                        "domain", name, "%.4g" % c.value_from,
+                        tag, name, "%.4g" % c.value_from,
                         "%.4g" % c.value_to, self._fmt(c.e_max, "%.3g"),
                         c.q_crit, "ok" if c.guards_ok else "FAIL",
                         "independent" if c.success else "not independent",
                         c.mode, self._fmt(cost, "%.0f")])
                 self._add_table_row([
-                    "domain", name, "%.4g" % d.initial, "%.4g" % d.retained,
+                    tag, name, "%.4g" % d.initial, "%.4g" % d.retained,
                     self._fmt(d.criterion, "%.3g"), d.q_crit, "",
                     "RETAINED", d.status, ""])
+            for c in getattr(res, "fixed_point", None) or []:
+                rt = runs.get(c.run_to)
+                cost = getattr(getattr(rt, "cost", None), "c_cpu_s", None)
+                self._add_table_row([
+                    "fixed point %d" % c.iteration, c.dimension,
+                    "%.4g" % c.value_from, "%.4g" % c.value_to,
+                    self._fmt(c.e_max, "%.3g"), c.q_crit,
+                    "ok" if c.guards_ok else "FAIL",
+                    "at cap" if c.at_cap else
+                    ("passed" if c.passed else "FAILED"), "",
+                    self._fmt(cost, "%.0f")])
         if self._last_gci is not None:
             gres = self._last_gci[0]
             for q, g in gres.per_quantity.items():
