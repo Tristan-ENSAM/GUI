@@ -256,7 +256,7 @@ class _Event:
 
 
 def test_window_compare_views_click_export(qapp, tmp_path, monkeypatch):
-    import gui.widgets.deviation_maps_dialog as dlg_mod
+    import gui.widgets.compare_runs_panel as dlg_mod
     monkeypatch.setattr(dlg_mod, "run_async",
                         lambda fn, done, parent: done(fn()))
 
@@ -264,7 +264,7 @@ def test_window_compare_views_click_export(qapp, tmp_path, monkeypatch):
         raise AssertionError("message box: %r" % (a[2:],))
     monkeypatch.setattr(dlg_mod.QMessageBox, "warning", _no_box)
     folder = _study_folder(tmp_path)
-    dlg = dlg_mod.DeviationMapsDialog(folders=[str(folder)])
+    dlg = dlg_mod.CompareRunsPanel(folders=[str(folder)])
     assert dlg.cb_a.count() == 2
     assert dlg.cb_a.currentText().startswith("ms 1 |")
     assert dlg.cb_b.currentText().startswith("ms 25600 |")
@@ -298,7 +298,7 @@ def test_window_compare_views_click_export(qapp, tmp_path, monkeypatch):
 def test_window_folders_are_separate_and_runs_exclusive(qapp, tmp_path,
                                                         monkeypatch):
     import shutil
-    import gui.widgets.deviation_maps_dialog as dlg_mod
+    import gui.widgets.compare_runs_panel as dlg_mod
     monkeypatch.setattr(dlg_mod.QMessageBox, "information",
                         lambda *a, **k: None)
     f1 = _study_folder(tmp_path)
@@ -308,7 +308,7 @@ def test_window_folders_are_separate_and_runs_exclusive(qapp, tmp_path,
         shutil.copy(p, f2 / p.name)
     empty = tmp_path / "empty"
     empty.mkdir()
-    dlg = dlg_mod.DeviationMapsDialog(folders=[str(f1)])
+    dlg = dlg_mod.CompareRunsPanel(folders=[str(f1)])
     # "Add a folder" puts the folder in the Study list and selects it; the
     # lists (a), (b) then hold its runs only.
     monkeypatch.setattr(dlg_mod.QFileDialog, "getExistingDirectory",
@@ -351,7 +351,7 @@ def test_window_result_files_repeatability(qapp, tmp_path, monkeypatch):
     """Two copies of one run, added as result files outside any study
     folder: compared with the tab's settings, deviation 0, 'identical'."""
     import shutil
-    import gui.widgets.deviation_maps_dialog as dlg_mod
+    import gui.widgets.compare_runs_panel as dlg_mod
     monkeypatch.setattr(dlg_mod, "run_async",
                         lambda fn, done, parent: done(fn()))
 
@@ -368,7 +368,7 @@ def test_window_result_files_repeatability(qapp, tmp_path, monkeypatch):
     (loose / "orphan.results.npz").write_bytes(b"")
     s = dm.settings_of_folder(src)
     s.source = "tab"
-    dlg = dlg_mod.DeviationMapsDialog(settings_getter=lambda: s)
+    dlg = dlg_mod.CompareRunsPanel(settings_getter=lambda: s)
     boxes = []
     monkeypatch.setattr(dlg_mod.QMessageBox, "information",
                         lambda *a, **k: boxes.append(a[2]))

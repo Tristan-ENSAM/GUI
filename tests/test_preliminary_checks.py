@@ -127,7 +127,7 @@ def test_chip_recontact_band_outside_extraction():
 
 def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
     from gui.results import reader
-    from gui.widgets.preliminary_checks_dialog import PreliminaryChecksDialog
+    from gui.widgets.preliminary_checks_panel import PreliminaryChecksPanel
     b = _Bundle(chip_drop_frame=40)
     b.model_config["geometry"] = {
         "tool": {"position": {"x0": 0.0, "y0": -0.015}},
@@ -137,7 +137,7 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
                         classmethod(lambda cls, p: b))
     run = tmp_path / "j.results.npz"
     run.write_bytes(b"")
-    dlg = PreliminaryChecksDialog(
+    dlg = PreliminaryChecksPanel(
         settings_getter=lambda: {"eps": EPS, "zoi": ZONE})
     assert dlg.le_zone["xmax"].text() == "0"
     dlg.le_run.setText(str(run))
@@ -154,23 +154,15 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
     assert "proposed window T" in text and "A = 40 dB needs" in text
     out = tmp_path / "s.csv"
     monkeypatch.setattr(
-        "gui.widgets.preliminary_checks_dialog.QFileDialog.getSaveFileName",
+        "gui.widgets.preliminary_checks_panel.QFileDialog.getSaveFileName",
         lambda *a, **k: (str(out), ""))
     dlg._save()
     assert out.exists() and out.with_suffix(".xlsx").exists()
 
 
-def test_dialog_fits_the_screen(qapp):
-    from PySide6.QtWidgets import QApplication
-    from gui.widgets.preliminary_checks_dialog import PreliminaryChecksDialog
-    dlg = PreliminaryChecksDialog()
-    g = QApplication.primaryScreen().availableGeometry()
-    assert dlg.width() <= g.width() and dlg.height() <= g.height()
-
-
 def test_dialog_help_toggle(qapp):
-    from gui.widgets.preliminary_checks_dialog import PreliminaryChecksDialog
-    dlg = PreliminaryChecksDialog()
+    from gui.widgets.preliminary_checks_panel import PreliminaryChecksPanel
+    dlg = PreliminaryChecksPanel()
     assert len(dlg._help_labels) == 8      # intro, 4 boxes, 3 plot captions
     dlg.cb_help.setChecked(False)
     assert all(lab.isHidden() for lab in dlg._help_labels)
@@ -178,12 +170,12 @@ def test_dialog_help_toggle(qapp):
     assert not any(lab.isHidden() for lab in dlg._help_labels)
 
 
-def test_model_tab_opens_the_dialog(qapp):
+def test_setup_tab_holds_the_checks(qapp):
+    """The checks sit in Optimization > Setup and start from its ZOI."""
     from gui.core.model_config import ModelConfig
     from gui.tabs.optimization_tab import OptimizationTab
+    from gui.tabs.setup_tab import SetupTab
     tab = OptimizationTab(ModelConfig())
-    tab.btn_prelim.click()
-    dlg = tab._prelim_dialog
-    assert dlg.isVisible()
-    assert dlg.le_zone["xmin"].text() != ""
-    dlg.close()
+    setup = SetupTab(tab)
+    assert setup.prelim.le_zone["xmin"].text() != ""
+    assert not hasattr(tab, "btn_prelim")

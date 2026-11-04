@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Sensitivity tab — local Jacobian (finite differences) or Morris screening.
+Parameter plans tab (attribute `sensitivity_tab` of the main window) —
+local Jacobian (finite differences) or Morris screening.
 
 Lets the user:
   * tick which model parameters to vary (Ref = current model value, in
@@ -238,7 +239,7 @@ class SensitivityTab(QWidget):
 
         # QoI of the Model tab (same reduction, same eps_q) + other QoI.
         qoi_row = QHBoxLayout()
-        model_box = QGroupBox("QoI of the Model sizing tab (judged against \u03b5_q)")
+        model_box = QGroupBox("QoI of the sizing studies (judged against \u03b5_q)")
         mg = QGridLayout(model_box)
         self._model_qoi_checks = {}
         for i, q in enumerate(mq.MODEL_QOIS):
@@ -462,13 +463,13 @@ class SensitivityTab(QWidget):
         self.btn_zoi_propose.setToolTip(
             "S* = max over (field, parameter) of mean over T of "
             "|dq/dp \u00b7 \u03b4| / \u03b5_q, with \u03b5_q and the window T "
-            "of the Model sizing tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
+            "of the Setup tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
             "run. ZOI = smallest rectangle containing every element with "
             "S* \u2265 1.")
         self.btn_zoi_propose.setEnabled(False)
         self.btn_zoi_propose.clicked.connect(self._on_propose_zoi)
         zrow.addWidget(self.btn_zoi_propose)
-        self.btn_zoi_apply = QPushButton("Copy ZOI to the Model sizing tab")
+        self.btn_zoi_apply = QPushButton("Copy ZOI to the Setup tab")
         self.btn_zoi_apply.setEnabled(False)
         self.btn_zoi_apply.clicked.connect(self._on_apply_zoi)
         zrow.addWidget(self.btn_zoi_apply)
@@ -929,8 +930,8 @@ class SensitivityTab(QWidget):
         Model-tab QoI `qois`; ValueError when one is missing or the ZOI
         leaves the zone the runs extract."""
         if self._model_settings_getter is None:
-            raise ValueError("the Model sizing QoI need the Optimization > "
-                             "Model sizing tab")
+            raise ValueError("the Model sizing QoI need the settings of the "
+                             "Optimization > Setup tab")
         try:
             st = self._model_settings_getter()
             window = tuple(float(v) for v in st["window"])
@@ -1581,7 +1582,7 @@ class SensitivityTab(QWidget):
 
     def _model_settings(self):
         if self._model_settings_getter is None:
-            raise ValueError("the Model sizing tab settings are not available")
+            raise ValueError("the Setup tab settings are not available")
         st = self._model_settings_getter()
         return dict(st.get("eps") or {}), tuple(st["window"])
 
@@ -1591,14 +1592,14 @@ class SensitivityTab(QWidget):
         try:
             eps, window = self._model_settings()
         except Exception as e:
-            self.lbl_zoi.setText("Set \u03b5_q and the window T in the Model "
-                                 "sizing tab first (%s)." % e)
+            self.lbl_zoi.setText("Set \u03b5_q and the window T in the Setup "
+                                 "tab first (%s)." % e)
             return
         need = sorted({zp.FIELD_TO_EPS[v] for v in self._field_maps
                        if v in zp.FIELD_TO_EPS} - {k for k, v in eps.items()
                                                     if v and v > 0})
         if need:
-            self.lbl_zoi.setText("Missing \u03b5_q in the Model sizing tab: %s."
+            self.lbl_zoi.setText("Missing \u03b5_q in the Setup tab: %s."
                                  % ", ".join(need))
             return
         plan = self._run_plan or self.plan

@@ -201,6 +201,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # Emitted when a persisted optimization parameter changes, so the
     # main window can mark the profile dirty.
     changed = Signal()
+    # "Compare runs…": the main window shows the Compare runs tab.
+    compareRequested = Signal()
     # Carries log text to the GUI thread. run_bundle runs in the study
     # workers' threads; touching the QPlainTextEdit from there is a data race
     # with the GUI thread's painting that can end in an access violation.
@@ -287,6 +289,18 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self._hints.append(lab)
             return lab
 
+        # Grey help of the comparison settings: shown by the Setup tab's own
+        # "Show help" box (setup_tab.py), as the group is shown there.
+        self.setup_hints = []
+
+        def setup_hint(text):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color:#6b7280;")
+            lab.setVisible(False)
+            self.setup_hints.append(lab)
+            return lab
+
         def grid(group):
             g = QGridLayout(group)
             g.setHorizontalSpacing(8)
@@ -339,17 +353,19 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         intro = hint(
             "Makes the simulation results independent of three numerical "
             "choices (mass scaling, element size, Eulerian domain). Check "
-            "the comparison settings, then click 'Run all steps', or run "
+            "the comparison settings in the Setup tab, then click 'Run all steps', or run "
             "steps 0 to 3 one by one and click 'Use in model' after each. "
             "Each step says whether it is done for the current model. "
             "Hover over a field for its definition and the source of its "
             "default.")
 
-        # ---- Comparison settings: ZOI, eps_q (+ advanced: grid, T, guards)
+        # ---- Comparison settings: ZOI, eps_q (+ advanced: grid step, T) --
         # The ZOI is DISTINCT from the ROI (Geometry tab, model output set
-        # for DIC/IRT); empty fields default to the ROI. T, the
-        # safeguards and the tolerances eps_q are shared by every study.
-        gcom = QGroupBox("Comparison settings (used by every step)")
+        # for DIC/IRT); empty fields default to the ROI. The ZOI, T and the
+        # tolerances eps_q are shared by every tab of Optimization: this
+        # group is shown in the Setup tab (gui/tabs/setup_tab.py), not here.
+        # Its widgets stay owned by this tab, which reads and saves them.
+        gcom = QGroupBox("Comparison settings (used by every tab)")
         cv0 = QVBoxLayout(gcom)
         cv0.setSpacing(4)
         cg0 = QGridLayout()
@@ -361,8 +377,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Zone where two runs are compared (measurement zone of this tab).\n"
             "It is NOT the ROI: the ROI is the output zone of the Geometry\n"
             "tab, matched to the DIC/IRT fields. An empty bound takes the\n"
-            "ROI bound. The Sensitivity tab can propose a ZOI from its maps\n"
-            "('Copy ZOI to the Model sizing tab').")
+            "ROI bound. The Parameter plans tab can propose a ZOI from its\n"
+            "maps ('Copy ZOI to the Setup tab').")
         cg0.addWidget(lab, 0, 0)
         self.le_zoi = {}
         zoi_row = QHBoxLayout()
@@ -420,38 +436,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             eps_row.addSpacing(10)
         eps_row.addStretch(1)
         cg0.addLayout(eps_row, 1, 1)
-        lab = QLabel("Weight of each step in ε_q")
-        share_tip = (
-            "How ε_q is split between the steps: ms (step 0), h (step 1)\n"
-            "and D (step 2) are each judged against share × ε_q, with\n"
-            "share = weight / (sum of the three weights). The deviations\n"
-            "of the three steps add up (the final model differs from the\n"
-            "exact one by at most their sum), so the shares sum to 1 and\n"
-            "the final model stays within ε_q of the model with no mass\n"
-            "scaling, an infinitely fine mesh and an infinite domain.\n"
-            "Default 1, 1, 1: ε_q/3 each. Give a larger weight to the step\n"
-            "whose tolerance is the most expensive to tighten. The final\n"
-            "checks use the same shares (ms at the point: ms share; domain\n"
-            "grown: D share; mesh plan on D*: h share).")
-        lab.setToolTip(share_tip)
-        cg0.addWidget(lab, 2, 0)
-        share_row = QHBoxLayout()
-        share_row.setSpacing(4)
-        self._eps_share = {}
-        for step, text in (("ms", "ms"), ("mesh", "h"), ("domain", "D")):
-            lbl = QLabel(text)
-            lbl.setToolTip(share_tip)
-            share_row.addWidget(lbl)
-            le = num_edit(getattr(OptimizationCfgDefaults,
-                                  "eps_share_" + step), tip=share_tip)
-            le.setFixedWidth(64)
-            self._eps_share[step] = le
-            share_row.addWidget(le)
-            share_row.addSpacing(10)
-        share_row.addStretch(1)
-        cg0.addLayout(share_row, 2, 1)
         cg0.setColumnStretch(1, 1)
-        cv0.addWidget(hint(
+        cv0.addWidget(setup_hint(
             "ε_q: defaults are those of the reference case (Ti6Al4V). "
             "For another "
             "material or cutting condition, set each one to the smallest "
@@ -461,7 +447,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         sec = advanced("common", lambda: [
             (self.le_grid_step, ""),
             *[(self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
-              for a, _l, _t in _DOM_TEXTS]])
+              for a, _l, _t in _DOM_TEXTS if a.startswith("window_")]])
         ag = sub_grid(sec.body)
         ag.addWidget(QLabel("ZOI sampling step [mm]"), 0, 0)
         self.le_grid_step = num_edit(
@@ -479,12 +465,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "only: check the cutting force of a run in the Results tab and\n"
             "start T after the force has stabilised.\n"
             "Default 0.3 to 1.0: the value hard-coded in the studies before\n"
-            "it became a setting. Also used by the Sensitivity tab.")
+            "it became a setting. Also used by the Parameter plans and\n"
+            "Compare runs tabs.")
         ag.addWidget(lab, 1, 0)
         self._dom_texts = {}
         win_row = QHBoxLayout()
         win_row.setSpacing(4)
-        for i, (attr, label, tip) in enumerate(_DOM_TEXTS):
+        guard_rows = []                         # placed in the sizing group
+        for attr, label, tip in _DOM_TEXTS:
             lab = QLabel(label)
             lab.setToolTip(tip)
             le = num_edit(str(getattr(OptimizationCfgDefaults, attr)),
@@ -495,10 +483,60 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 win_row.addWidget(le)
                 win_row.addSpacing(6)
             else:                               # one safeguard per row
-                ag.addWidget(lab, i, 0)
-                ag.addWidget(le, i, 1)
+                guard_rows.append((lab, le))
         win_row.addStretch(1)
         ag.addLayout(win_row, 1, 1, 1, 2)
+        ag.setColumnStretch(3, 1)
+        cv0.addWidget(sec)
+        self.settings_group = gcom
+
+        # ---- Sizing settings: weight of each step, guards, reuse ---------
+        # Only the steps of this tab use them.
+        gsz = QGroupBox("Sizing settings (used by the steps below)")
+        sv0 = QVBoxLayout(gsz)
+        sv0.setSpacing(4)
+        wg = QGridLayout()
+        wg.setHorizontalSpacing(8)
+        wg.setVerticalSpacing(4)
+        sv0.addLayout(wg)
+        lab = QLabel("Weight of each step in ε_q")
+        share_tip = (
+            "How ε_q is split between the steps: ms (step 0), h (step 1)\n"
+            "and D (step 2) are each judged against share × ε_q, with\n"
+            "share = weight / (sum of the three weights). The deviations\n"
+            "of the three steps add up (the final model differs from the\n"
+            "exact one by at most their sum), so the shares sum to 1 and\n"
+            "the final model stays within ε_q of the model with no mass\n"
+            "scaling, an infinitely fine mesh and an infinite domain.\n"
+            "Default 1, 1, 1: ε_q/3 each. Give a larger weight to the step\n"
+            "whose tolerance is the most expensive to tighten. The final\n"
+            "checks use the same shares (ms at the point: ms share; domain\n"
+            "grown: D share; mesh plan on D*: h share).")
+        lab.setToolTip(share_tip)
+        wg.addWidget(lab, 0, 0)
+        share_row = QHBoxLayout()
+        share_row.setSpacing(4)
+        self._eps_share = {}
+        for step, text in (("ms", "ms"), ("mesh", "h"), ("domain", "D")):
+            lbl = QLabel(text)
+            lbl.setToolTip(share_tip)
+            share_row.addWidget(lbl)
+            le = num_edit(getattr(OptimizationCfgDefaults,
+                                  "eps_share_" + step), tip=share_tip)
+            le.setFixedWidth(64)
+            self._eps_share[step] = le
+            share_row.addWidget(le)
+            share_row.addSpacing(10)
+        share_row.addStretch(1)
+        wg.addLayout(share_row, 0, 1)
+        wg.setColumnStretch(1, 1)
+        sec = advanced("sizing", lambda: [
+            (self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
+            for a, _l, _t in _DOM_TEXTS if not a.startswith("window_")])
+        ag = sub_grid(sec.body)
+        for i, (lab, le) in enumerate(guard_rows):
+            ag.addWidget(lab, i, 0)
+            ag.addWidget(le, i, 1)
         self.cb_reuse_runs = QCheckBox(
             "Reuse the finished runs of earlier studies")
         self.cb_reuse_runs.setChecked(OptimizationCfgDefaults.reuse_runs)
@@ -513,7 +551,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "reuses the runs of its own folder.")
         ag.addWidget(self.cb_reuse_runs, ag.rowCount(), 0, 1, 3)
         ag.setColumnStretch(3, 1)
-        cv0.addWidget(sec)
+        sv0.addWidget(sec)
 
         # ---- Step 0 · mass-scaling factor by an independence study -------
         gms = QGroupBox("Step 0 · Mass scaling factor ms")
@@ -844,22 +882,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "final checks. An unfinished study can then be resumed.")
         self.btn_open.clicked.connect(self._on_open_study)
         top.addWidget(self.btn_open)
-        self.btn_dev_maps = QPushButton("Deviation maps…")
-        self.btn_dev_maps.setToolTip(
-            "Maps of the deviation between two finished runs of a study\n"
-            "(ms, mesh or domain), frame by frame or over the time window,\n"
-            "and the two time curves at a clicked ZOI point. Reads the saved\n"
-            "results only: no Abaqus run.")
-        self.btn_dev_maps.clicked.connect(self._on_deviation_maps)
-        top.addWidget(self.btn_dev_maps)
-        self.btn_prelim = QPushButton("Preliminary checks…")
-        self.btn_prelim.setToolTip(
-            "On one finished run, before the studies: when the forces and\n"
-            "the zone means settle (window T), whether the output frames\n"
-            "are dense enough for the field filter, and whether the chip\n"
-            "comes back onto the uncut surface. No Abaqus run.")
-        self.btn_prelim.clicked.connect(self._on_preliminary_checks)
-        top.addWidget(self.btn_prelim)
+        self.btn_compare = QPushButton("Compare runs…")
+        self.btn_compare.setToolTip(
+            "Opens the Compare runs tab on the study folders of this model:\n"
+            "maps of the deviation between two finished runs, and their time\n"
+            "curves at a clicked ZOI point. No Abaqus run.")
+        self.btn_compare.clicked.connect(self.compareRequested.emit)
+        top.addWidget(self.btn_compare)
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.setToolTip("Show the grey explanations under each step.")
@@ -872,7 +901,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         il_.setContentsMargins(0, 0, 4, 0)
         il_.addLayout(top)
         il_.addWidget(intro)
-        for gbox in (gcom, gms, gmesh, gdom, gchk):
+        for gbox in (gsz, gms, gmesh, gdom, gchk):
             il_.addWidget(gbox)
         il_.addStretch(1)
         scroll = QScrollArea()
@@ -900,6 +929,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         btn_prev = QPushButton("Refresh preview")
         btn_prev.clicked.connect(self._draw_preview)
         pv.addWidget(btn_prev)
+        # The same drawing for the Setup tab, next to the ZOI fields.
+        self.setup_preview = GeometryPreview()
+        self.setup_preview.fit_override = self._draw_preview
 
         self._hsplit = QSplitter(Qt.Horizontal)
         self._hsplit.addWidget(scroll)
@@ -1429,17 +1461,20 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         bookkeeping (it is called when a study ends)."""
         if hasattr(self, "_preview_timer"):
             self._preview_timer.stop()
-        try:
-            self.preview.update_from_config(self.cfg)
-        except Exception:
-            log_swallowed("geometry preview update", level=logging.DEBUG)
-            return
-        try:
-            self._draw_overlays(self.preview._ax)
-        except Exception:
-            log_swallowed("drawing the Model tab overlays",
-                          level=logging.DEBUG)
-        self.preview._canvas.draw_idle()
+        for prev in (self.preview, getattr(self, "setup_preview", None)):
+            if prev is None:
+                continue
+            try:
+                prev.update_from_config(self.cfg)
+            except Exception:
+                log_swallowed("geometry preview update", level=logging.DEBUG)
+                return
+            try:
+                self._draw_overlays(prev._ax)
+            except Exception:
+                log_swallowed("drawing the Model sizing overlays",
+                              level=logging.DEBUG)
+            prev._canvas.draw_idle()
 
     def _draw_overlays(self, ax):
         from matplotlib.patches import Rectangle
@@ -2087,7 +2122,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
     def model_settings(self) -> dict:
         """eps_q, the window T, the ZOI and the EVF threshold, for the ZOI
-        proposal and the QoI of the Sensitivity tab (same values as the
+        proposal and the QoI of the Parameter plans tab (same values as the
         studies of this tab)."""
         return {"eps": self.thresholds(), "window": self.window(),
                 "zoi": self.zoi(), "evf_threshold": 0.5}
@@ -2119,41 +2154,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # ===================================================================
     # Shared launch helpers (preserved verbatim)
     # ===================================================================
-    def _on_deviation_maps(self):
-        """Open (or bring back) the deviation-maps window on the study
-        folders recorded for this model."""
-        from gui.widgets.deviation_maps_dialog import DeviationMapsDialog
-        dlg = getattr(self, "_dev_maps_dialog", None)
-        if dlg is None:
-            prefs = self._prefs_getter() if self._prefs_getter else None
-            dlg = DeviationMapsDialog(
-                folders=self._known_folders(),
-                start_dir=str(getattr(prefs, "default_workdir", "") or ""),
-                parent=self, settings_getter=self._deviation_settings)
-            self._dev_maps_dialog = dlg
-        dlg.show()
-        dlg.raise_()
+    def known_folders(self) -> list:
+        """The study folders recorded for this model (Compare runs tab)."""
+        return self._known_folders()
 
-    def _on_preliminary_checks(self):
-        """Open (or bring back) the preliminary-checks window."""
-        from gui.widgets.preliminary_checks_dialog import \
-            PreliminaryChecksDialog
-        dlg = getattr(self, "_prelim_dialog", None)
-        if dlg is None:
-            prefs = self._prefs_getter() if self._prefs_getter else None
-            dlg = PreliminaryChecksDialog(
-                settings_getter=self._prelim_settings,
-                start_dir=str(getattr(prefs, "default_workdir", "") or ""),
-                parent=self)
-            self._prelim_dialog = dlg
-        dlg.show()
-        dlg.raise_()
-
-    def _prelim_settings(self) -> dict:
+    def prelim_settings(self) -> dict:
         """eps_q and the ZOI (the window T may still be unset)."""
         return {"eps": self.thresholds(), "zoi": self.zoi()}
 
-    def _deviation_settings(self):
+    def compare_settings(self):
         """The tab's current comparison settings, for the deviation maps of
         runs whose folder is not a study of this tab (no step: share 1).
         Raises ValueError when the tab's settings are not valid."""
@@ -2161,8 +2170,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return CompareSettings(
             step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
             window=self.window(), thresholds=self.thresholds(),
-            source="current settings of the Model sizing tab (the folder of "
-                   "run a is not a study of the Model sizing tab)")
+            source="current settings of the Setup tab (the folder of run a "
+                   "is not a study of the Model sizing tab)")
 
     def _validate_launch(self, folder=None):
         """Shared pre-flight for a run: returns (prefs, workdir, cpus) or None

@@ -34,6 +34,8 @@ from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
 from gui.tabs.sensitivity_tab import SensitivityTab
 from gui.tabs.optimization_tab import OptimizationTab
+from gui.tabs.setup_tab import SetupTab
+from gui.widgets.compare_runs_panel import CompareRunsPanel
 from gui.tabs.experimental_data_tab import ExperimentalDataTab
 from gui.widgets.preferences_dialog import PreferencesDialog
 from gui.widgets.unit_system_dialog import UnitSystemDialog
@@ -130,15 +132,27 @@ class MainWindow(QMainWindow):
         self.experimental_tab = ExperimentalDataTab(
             write_geometry=self._write_reference_geometry)
 
-        # In the order of the work (decision 2026-10-23): size the model
-        # (ms*, h*, D*) first, then the sensitivity studies run on it, then
-        # the identification. "Model sizing", not "Model", so it is not
-        # mistaken for the "Numerical Model" tab.
+        # In the order of the work (decisions 2026-10-23 and 2026-11-04):
+        # the comparison settings and preliminary checks every tab relies on,
+        # then the sizing of the model (ms*, h*, D*), the parameter plans
+        # run on it, the comparison of two runs of a study or plan, and the
+        # identification. "Model sizing", not "Model", so it is not mistaken
+        # for the "Numerical Model" tab.
+        _wd = lambda: str(getattr(self.prefs, "default_workdir", "") or "")
+        self.setup_tab = SetupTab(self.optimization_tab, start_dir=_wd)
+        self.compare_tab = CompareRunsPanel(
+            folders=self.optimization_tab.known_folders(), start_dir=_wd,
+            settings_getter=self.optimization_tab.compare_settings)
         self.opt_tabs = QTabWidget()
-        self.opt_tabs.addTab(self.optimization_tab,  "1 · Model sizing")
-        self.opt_tabs.addTab(self.sensitivity_tab,   "2 · Sensitivity")
+        self.opt_tabs.addTab(self.setup_tab,         "1 · Setup")
+        self.opt_tabs.addTab(self.optimization_tab,  "2 · Model sizing")
+        self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Parameter plans")
+        self.opt_tabs.addTab(self.compare_tab,       "4 · Compare runs")
         self.opt_tabs.addTab(_placeholder("Inverse identification — coming later"),
-                             "3 · Inverse identification")
+                             "5 · Inverse identification")
+        # Opening Compare runs lists the study folders made since.
+        self.opt_tabs.currentChanged.connect(self._refresh_compare_if_visible)
+        self.optimization_tab.compareRequested.connect(self._show_compare)
 
         tabs = QTabWidget()
         tabs.addTab(self.model_tabs,        "Numerical Model")
@@ -522,6 +536,22 @@ class MainWindow(QMainWindow):
     # =====================================================================
     # Cfg re-binding (after New or Open)
     # =====================================================================
+    def _refresh_compare_if_visible(self, *_):
+        """Add to the Compare runs tab the study folders recorded since it
+        was last shown (the tab keeps the chosen folder and runs)."""
+        if self.opt_tabs.currentWidget() is self.compare_tab:
+            try:
+                self.compare_tab.add_folders(
+                    self.optimization_tab.known_folders())
+            except Exception:
+                log_swallowed("listing the study folders for Compare runs")
+
+    def _show_compare(self):
+        """'Compare runs…' of the Model sizing tab."""
+        self.tabs.setCurrentWidget(self.opt_tabs)
+        self.opt_tabs.setCurrentWidget(self.compare_tab)
+        self._refresh_compare_if_visible()
+
     def _refresh_sensitivity_if_visible(self, *_):
         """Resync the Sensitivity Ref column with the current model, but
         only when Sensitivity is actually the page on screen (so we don't
