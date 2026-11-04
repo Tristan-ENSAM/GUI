@@ -20,7 +20,7 @@ import math
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from gui.sensitivity.run_cache import run_completed
+from gui.sensitivity.run_cache import job_dir, jobs_of, run_completed
 
 # config.json "study" prefix -> step name; step -> folder prefix, job prefix
 STEP_OF_PREFIX = {"massscaling": "ms", "GCI": "mesh", "domainsizing": "domain"}
@@ -133,11 +133,13 @@ def first_finished_params(folder, job_prefix: str) -> Optional[dict]:
     """model_config of the first finished `<job_prefix>_runNNN` of
     `folder`, or None."""
     folder = Path(folder)
-    metas = sorted(folder.glob("%s_run*.meta.json" % job_prefix))
-    for meta in metas:
-        job = meta.name[:-len(".meta.json")]
+    head = ("%s_run" % job_prefix).lower()
+    for job in jobs_of(folder):
+        if not job.lower().startswith(head):
+            continue
         if not run_completed(folder, job):
             continue
+        meta = job_dir(folder, job) / (job + ".meta.json")
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
         except (OSError, ValueError):

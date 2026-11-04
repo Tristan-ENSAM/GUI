@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """Reuse of finished Abaqus runs: resume an interrupted study, load a study.
 
-Every finished run of a study leaves, in the study folder,
-``<job>.results.npz`` + ``<job>.meta.json`` + ``<job>.sta``. The meta file
+Every finished run of a study leaves, in its own folder inside the study
+folder (``<study>/<job>/``, `job_dir`), ``<job>.results.npz`` +
+``<job>.meta.json`` + ``<job>.sta`` and every other file of the run (.inp,
+.odb, .msg, logs). Study folders made before 2026-11-04 hold these files
+directly in the study folder ("flat" layout); they are read the same way:
+every function here takes the STUDY folder and the job name and finds the
+files in either layout. The meta file
 holds ``model_config``, the exact ``ModelConfig.to_params_dict()`` the run was
 launched with. A run is therefore identified by the CONTENT of its
 parameters, not by its job name: when a study asks for a configuration whose
@@ -106,22 +111,57 @@ def diff_params(a: dict, b: dict, ignore: Iterable[str] = ()
 # ---------------------------------------------------------------------------
 # Job files
 # ---------------------------------------------------------------------------
+def job_dir(folder, job: str) -> Path:
+    """Folder that holds the files of `job` of the study `folder`:
+    ``folder/job`` (one folder per run), or `folder` itself for a run of an
+    older study folder whose files are directly in it (flat layout: no
+    ``folder/job`` directory, a ``<job>.*`` file in `folder`). A job with
+    no file yet gets ``folder/job``."""
+    folder = Path(folder)
+    sub = folder / job
+    if sub.is_dir():
+        return sub
+    for suffix in (_META_SUFFIX, _NPZ_SUFFIX, ".sta", _FAILED_SUFFIX):
+        if (folder / (job + suffix)).exists():
+            return folder
+    return sub
+
+
+def new_job_dir(folder, job: str) -> Path:
+    """Create (if needed) and return ``folder/job``, where a launched run
+    writes all its files."""
+    sub = Path(folder) / job
+    sub.mkdir(parents=True, exist_ok=True)
+    return sub
+
+
+def _job_files_in(folder: Path, job: str) -> List[Path]:
+    head = job.lower() + "."
+    try:
+        return sorted(p for p in folder.iterdir()
+                      if p.is_file() and p.name.lower().startswith(head))
+    except OSError:
+        return []
+
+
 _JOB_RE_CACHE: Dict[str, "re.Pattern"] = {}
 
 
 def _job_re(prefix: str):
     pat = _JOB_RE_CACHE.get(prefix)
     if pat is None:
-        # `<prefix>_runNNN.` (older folders) or `<prefix>_runNNN_<tag>.`
-        pat = re.compile(r"^%s_run(\d+)(?:_[^.]*)?\." % re.escape(prefix),
-                         re.IGNORECASE)
+        # `<prefix>_runNNN.` (older folders) or `<prefix>_runNNN_<tag>.`:
+        # a file of a flat folder; the same name with no dot: a run folder.
+        pat = re.compile(r"^%s_run(\d+)(?:_[^.]*)?(?:\.|$)"
+                         % re.escape(prefix), re.IGNORECASE)
         _JOB_RE_CACHE[prefix] = pat
     return pat
 
 
 def next_job_index(folder, prefix: str) -> int:
-    """First run index after every `<prefix>_runNNN[_tag].*` file of `folder`, so
-    a study resumed in its folder never reuses the name of an earlier run."""
+    """First run index after every `<prefix>_runNNN[_tag].*` file and
+    `<prefix>_runNNN[_tag]` run folder of `folder`, so a study resumed in its
+    folder never reuses the name of an earlier run."""
     folder = Path(folder)
     pat = _job_re(prefix)
     last = -1
@@ -137,14 +177,15 @@ def next_job_index(folder, prefix: str) -> int:
 
 
 def job_files(folder, job: str) -> List[Path]:
-    """Files of `job` in `folder` (`<job>.<anything>`, case-insensitive)."""
+    """Files of `job` of the study `folder` (`<job>.<anything>`,
+    case-insensitive), in its run folder and directly in `folder` (flat
+    layout)."""
     folder = Path(folder)
-    head = job.lower() + "."
-    try:
-        return sorted(p for p in folder.iterdir()
-                      if p.is_file() and p.name.lower().startswith(head))
-    except OSError:
-        return []
+    files = _job_files_in(folder, job)
+    sub = folder / job
+    if sub.is_dir():
+        files += _job_files_in(sub, job)
+    return files
 
 
 def remove_job_files(folder, job: str) -> List[Path]:
@@ -177,7 +218,7 @@ def sta_outcome(folder, job: str) -> str:
     "not_completed" (Abaqus stopped the analysis) or "unknown" (no .sta, or
     no final mark: the solver did not start, was killed, or the file did
     not come back)."""
-    text = _sta_tail(Path(folder) / (job + ".sta"))
+    text = _sta_tail(job_dir(folder, job) / (job + ".sta"))
     if text is None:
         return "unknown"
     if SUCCESS_MARK in text:
@@ -190,10 +231,10 @@ def sta_outcome(folder, job: str) -> str:
 def run_completed(folder, job: str) -> bool:
     """True when `job` finished: its .sta reports a successful analysis and
     its bundle (.results.npz + .meta.json) exists."""
-    folder = Path(folder)
-    if not (folder / (job + _NPZ_SUFFIX)).exists():
+    d = job_dir(folder, job)
+    if not (d / (job + _NPZ_SUFFIX)).exists():
         return False
-    if not (folder / (job + _META_SUFFIX)).exists():
+    if not (d / (job + _META_SUFFIX)).exists():
         return False
     return sta_outcome(folder, job) == "success"
 
@@ -206,7 +247,7 @@ def write_failed_marker(folder, job: str, params: dict, reason: str) -> bool:
     payload = {"model_config": params, "reason": str(reason),
                "when": datetime.now().isoformat(timespec="seconds")}
     try:
-        (Path(folder) / (job + _FAILED_SUFFIX)).write_text(
+        (job_dir(folder, job) / (job + _FAILED_SUFFIX)).write_text(
             json.dumps(payload, indent=1, default=str), encoding="utf-8")
         return True
     except OSError:
@@ -215,16 +256,18 @@ def write_failed_marker(folder, job: str, params: dict, reason: str) -> bool:
 
 def copy_run(src_folder, src_job: str, dst_folder, dst_job: str) -> bool:
     """Put the files of a finished run (.results.npz, .meta.json, .sta)
-    into another study folder under `dst_job`: a hard link when the two
-    folders share a disk, else a copy. False (nothing left behind) when it
-    fails."""
+    into another study folder under `dst_job` (in its run folder
+    ``dst_folder/dst_job``): a hard link when the two folders share a disk,
+    else a copy. False (nothing left behind) when it fails."""
     import os
     import shutil
     done = []
     try:
+        src_dir = job_dir(src_folder, src_job)
+        dst_dir = new_job_dir(dst_folder, dst_job)
         for suffix in (_NPZ_SUFFIX, _META_SUFFIX, ".sta"):
-            src = Path(src_folder) / (src_job + suffix)
-            dst = Path(dst_folder) / (dst_job + suffix)
+            src = src_dir / (src_job + suffix)
+            dst = dst_dir / (dst_job + suffix)
             try:
                 os.link(str(src), str(dst))
             except OSError:
@@ -245,22 +288,49 @@ def copy_run(src_folder, src_job: str, dst_folder, dst_job: str) -> bool:
 # ---------------------------------------------------------------------------
 @dataclass
 class CachedRun:
+    """`folder` is the STUDY folder; the files are in `dir` (the run's own
+    folder, or `folder` itself in a flat older study folder)."""
     folder: Path
     job: str
     key: str
     params: dict = field(repr=False)
 
     @property
+    def dir(self) -> Path:
+        return job_dir(self.folder, self.job)
+
+    @property
     def npz(self) -> Path:
-        return self.folder / (self.job + _NPZ_SUFFIX)
+        return self.dir / (self.job + _NPZ_SUFFIX)
 
     @property
     def meta(self) -> Path:
-        return self.folder / (self.job + _META_SUFFIX)
+        return self.dir / (self.job + _META_SUFFIX)
 
     @property
     def sta(self) -> Path:
-        return self.folder / (self.job + ".sta")
+        return self.dir / (self.job + ".sta")
+
+
+def _jobs_with(folder: Path, suffix: str) -> List[str]:
+    """Jobs of the study `folder` that have a `<job><suffix>` file: in a run
+    folder ``folder/<job>/`` or directly in `folder` (flat layout)."""
+    jobs = set()
+    try:
+        for p in folder.glob("*" + suffix):
+            jobs.add(p.name[:-len(suffix)])
+        for p in folder.glob("*/*" + suffix):
+            job = p.name[:-len(suffix)]
+            if p.parent.name == job:
+                jobs.add(job)
+    except OSError:
+        pass
+    return sorted(jobs)
+
+
+def jobs_of(folder, suffix: str = _META_SUFFIX) -> List[str]:
+    """Public form of `_jobs_with` (study_specs, model_steps)."""
+    return _jobs_with(Path(folder), suffix)
 
 
 def same_folder(a, b) -> bool:
@@ -299,28 +369,19 @@ class RunCache:
             return 0
         self.folders.append(resolved)
         n = 0
-        try:
-            metas = sorted(folder.glob("*" + _META_SUFFIX))
-        except OSError:
-            return 0
-        for meta in metas:
-            job = meta.name[:-len(_META_SUFFIX)]
+        for job in _jobs_with(folder, _META_SUFFIX):
             if self._add(folder, job)[1]:
                 n += 1
-        try:
-            failed = sorted(folder.glob("*" + _FAILED_SUFFIX))
-        except OSError:
-            failed = []
-        for marker in failed:
-            self.add_failed(folder, marker.name[:-len(_FAILED_SUFFIX)])
+        for job in _jobs_with(folder, _FAILED_SUFFIX):
+            self.add_failed(folder, job)
         return n
 
     def add_failed(self, folder, job: str) -> Optional[CachedRun]:
         """Index a run whose analysis did not complete (its marker)."""
         folder = Path(folder)
         try:
-            data = json.loads((folder / (job + _FAILED_SUFFIX)).read_text(
-                encoding="utf-8"))
+            data = json.loads((job_dir(folder, job) / (job + _FAILED_SUFFIX)
+                               ).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         params = data.get("model_config") if isinstance(data, dict) else None
@@ -353,8 +414,8 @@ class RunCache:
         if not run_completed(folder, job):
             return None, False
         try:
-            data = json.loads((folder / (job + _META_SUFFIX)).read_text(
-                encoding="utf-8"))
+            data = json.loads((job_dir(folder, job) / (job + _META_SUFFIX)
+                               ).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None, False
         params = data.get("model_config") if isinstance(data, dict) else None

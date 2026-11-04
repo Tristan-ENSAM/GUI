@@ -320,7 +320,9 @@ class SensitivityRunWorker(QObject):
             # Remote run: the agent does `abaqus terminate` + tree kill there.
             proc.cancel()
             return
-        if abaqus_terminate_job(self._abaqus_cmd, job, self._workdir):
+        from gui.sensitivity.run_cache import job_dir
+        if abaqus_terminate_job(self._abaqus_cmd, job,
+                                job_dir(self._workdir, job)):
             if proc is not None:
                 try:
                     # Give the solver a moment to unwind before force-killing.
@@ -373,7 +375,16 @@ class SensitivityRunWorker(QObject):
     # -- the Abaqus per-profile solve (default solve_fn) ---------------
     def _abaqus_solve(self, cfg, i):
         job_name = "%s_run%03d" % (self._job_prefix, i)
-        out_path = self._workdir / ("%s.results.npz" % job_name)
+        # Every file of the run goes to its own folder <campaign>/<job>/.
+        from gui.sensitivity.run_cache import new_job_dir
+        try:
+            run_dir = new_job_dir(self._workdir, job_name)
+        except OSError as e:
+            self.log.emit("[run %d] cannot create its folder: %s\n"
+                          % (i + 1, e))
+            self.runDone.emit(i, False)
+            return None
+        out_path = run_dir / ("%s.results.npz" % job_name)
         try:
             if out_path.exists():
                 out_path.unlink()           # avoid reading a stale bundle
@@ -398,11 +409,11 @@ class SensitivityRunWorker(QObject):
                 from gui.core.remote_exec import submit_remote
                 self.log.emit("[run %d] submitted to the remote agent\n"
                               % (i + 1))
-                self._proc = submit_remote(self._remote_prefs, self._workdir,
+                self._proc = submit_remote(self._remote_prefs, run_dir,
                                            model_params, run_params)
             else:
                 self._proc = subprocess.Popen(
-                    args, cwd=str(self._workdir),
+                    args, cwd=str(run_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     **_popen_group_kwargs())
         except Exception as e:
@@ -418,7 +429,7 @@ class SensitivityRunWorker(QObject):
         # yield nothing but the licence banner, so a campaign showed no sign
         # of what each run was doing. run_simul tees everything into
         # <job>.gui.log; the Job tab tails the same file.
-        log_path = script_log_path(self._workdir, job_name)
+        log_path = script_log_path(run_dir, job_name)
         offset = 0
         # Drain the launcher's stdout while it runs. It is read only once the
         # process has exited (it is mostly the licence banner), but an unread

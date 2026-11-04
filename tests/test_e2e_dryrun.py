@@ -152,8 +152,10 @@ def test_worker_dryrun_with_stub_subprocess(qapp, tmp_path):
     assert np.all(np.isfinite(res.Y))           # Fx_mean computed from .npz
     assert "EVF [field]" in res.qoi_ids         # field QoI on real bundles
     # the bundle the worker reloaded actually exists on disk
-    assert (workdir / "sens_run000.results.npz").exists()
-    assert (workdir / "sens_run000.sta").exists()
+    # (in its own run folder, 2026-11-04)
+    assert (workdir / "sens_run000" / "sens_run000.results.npz").exists()
+    assert (workdir / "sens_run000" / "sens_run000.sta").exists()
+    assert not (workdir / "sens_run000.results.npz").exists()
 
 
 def test_worker_dryrun_failed_run_is_reported(qapp, tmp_path):
