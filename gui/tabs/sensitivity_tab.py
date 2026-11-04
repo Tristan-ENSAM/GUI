@@ -1287,13 +1287,15 @@ class SensitivityTab(QWidget):
         if self._running_index is None or self._run_workdir is None:
             return
         job = "sensitivity_run%03d" % self._running_index
-        sta = self._run_workdir / ("%s.sta" % job)
+        from gui.sensitivity.run_cache import job_dir
+        run_dir = job_dir(self._run_workdir, job)     # <campaign>/<job>/
+        sta = run_dir / ("%s.sta" % job)
         if job != self._bars_job:
             self._bars_job = job
             self.run_bars.start(remote=self._bars_remote)
         self.run_bars.poll(sta_path=sta,
-                           log_path=script_log_path(self._run_workdir, job),
-                           run_dir=self._run_workdir, job=job,
+                           log_path=script_log_path(run_dir, job),
+                           run_dir=run_dir, job=job,
                            sim_time=float(getattr(self.cfg.step, "sim_time",
                                                   0.0) or 0.0) or None)
         cur_frac = 0.0

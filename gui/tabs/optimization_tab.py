@@ -1811,8 +1811,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         import subprocess
         from gui.core.run_output import job_name, model_run_tag
         from gui.sensitivity.run_cache import (
-            copy_run, next_job_index, remove_job_files, same_folder,
-            sta_outcome, write_failed_marker)
+            copy_run, new_job_dir, next_job_index, remove_job_files,
+            same_folder, sta_outcome, write_failed_marker)
 
         cache = getattr(self, "_study_cache", None)
         offline = bool(getattr(self, "_study_offline", False))
@@ -1914,15 +1914,21 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 return None
             i = counter["i"]; counter["i"] += 1
             job = job_name(prefix, i, model_run_tag(prefix, cfg))
-            out_path = Path(run_dir) / ("%s.results.npz" % job)
-            self._current_sta = Path(run_dir) / ("%s.sta" % job)
-            state["sta"], state["job"] = self._current_sta, job
-            state["filter_check"] = None
             # Files left by an interrupted run of the same name (a stale
             # .meta.json next to a new .npz would pass for a finished run).
             for p in remove_job_files(run_dir, job):
                 log_swallowed("removing stale file %s" % p,
                               level=logging.DEBUG)
+            # Every file of the run goes to its own folder <study>/<job>/.
+            try:
+                jdir = new_job_dir(run_dir, job)
+            except OSError as e:
+                return cannot_run("the folder of %s cannot be created: %s"
+                                  % (job, e))
+            out_path = jdir / ("%s.results.npz" % job)
+            self._current_sta = jdir / ("%s.sta" % job)
+            state["sta"], state["job"] = self._current_sta, job
+            state["filter_check"] = None
             state["n_launched"] += 1
             args = build_abaqus_args(
                 prefs.abaqus_cmd, prefs.abaqus_script,
@@ -1940,17 +1946,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             # still name the job to `abaqus terminate`.
             self._current_job = job
             self._current_abaqus_cmd = prefs.abaqus_cmd
-            self._current_run_dir = run_dir
+            self._current_run_dir = jdir
             try:
                 if is_remote(prefs):
                     # Same contract as the Popen: poll/stdout/returncode. The
-                    # agent mirrors .sta/.gui.log/.results.npz into run_dir.
+                    # agent mirrors .sta/.gui.log/.results.npz into jdir.
                     self._log_ui("[%s] submitted to the remote agent\n" % job)
-                    proc = submit_remote(prefs, run_dir, params,
+                    proc = submit_remote(prefs, jdir, params,
                                          {"cpus": cpus, "job_name": job})
                 else:
                     proc = subprocess.Popen(
-                        args, cwd=str(run_dir),
+                        args, cwd=str(jdir),
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except Exception as e:
                 self._log_ui("failed to start Abaqus: %s\n" % e)
@@ -1964,7 +1970,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             # so the old `iter(proc.stdout.readline, b"")` blocked until the
             # process exited. That is what made Cancel look like it did
             # nothing: the cancel test sat inside a loop no line ever woke.
-            log_path = script_log_path(run_dir, job)
+            log_path = script_log_path(jdir, job)
             offset = 0
             log_filter = LogLineFilter()
             while proc.poll() is None:
@@ -2006,7 +2012,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                         cache.add_failed(run_dir, job)
                     state["analysis_failed"].append(job)
                     self._log_ui("[%s] the analysis did not complete (see "
-                                 "%s.msg in the study folder): counted as a "
+                                 "%s.msg in its run folder): counted as a "
                                  "failed run" % (job, job))
                     return None
                 return cannot_run(

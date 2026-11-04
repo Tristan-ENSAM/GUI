@@ -520,10 +520,9 @@ def test_domain_study_resume_load_and_other_model(qapp, world, answers):
     # Two runs of the folder of record never finished: its result stays
     # (done, but steps 0 and 1 are not done here), the user is offered to
     # compute them.
-    jobs = sorted(p.name[:-len(".meta.json")]
-                  for p in folder.glob("domainsizing_run*.meta.json"))
+    jobs = [j for j in rc.jobs_of(folder) if j.startswith("domainsizing_run")]
     for job in jobs[-2:]:
-        (folder / (job + ".sta")).write_text("STOPPED\n")
+        (rc.job_dir(folder, job) / (job + ".sta")).write_text("STOPPED\n")
     answers.next = "later"
     before = dict(tab.cfg.optimization.steps["domain"])
     tab.forget_results()
@@ -639,8 +638,9 @@ def test_run_all_steps_chains_the_results(qapp, world, answers,
     dom = Path(steps["domain"]["folder"])
     copy = dom.parent / (dom.name + "_copy")
     shutil.copytree(dom, copy)
-    for meta in sorted(copy.glob("domainsizing_run*.meta.json"))[-2:]:
-        (copy / (meta.name[:-len(".meta.json")] + ".sta")).write_text("x")
+    for job in [j for j in rc.jobs_of(copy)
+                if j.startswith("domainsizing_run")][-2:]:
+        (rc.job_dir(copy, job) / (job + ".sta")).write_text("x")
     panel = [le.text() for le in tab._opt_line_edits()]
     tab.le_grid_step.setText("")            # (what the copy was made with)
     answers.next = "later"
@@ -743,7 +743,7 @@ def test_an_analysis_abaqus_stopped_is_replayed_as_failed(qapp, world,
     rec = tab.cfg.optimization.steps["ms"]
     assert (rec["status"], rec["value"]) == ("done", 1000.0)
     folder = Path(rec["folder"])
-    assert list(folder.glob("ms_run*.failed.json"))
+    assert rc.jobs_of(folder, ".failed.json")
     # Loading the study meets the same failure: no "not finished".
     n, n_asked = len(world.launched), len(answers.asked)
     tab.forget_results()
@@ -891,10 +891,9 @@ def test_no_other_profile_while_a_study_runs(qapp, monkeypatch):
 def _drop_last_runs(folder, prefix, n=2):
     """Make the last `n` runs of a study folder unfinished (their .sta
     removed: a hard-linked copy elsewhere keeps its own)."""
-    jobs = sorted(p.name[:-len(".meta.json")]
-                  for p in Path(folder).glob("%s_run*.meta.json" % prefix))
+    jobs = [j for j in rc.jobs_of(folder) if j.startswith(prefix + "_run")]
     for job in jobs[-n:]:
-        (Path(folder) / (job + ".sta")).unlink()
+        (rc.job_dir(folder, job) / (job + ".sta")).unlink()
     return jobs[-n:]
 
 
@@ -980,8 +979,10 @@ def test_a_folder_of_failed_runs_is_judged_on_them(qapp, world, answers):
     rec = tab.cfg.optimization.steps["ms"]
     assert rec["status"] == "failed", tab.log.toPlainText()[-2000:]
     folder = Path(rec["folder"])
-    assert list(folder.glob("ms_run*.failed.json"))
-    assert not list(folder.glob("ms_run*.meta.json"))
+    assert rc.jobs_of(folder, ".failed.json")
+    assert not rc.jobs_of(folder)
+    # one folder per run: nothing of a run directly in the study folder
+    assert not list(folder.glob("ms_run[0-9]*.*"))
     tab.cfg.interaction.friction_coeff += 0.1
     n_asked = len(answers.asked)
     tab.forget_results()

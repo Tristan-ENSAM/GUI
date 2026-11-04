@@ -30,7 +30,7 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 from gui.core.logging_util import log_swallowed
 from gui.core.machines import machine_name
 from gui.sensitivity.ms_independence import failure_cause
-from gui.sensitivity.run_cache import RunCache, same_folder
+from gui.sensitivity.run_cache import RunCache, jobs_of, same_folder
 from gui.sensitivity.study_specs import (
     CHECKS_CONFIG, DIM_KEYS, JOB_PREFIX, ZOI_KEYS, comparison_settings,
     eps_of_spec, grid_set_of_spec, ms_of, read_checks_config,
@@ -827,7 +827,8 @@ class ModelStepsMixin:
             return
         spec = read_checks_config(folder)
         if spec is None:
-            if any(Path(folder).glob("checks_run*.meta.json")):
+            if any(j.lower().startswith("checks_run")
+                   for j in jobs_of(folder)):
                 self._log_ui("The final checks of this folder have no saved "
                              "settings (older study): run them again.")
             return
