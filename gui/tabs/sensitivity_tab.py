@@ -85,6 +85,9 @@ class SensitivityTab(QWidget):
     # ZOI proposed from the maps, (xmin, xmax, ymin, ymax) [mm]: the main
     # window copies it into the Model tab.
     zoiProposed = Signal(tuple)
+    # Two runs of a sweep / grid plan to compare: (plan folder, job of the
+    # reference run a, job of the compared run b).
+    compareRunsRequested = Signal(str, str, str)
 
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
                  profile_name_getter=None):
@@ -409,6 +412,14 @@ class SensitivityTab(QWidget):
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self._on_export)
         ctrl.addWidget(self.btn_export)
+        self.btn_compare_runs = QPushButton("Compare 2 runs…")
+        self.btn_compare_runs.setToolTip(
+            "Sweep / grid: select two rows of the Table, then open them in\n"
+            "Compare runs (where and when they differ, in \u03b5_q). The Ref\n"
+            "run, or else the lower run number, is the reference (a).")
+        self.btn_compare_runs.setEnabled(False)
+        self.btn_compare_runs.clicked.connect(self._on_compare_runs)
+        ctrl.addWidget(self.btn_compare_runs)
         bl.addLayout(ctrl)
 
         self.status = QLabel("")
@@ -440,6 +451,9 @@ class SensitivityTab(QWidget):
 
         self.results_table = QTableWidget(0, 0)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.itemSelectionChanged.connect(
+            self._sync_compare_button)
         self.tabs_out.addTab(self.results_table, "Table")
 
         chart_w = QWidget(); cv = QVBoxLayout(chart_w)
@@ -1640,6 +1654,7 @@ class SensitivityTab(QWidget):
         self._show_results(result)
         self._build_field_maps(result)
         self.btn_export.setEnabled(result.Y.shape[0] > 0)
+        self._sync_compare_button()
         self.tabs_out.setCurrentWidget(self.results_table)
         if self._field_maps and self._run_workdir is not None:
             self._export_field_maps(Path(self._run_workdir) / mx.MAPS_SUBDIR)
@@ -2284,6 +2299,35 @@ class SensitivityTab(QWidget):
         self.cb_chart_param.blockSignals(False)
         self._draw_chart()
         self._fill_series(result, plan)
+
+    def _selected_run_rows(self):
+        return sorted({i.row() for i in self.results_table.selectedIndexes()})
+
+    def _sync_compare_button(self):
+        res = self._last_result
+        ok = (res is not None and res.plan_kind == "sweep"
+              and self._sweep_plan() is not None
+              and self._run_workdir is not None
+              and len(self._selected_run_rows()) == 2)
+        self.btn_compare_runs.setEnabled(ok)
+
+    def _on_compare_runs(self):
+        plan = self._sweep_plan()
+        rows = self._selected_run_rows()
+        if plan is None or len(rows) != 2 or self._run_workdir is None:
+            self._warn("Select two runs (two rows) of the Table.")
+            return
+        failed = set(getattr(self._last_result, "failures", []) or [])
+        bad = [r + 1 for r in rows if r in failed]
+        if bad:
+            self._warn("Run %s failed: it has no results to compare."
+                       % ", ".join(map(str, bad)))
+            return
+        a, b = rows
+        if b == plan.base_row:            # the Ref run is the reference
+            a, b = b, a
+        job = lambda r: "%s_run%03d" % (plan.design, r)
+        self.compareRunsRequested.emit(str(self._run_workdir), job(a), job(b))
 
     def _qoi_eps(self, qid):
         """eps_q of a QoI of the run (Model sizing QoI only), else None."""

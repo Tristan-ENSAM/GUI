@@ -156,6 +156,8 @@ class MainWindow(QMainWindow):
         # Opening Compare runs lists the study folders made since.
         self.opt_tabs.currentChanged.connect(self._refresh_compare_if_visible)
         self.optimization_tab.compareRequested.connect(self._show_compare)
+        self.sensitivity_tab.compareRunsRequested.connect(
+            self._compare_plan_runs)
 
         tabs = QTabWidget()
         tabs.addTab(self.model_tabs,        "Numerical Model")
@@ -572,6 +574,15 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.opt_tabs)
         self.opt_tabs.setCurrentWidget(self.compare_tab)
         self._refresh_compare_if_visible()
+
+    def _compare_plan_runs(self, folder, job_a, job_b):
+        """'Compare 2 runs…' of the Parameter plans tab."""
+        self._show_compare()
+        if not self.compare_tab.select_pair(folder, job_a, job_b):
+            QMessageBox.information(
+                self, "Compare runs",
+                "%s or %s is not a finished run of %s." % (
+                    job_a, job_b, Path(folder).name))
 
     def _refresh_sensitivity_if_visible(self, *_):
         """Resync the Sensitivity Ref column with the current model, but
