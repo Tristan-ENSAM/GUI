@@ -288,7 +288,7 @@ class TestDriver:
         res = run_domain_independence(
             _runner(wobble=wob), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
             thresholds={"Vx": 50.0, "Ff": 1.0}, step_elems=5, n_max=8,
-            m_ratios=2, order=("l_wp",))
+            m_ratios=2, order=("l_wp",), drift_refused=False)
         dr = res.per_dimension["l_wp"]
         assert dr.status == "successive"
         assert dr.comparisons[-1].mode == "successive"
@@ -301,7 +301,7 @@ class TestDriver:
         res = run_domain_independence(
             _runner(wobble=wob), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
             thresholds={"Vx": 50.0, "Ff": 1.0}, step_elems=5, n_max=8,
-            n_hold=2, m_ratios=2, order=("l_wp",))
+            n_hold=2, m_ratios=2, order=("l_wp",), drift_refused=False)
         dr = res.per_dimension["l_wp"]
         succ = [c.success for c in dr.comparisons]
         k = next(i for i in range(1, len(succ)) if succ[i] and succ[i - 1])
@@ -450,3 +450,184 @@ def test_cost_fn_receives_dims_and_host_time():
     assert all(h >= 0.0 for (_b, _d, h) in seen)
     assert [b for (b, _d, _h) in seen].count(False) == 1   # failed run too
     assert res.runs[0].cost == {"n": 1}
+
+
+# ---------------------------------------------------------------------------
+# Drift, descent, fixed point (decisions of 2026-11-04)
+# ---------------------------------------------------------------------------
+from gui.sensitivity.domain_independence import DecayCheck, is_drift
+
+
+class TestDrift:
+    def test_is_drift_rules(self):
+        assert is_drift(DecayCheck(False, ratios=[1.0, 1.2],
+                                   reason="ratio_not_below_1"), 2)
+        assert is_drift(DecayCheck(False, ratios=[],
+                                   reason="growth_from_zero"), 2)
+        # one ratio above 1 only: noise, not a drift
+        assert not is_drift(DecayCheck(False, ratios=[0.5, 1.3],
+                                       reason="ratio_not_below_1"), 2)
+        # below 1 but not monotone: noise
+        assert not is_drift(DecayCheck(False, ratios=[0.3, 0.8],
+                                       reason="decay_slowing"), 2)
+        assert not is_drift(DecayCheck(True, rho=0.5, ratios=[0.5, 0.5]), 2)
+
+    def test_linear_drift_is_not_accepted(self):
+        # Ff grows by the same small amount at every step (each step passes):
+        # the old fallback stopped at the first pass, now the side keeps
+        # growing and ends as "drift" with the largest tested value.
+        def lin(d):
+            return 1e-7 * round(d.h_wp / _ELEM)
+        kw = dict(thresholds={"Vx": 50.0, "Ff": 1.0}, step_elems=5,
+                  n_max=5, m_ratios=2, order=("h_wp",))
+        old = run_domain_independence(_runner(wobble=lin), _Cfg(), _ZOI,
+                                      _D0, 0.01, _ELEM, drift_refused=False,
+                                      **kw)
+        assert old.per_dimension["h_wp"].status == "successive"
+        res = run_domain_independence(_runner(wobble=lin), _Cfg(), _ZOI,
+                                      _D0, 0.01, _ELEM, **kw)
+        dr = res.per_dimension["h_wp"]
+        assert dr.status == "drift"
+        assert dr.comparisons[-1].mode == "drift"
+        assert dr.retained == pytest.approx(0.1 + 5 * 0.05)
+        assert res.status == "partial"
+
+
+class TestDescent:
+    def test_start_above_floor_descends(self):
+        big = DomainDims(h_wp=0.1, h_void=0.1, l_wp=0.3, l_void=0.1)
+        ref = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            order=("l_wp",))
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, big, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            order=("l_wp",), floor_dims=_D0)
+        dr = res.per_dimension["l_wp"]
+        assert dr.descent == 4
+        assert dr.initial == pytest.approx(0.3)
+        assert dr.values[0] == pytest.approx(0.1)
+        assert dr.retained == pytest.approx(
+            ref.per_dimension["l_wp"].retained)
+        assert dr.retained < 0.3
+
+    def test_no_floor_no_descent(self):
+        big = DomainDims(h_wp=0.1, h_void=0.1, l_wp=0.3, l_void=0.1)
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, big, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            order=("l_wp",))
+        dr = res.per_dimension["l_wp"]
+        assert dr.descent == 0 and dr.retained >= 0.3 - 1e-12
+
+    def test_descent_keeps_zoi_inside(self):
+        big = DomainDims(h_wp=0.1, h_void=0.1, l_wp=0.3, l_void=0.1)
+        tiny = DomainDims(h_wp=0.01, h_void=0.01, l_wp=0.01, l_void=0.01)
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, big, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            order=("l_wp",), floor_dims=tiny)
+        # ZOI reaches x = -0.05: l_wp cannot go below 0.05
+        assert res.per_dimension["l_wp"].values[0] >= 0.05 - 1e-12
+
+
+class _CoupledBundle(_Bundle):
+    """l_wp's influence is larger when h_wp is larger (a stand-in for the
+    workpiece bending): l_wp sized at a small h_wp is too short."""
+
+    def influence(self):
+        d = self.dims
+        amp = (d.h_wp / 0.1) ** 4
+        return (amp * math.exp(-d.l_wp / self.lam)
+                + math.exp(-d.h_wp / self.lam))
+
+
+def _coupled_runner(log=None):
+    def run(cfg):
+        d = _dims_of(cfg)
+        if log is not None:
+            log.append(d)
+        return _CoupledBundle(d)
+    return run
+
+
+class TestFixedPoint:
+    def test_off_by_default(self):
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2)
+        assert res.fixed_point_status == "off" and not res.fixed_point
+
+    def test_separable_converges_first_iteration(self):
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            fixed_point_iters=3)
+        assert res.fixed_point_status == "converged"
+        assert res.fixed_point_iterations == 1
+        assert len(res.fixed_point) == 4
+        assert all(c.passed for c in res.fixed_point)
+        assert res.status == "converged"
+
+    def test_coupled_sides_are_resized(self):
+        kw = dict(thresholds={"Vx": 20.0}, step_elems=5, n_max=12,
+                  m_ratios=2, order=("l_wp", "h_wp"), caps={"h_wp": 0.3})
+        seq = run_domain_independence(_coupled_runner(), _Cfg(), _ZOI, _D0,
+                                      0.01, _ELEM, **kw)
+        res = run_domain_independence(_coupled_runner(), _Cfg(), _ZOI, _D0,
+                                      0.01, _ELEM, fixed_point_iters=3, **kw)
+        failed = [c for c in res.fixed_point if not c.passed]
+        assert failed and failed[0].dimension == "l_wp"
+        assert res.final.l_wp > seq.final.l_wp
+        # the re-sizing is recorded in the history with its iteration
+        assert any(d.iteration >= 1 and d.name == "l_wp"
+                   for d in res.history)
+        assert res.fixed_point_status == "converged"
+
+    def test_cap_reached_status(self):
+        kw = dict(thresholds={"Vx": 20.0}, step_elems=5, n_max=12,
+                  m_ratios=2, order=("l_wp", "h_wp"), caps={"h_wp": 0.3})
+        res = run_domain_independence(_coupled_runner(), _Cfg(), _ZOI, _D0,
+                                      0.01, _ELEM, fixed_point_iters=1, **kw)
+        if res.fixed_point_status == "max_iterations":
+            assert res.status == "partial"
+
+    def test_side_at_cap_is_skipped(self):
+        res = run_domain_independence(
+            _runner(), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+            thresholds={"Vx": 50.0}, step_elems=5, n_max=8, m_ratios=2,
+            fixed_point_iters=2, caps={"h_void": 0.1})
+        hv = [c for c in res.fixed_point if c.dimension == "h_void"]
+        assert hv and all(c.at_cap and c.passed for c in hv)
+
+
+def test_exports_fixed_point_and_history(tmp_path):
+    from gui.sensitivity.study_export import (
+        comparison_rows, dimension_rows, fixed_point_rows, run_rows,
+        write_domain_exports)
+    kw = dict(thresholds={"Vx": 20.0}, step_elems=5, n_max=12, m_ratios=2,
+              order=("l_wp", "h_wp"), caps={"h_wp": 0.3})
+    res = run_domain_independence(_coupled_runner(), _Cfg(), _ZOI, _D0,
+                                  0.01, _ELEM, fixed_point_iters=3, **kw)
+    fp = fixed_point_rows(res)
+    assert len(fp) == len(res.fixed_point) and "passed" in fp[0]
+    comps = comparison_rows(res)
+    assert {r["iteration"] for r in comps} >= {0, 1}
+    assert all("descent_steps" in r for r in dimension_rows(res, None))
+    runs = run_rows(res)
+    # a check run already used by a series keeps its series row
+    assert len(runs) == res.n_runs
+    paths = write_domain_exports(tmp_path, res, None, _ELEM, 1.0)
+    assert any(p.name == "fixed_point.csv" for p in paths)
+
+
+def test_round_off_drift_is_ignored():
+    # Ff increments at round-off level, non-decreasing: not a drift.
+    def noise(d):
+        return 1e-18 * round(d.h_wp / _ELEM)
+    res = run_domain_independence(
+        _runner(wobble=noise), _Cfg(), _ZOI, _D0, 0.01, _ELEM,
+        thresholds={"Vx": 50.0, "Ff": 1.0}, step_elems=5, n_max=8,
+        m_ratios=2, order=("h_wp",))
+    assert res.per_dimension["h_wp"].status in ("tail_bound", "successive")

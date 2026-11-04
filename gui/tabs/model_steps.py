@@ -795,7 +795,9 @@ class ModelStepsMixin:
                     ("n_max", self._dom_spins["dom_n_max"],
                      "max comparisons"),
                     ("n_hold", self._dom_spins["dom_n_hold"], "passes"),
-                    ("m_ratios", self._dom_spins["dom_m_ratios"], "m"))
+                    ("m_ratios", self._dom_spins["dom_m_ratios"], "m"),
+                    ("fixed_point_iters", self._dom_spins["dom_fp_iters"],
+                     "fixed-point iterations"))
             for key, sp, name in ints:
                 if key == "margin_elems" and mode == "manual":
                     continue        # not used by a start set by hand

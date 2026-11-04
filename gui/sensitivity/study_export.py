@@ -132,14 +132,23 @@ def pareto_flags(points: Sequence[tuple]) -> List[Optional[bool]]:
 # ---------------------------------------------------------------------------
 # Domain study rows
 # ---------------------------------------------------------------------------
+def _sizings(study):
+    """Every DimensionResult in execution order: the sequential pass, then
+    the fixed-point re-sizings (StudyResult.history); per_dimension for a
+    result without history."""
+    hist = list(getattr(study, "history", None) or [])
+    return hist or list(study.per_dimension.values())
+
+
 def comparison_rows(study, quantities: Sequence[str] = ALL_QUANTITIES
                     ) -> List[Dict[str, object]]:
     thr = study.settings.get("thresholds", {})
     runs = {r.index: r for r in study.runs}
     rows = []
-    for name, dres in study.per_dimension.items():
+    for dres in _sizings(study):
         for c in dres.comparisons:
-            row = {"dimension": c.dimension, "j": c.j,
+            row = {"iteration": getattr(dres, "iteration", 0),
+                   "dimension": c.dimension, "j": c.j,
                    "value_from_mm": c.value_from, "value_to_mm": c.value_to,
                    "run_from": c.run_from, "run_to": c.run_to,
                    "E_max": _num(c.e_max), "q_crit": c.q_crit,
@@ -174,18 +183,25 @@ def run_rows(study, ms_factor: Optional[float] = None,
     study has none."""
     to_comp = {}
     retained = {}                    # run index -> dimensions it settles
-    for dres in study.per_dimension.values():
+    for dres in _sizings(study):
         for c in dres.comparisons:
             to_comp.setdefault(c.run_to, c)
+    for dres in study.per_dimension.values():
         ri = retained_run_index(dres)
         if ri is not None:
             retained.setdefault(ri, []).append(dres.name)
     elem = study.settings.get("elem_size")
     rows = []
+    fp = {c.run_to: c for c in (getattr(study, "fixed_point", None) or [])
+          if c.run_to >= 0}
     for r in study.runs:
         c = to_comp.get(r.index)
+        if c is None and r.index in fp:
+            c = fp[r.index]          # a fixed-point check run
+        is_fp = r.index in fp and c is fp[r.index]
         row = {"case": case,
-               "step": (step_of or {}).get(r.index, "domain"),
+               "step": (step_of or {}).get(
+                   r.index, "domain_fixed_point" if is_fp else "domain"),
                "run": r.index,
                "parameter": c.dimension if c else "initial",
                "value_mm": c.value_to if c else None,
@@ -200,8 +216,12 @@ def run_rows(study, ms_factor: Optional[float] = None,
         row["safeguards_ok"] = r.guards_ok
         row["diagonal_over_h"] = _num(r.diagonal_ratio)
         row["diagonal_warning"] = r.diagonal_warning
-        row["decision"] = (("independent" if c.success else "not independent")
-                           if c else "start")
+        if is_fp:
+            row["decision"] = ("fixed point passed" if c.passed
+                               else "fixed point FAILED")
+        else:
+            row["decision"] = (("independent" if c.success
+                                else "not independent") if c else "start")
         row["retained_for"] = " ".join(retained.get(r.index, []))
         row["job_ok"] = r.job_ok
         row["error"] = r.error
@@ -233,7 +253,31 @@ def dimension_rows(study, t1: Optional[float]) -> List[Dict[str, object]]:
             d.retained, "initial_over_t1": _num(d.initial / t1) if t1 else None,
             "selected_over_t1": _num(d.retained / t1) if t1 else None,
             "status": d.status, "criterion": _num(d.criterion),
-            "q_crit": d.q_crit, "n_comparisons": len(d.comparisons)})
+            "q_crit": d.q_crit, "n_comparisons": len(d.comparisons),
+            "descent_steps": getattr(d, "descent", 0),
+            "sized_at_iteration": getattr(d, "iteration", 0)})
+    return rows
+
+
+def fixed_point_rows(study, quantities: Sequence[str] = ALL_QUANTITIES
+                     ) -> List[Dict[str, object]]:
+    """One row per fixed-point check (D* vs D* + one step on one side)."""
+    thr = study.settings.get("thresholds", {})
+    rows = []
+    for c in getattr(study, "fixed_point", None) or []:
+        row = {"iteration": c.iteration, "dimension": c.dimension,
+               "value_from_mm": c.value_from, "value_to_mm": c.value_to,
+               "run_from": c.run_from, "run_to": c.run_to,
+               "E_max": _num(c.e_max), "q_crit": c.q_crit,
+               "guards_ok": c.guards_ok, "passed": c.passed,
+               "at_cap": c.at_cap}
+        for q in quantities:
+            e = c.errors.get(q)
+            eps = thr.get(q)
+            row["E_" + q] = _num(e)
+            row["E_%s/eps" % q] = (_num(e / eps) if eps and e is not None
+                                   else None)
+        rows.append(row)
     return rows
 
 
@@ -355,6 +399,10 @@ def summary(study, t1: Optional[float], h_star: Optional[float],
         "dimensions": {n: {"status": d.status, "q_crit": d.q_crit,
                            "criterion": _num(d.criterion)}
                        for n, d in study.per_dimension.items()},
+        "fixed_point": {
+            "status": getattr(study, "fixed_point_status", "off"),
+            "iterations": getattr(study, "fixed_point_iterations", 0),
+            "n_checks": len(getattr(study, "fixed_point", None) or [])},
         "cost_eq22_23_paper": dict(
             gains("c_cpu_s")["vs_initial_domain"],
             reference="starting domain of the study (first run; ZOI + "
@@ -401,6 +449,9 @@ def write_domain_exports(folder, study, t1: Optional[float],
         write_csv(folder / "comparisons.csv", comparison_rows(study)),
         write_csv(folder / "dimensions.csv", dimension_rows(study, t1)),
     ]
+    if getattr(study, "fixed_point", None):
+        paths.append(write_csv(folder / "fixed_point.csv",
+                               fixed_point_rows(study)))
     if checks_result is not None:
         paths.append(write_csv(folder / "checks.csv",
                                check_rows(checks_result)))

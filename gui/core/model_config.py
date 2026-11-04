@@ -519,6 +519,10 @@ class OptimizationCfg:
     dom_n_max:      int  = 8       # comparisons per dimension
     dom_n_hold:     int  = 1       # consecutive successes (fallback rule)
     dom_m_ratios:   int  = 2       # ratios used by the geometric-decay test
+    # Fixed-point iterations over the four sides after the sequential pass
+    # (decision of 2026-11-04; 0 = off, the behaviour before). The cap 3 is
+    # a choice, not derived.
+    dom_fp_iters:   int  = 3
     # Time window T as fractions of the simulated time (shared by both
     # studies). 0.3-1.0 is the value previously hard-coded in the workers.
     window_start:   str  = "0.3"
