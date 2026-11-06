@@ -35,6 +35,7 @@ from gui.core.remote_exec import is_remote, launch_problems
 from gui.identify import engine as ie
 from gui.sensitivity import model_qoi as mq
 from gui.sensitivity import param_registry as pr
+from gui.widgets.param_filter import fill_filter_combo, keep as filter_keep
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.theme import mark_primary
 
@@ -152,9 +153,7 @@ class IdentifyTab(QWidget):
         frow = QHBoxLayout()
         frow.addWidget(QLabel("Show:"))
         self.cb_filter = QComboBox()
-        for label, key in (("All", "all"), ("Physical", "physical"),
-                           ("Ticked", "ticked")):
-            self.cb_filter.addItem(label, key)
+        fill_filter_combo(self.cb_filter)
         self.cb_filter.currentIndexChanged.connect(self._apply_filter)
         frow.addWidget(self.cb_filter)
         self.le_search = QLineEdit()
@@ -419,11 +418,9 @@ class IdentifyTab(QWidget):
             shown = False
             for r in rows:
                 spec = self._row_spec[r]
-                keep = True
-                if mode == "physical":
-                    keep = spec.kind == "physical"
-                elif mode == "ticked":
-                    keep = self.table.item(r, C_USE).checkState() == Qt.Checked
+                keep = filter_keep(
+                    spec, mode,
+                    self.table.item(r, C_USE).checkState() == Qt.Checked)
                 if keep and words:
                     keep = (words in spec.label.lower()
                             or words in spec.path.lower()

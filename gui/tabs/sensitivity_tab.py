@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread, QTimer
 
 from gui.sensitivity import param_registry as pr
+from gui.widgets.param_filter import fill_filter_combo, keep as filter_keep
 from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import sweep_plan as sw
@@ -230,13 +231,7 @@ class SensitivityTab(QWidget):
         frow = QHBoxLayout()
         frow.addWidget(QLabel("Show:"))
         self.cb_filter = QComboBox()
-        self.cb_filter.addItem("All", "all")
-        self.cb_filter.addItem("Physical", "physical")
-        self.cb_filter.addItem("Ticked", "ticked")
-        self.cb_filter.setToolTip(
-            "All: every parameter of the model. Physical: without the "
-            "numerical settings and the outputs. Ticked: the parameters of "
-            "the plan.")
+        fill_filter_combo(self.cb_filter)
         self.cb_filter.currentIndexChanged.connect(self._apply_filter)
         frow.addWidget(self.cb_filter)
         self.le_search = QLineEdit()
@@ -878,12 +873,9 @@ class SensitivityTab(QWidget):
             any_shown = False
             for r in rows:
                 spec = self._row_spec[r]
-                keep = True
-                if mode == "physical":
-                    keep = spec.kind == "physical"
-                elif mode == "ticked":
-                    it = self.table.item(r, 0)
-                    keep = it is not None and it.checkState() == Qt.Checked
+                it = self.table.item(r, 0)
+                keep = filter_keep(spec, mode, it is not None
+                                   and it.checkState() == Qt.Checked)
                 if keep and words:
                     keep = (words in spec.label.lower()
                             or words in spec.path.lower()
