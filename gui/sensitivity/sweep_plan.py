@@ -17,8 +17,11 @@ Levels (per parameter, in displayed units)
 ------------------------------------------
 ``levels(lo, hi, n, spacing)``: n values from lo to hi, evenly spaced
 ("linear") or in geometric progression ("geometric", lo and hi > 0, e.g. a
-mass-scaling factor from 1 to 25600); or a list typed by hand
-(`parse_values`).
+mass-scaling factor from 1 to 25600); ``levels_step(lo, hi, step)`` and
+``levels_ratio(lo, hi, r)``: from lo by a step or a multiplier, Max always
+included (decision 2026-11-06: the last interval is shorter when the step
+overshoots, e.g. 0.1 -> 0.5 by 0.15 gives 0.1, 0.25, 0.4, 0.5); or a list
+typed by hand (`parse_values`).
 
 Analysis (per QoI, `analyze`)
 -----------------------------
@@ -47,7 +50,14 @@ from gui.sensitivity import param_registry as pr
 
 DESIGNS = ("sweep", "grid")
 SPACINGS = ("linear", "geometric")
+# Per-row spacings of the Explore table: (key, label, what the value is)
+ROW_SPACINGS = (("linear_n", "linear, n values", "n"),
+                ("linear_step", "linear, step", "step"),
+                ("geometric_n", "geometric, n values", "n"),
+                ("geometric_ratio", "geometric, ratio", "ratio"))
 DEFAULT_LEVELS = 5          # a choice (example of the 2026-10-23 report)
+MAX_LEVELS = 200            # guard against a step typed far too small
+_ON_MAX = 1e-12             # relative: a value this close to Max is Max
 
 
 def levels(lo: float, hi: float, n: int, spacing: str = "linear"
@@ -66,6 +76,94 @@ def levels(lo: float, hi: float, n: int, spacing: str = "linear"
             raise ValueError("Geometric levels need Min and Max > 0.")
         return np.geomspace(lo, hi, n)
     raise ValueError("spacing must be one of %s" % (SPACINGS,))
+
+
+def _check_range(lo, hi):
+    lo, hi = float(lo), float(hi)
+    if not (math.isfinite(lo) and math.isfinite(hi)) or not hi > lo:
+        raise ValueError("Max must be greater than Min.")
+    return lo, hi
+
+
+def _close_on_max(vals, hi):
+    """Append Max unless the last value already is Max (within 1e-12)."""
+    if vals and math.isclose(vals[-1], hi, rel_tol=_ON_MAX,
+                             abs_tol=_ON_MAX * abs(hi)):
+        vals[-1] = hi
+    else:
+        vals.append(hi)
+    if len(vals) > MAX_LEVELS:
+        raise ValueError("That gives %d values (more than %d): use a larger "
+                         "step or ratio." % (len(vals), MAX_LEVELS))
+    return np.array(vals, dtype=float)
+
+
+def levels_step(lo: float, hi: float, step: float) -> np.ndarray:
+    """Min, Min + step, ... while below Max, then Max (the last interval is
+    shorter when the step overshoots)."""
+    lo, hi = _check_range(lo, hi)
+    step = float(step)
+    if not (math.isfinite(step) and step > 0):
+        raise ValueError("The step must be a number > 0.")
+    tol = _ON_MAX * (hi - lo)
+    vals, k = [], 0
+    while True:
+        v = lo + k * step
+        if v > hi - tol or len(vals) > MAX_LEVELS:
+            break
+        vals.append(v)
+        k += 1
+    return _close_on_max(vals, hi)
+
+
+def levels_ratio(lo: float, hi: float, ratio: float) -> np.ndarray:
+    """Min, Min x r, Min x r^2, ... while below Max, then Max (Min > 0,
+    r > 1; the last ratio is smaller when r overshoots)."""
+    lo, hi = _check_range(lo, hi)
+    ratio = float(ratio)
+    if lo <= 0:
+        raise ValueError("A ratio needs Min > 0.")
+    if not (math.isfinite(ratio) and ratio > 1):
+        raise ValueError("The ratio must be a number > 1.")
+    vals, k = [], 0
+    while True:
+        v = lo * ratio ** k
+        if v > hi * (1 - _ON_MAX) or len(vals) > MAX_LEVELS:
+            break
+        vals.append(v)
+        k += 1
+    return _close_on_max(vals, hi)
+
+
+def row_levels(lo: float, hi: float, how: str, value: float) -> np.ndarray:
+    """Levels of a row of the Explore table: `how` one of ROW_SPACINGS,
+    `value` its n, step or ratio."""
+    if how == "linear_n":
+        return levels(lo, hi, _as_n(value), "linear")
+    if how == "geometric_n":
+        return levels(lo, hi, _as_n(value), "geometric")
+    if how == "linear_step":
+        return levels_step(lo, hi, value)
+    if how == "geometric_ratio":
+        return levels_ratio(lo, hi, value)
+    raise ValueError("Unknown spacing %r." % how)
+
+
+def _as_n(value) -> int:
+    n = float(value)
+    if not n.is_integer() or not 2 <= n <= MAX_LEVELS:
+        raise ValueError("n must be a whole number from 2 to %d."
+                         % MAX_LEVELS)
+    return int(n)
+
+
+def spacing_record(how: str, value) -> str:
+    """How a row's levels were made, for the plan record and the chart:
+    "linear" / "geometric" (n values), "linear step=<s>",
+    "geometric ratio=<r>"."""
+    return {"linear_n": "linear", "geometric_n": "geometric",
+            "linear_step": "linear step=%g" % float(value),
+            "geometric_ratio": "geometric ratio=%g" % float(value)}[how]
 
 
 def parse_values(text: str) -> Optional[np.ndarray]:
