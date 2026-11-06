@@ -204,3 +204,25 @@ def test_worker_reuses_a_finished_run(qapp, tmp_path):
     assert launched == [1] and w.n_reused == 1
     assert any((new / n).exists() or (new / "sweep_run000" / n).exists()
                for n in ("sweep_run000.results.npz",))
+
+
+def test_compare_two_selected_runs(qapp, tmp_path):
+    from PySide6.QtCore import QItemSelectionModel
+    tab = _tab("grid", (MU, VC))
+    for p, vals in ((MU, "0.2 0.4"), (VC, "20; 40")):
+        tab.table.item(_row(tab, p), 9).setText(vals)
+    tab._on_generate()
+    res = _fake_result(tab)
+    tab._last_result = res
+    tab._run_workdir = tmp_path
+    tab._show_results(res)
+    assert not tab.btn_compare_runs.isEnabled()
+    sm = tab.results_table.selectionModel()
+    for r in (3, 0):                       # run 4, then the Ref run
+        sm.select(tab.results_table.model().index(r, 0),
+                  QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    assert tab.btn_compare_runs.isEnabled()
+    got = []
+    tab.compareRunsRequested.connect(lambda *a: got.append(a))
+    tab.btn_compare_runs.click()
+    assert got == [(str(tmp_path), "grid_run000", "grid_run003")]

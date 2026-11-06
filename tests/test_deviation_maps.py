@@ -406,3 +406,94 @@ def test_run_of_file_and_measured_size(tmp_path):
     with pytest.raises(ValueError):
         dm.run_of_file(tmp_path / "r.txt")
     assert dm.bundle_elem_size(_Bundle(h=0.005)) == pytest.approx(0.005)
+
+
+# ---------------------------------------------------------------------------
+# Runs of a parameter plan (2026-11-04)
+# ---------------------------------------------------------------------------
+def _plan_folder(tmp_path, model_qoi=True):
+    """A grid plan folder (config.json as the Parameter plans tab writes
+    it) with three finished runs, the second being the Ref run."""
+    from gui.results.fake_builder import build_fake_results
+    folder = tmp_path / "PC__prof__grid__2026-11-04_10-00-00"
+    folder.mkdir()
+    runs = [("grid_run000", "grid", {"interaction.friction_coeff": 0.2}),
+            ("grid_run001", "base", {"interaction.friction_coeff": 0.3}),
+            ("grid_run002", "grid", {"interaction.friction_coeff": 0.4})]
+    rec = {"plan_kind": "sweep", "design": "grid",
+           "varied_parameters": [{"path": "interaction.friction_coeff",
+                                  "label": "mu", "unit": ""}],
+           "runs": [{"run": i + 1, "job": j, "kind": k, "values": v}
+                    for i, (j, k, v) in enumerate(runs)]}
+    if model_qoi:
+        rec["model_qoi"] = {"zoi": [-0.05, 0.25, -0.1, 0.1],
+                            "window": [0.4, 1.0], "evf_threshold": 0.5,
+                            "eps": {"T": 7.0}}
+    (folder / "config.json").write_text(json.dumps({
+        "study": "grid", "parameters": rec}), encoding="utf-8")
+    for n, (job, _k, v) in enumerate(runs):
+        d = folder / job                           # one folder per run
+        d.mkdir()
+        _write_run(d, job, 1.0, 0.01)
+        params = json.loads((d / (job + ".meta.json")).read_text(
+            encoding="utf-8"))["model_config"]
+        params["interaction"] = {"friction_coeff": v[
+            "interaction.friction_coeff"]}
+        js, _npz = build_fake_results(d / (job + ".results.npz"),
+                                      job_name=job,
+                                      field_scale=1.0 + 0.02 * n, seed=n)
+        meta = json.loads(js.read_text(encoding="utf-8"))
+        meta["model_config"] = params
+        (d / (job + ".meta.json")).write_text(json.dumps(meta),
+                                               encoding="utf-8")
+    return folder
+
+
+def test_plan_of_folder_and_labels(tmp_path):
+    folder = _plan_folder(tmp_path)
+    info = dm.plan_of_folder(folder)
+    assert info.study == "grid" and info.base_job == "grid_run001"
+    assert dm.plan_run_label(info, "grid_run001") == \
+        "mu 0.3 | grid_run001 (Ref)"
+    assert dm.plan_run_label(info, "nope") is None
+    # a sizing study folder is not a plan
+    assert dm.plan_of_folder(_study_folder(tmp_path)) is None
+    setup = _settings()
+    s = dm.plan_settings(info, folder, setup)
+    assert s.step is None and s.share == 1.0
+    assert s.zoi == (-0.05, 0.25, -0.1, 0.1) and s.window == (0.4, 1.0)
+    assert s.thresholds["T"] == 7.0 and s.thresholds["Vx"] == _THR["Vx"]
+    assert s.grid_step == setup.grid_step and "Setup tab" in s.source
+    # no frozen ZOI: the Setup settings
+    (tmp_path / "b").mkdir()
+    info2 = dm.plan_of_folder(_plan_folder(tmp_path / "b", model_qoi=False))
+    s2 = dm.plan_settings(info2, tmp_path / "b", setup)
+    assert info2.model_qoi is None
+    assert s2.zoi == setup.zoi and s2.step is None
+    with pytest.raises(ValueError):
+        dm.plan_settings(info2, tmp_path / "b", None)
+
+
+def test_window_compares_two_runs_of_a_plan(qapp, tmp_path, monkeypatch):
+    import gui.widgets.compare_runs_panel as dlg_mod
+    monkeypatch.setattr(dlg_mod, "run_async",
+                        lambda fn, done, parent: done(fn()))
+
+    def _no_box(*a, **k):
+        raise AssertionError("message box: %r" % (a[2:],))
+    monkeypatch.setattr(dlg_mod.QMessageBox, "warning", _no_box)
+    folder = _plan_folder(tmp_path)
+    dlg = dlg_mod.CompareRunsPanel(folders=[str(folder)],
+                                   settings_getter=_settings)
+    assert dlg.cb_a.count() == 3
+    assert dlg.cb_a.currentText() == "mu 0.3 | grid_run001 (Ref)"
+    assert dlg.select_pair(folder, "grid_run001", "grid_run002")
+    assert dlg.cb_b.currentText().startswith("mu 0.4 | grid_run002")
+    dlg._on_compare()
+    assert dlg._pair is not None
+    assert dlg._pair.settings.thresholds["T"] == 7.0
+    assert "Threshold: ε_q itself" in dlg.lbl_summary.text()
+    dlg.cb_q.setCurrentText("T")
+    dev = dlg.fig_dev.axes[0]
+    assert any(ln.get_label() == "threshold = ε" for ln in dev.lines)
+    assert not dlg.select_pair(folder, "grid_run001", "missing")

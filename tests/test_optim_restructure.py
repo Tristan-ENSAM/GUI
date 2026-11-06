@@ -92,3 +92,16 @@ def test_compare_tab_uses_the_setup_settings(qapp):
     w = MainWindow(); w._dirty = False
     s = w.compare_tab._settings_getter
     assert s == w.optimization_tab.compare_settings
+
+
+def test_compare_tab_lists_the_plan_folders(qapp, tmp_path):
+    from gui.main import MainWindow
+    w = MainWindow(); w._dirty = False
+    for name in ("PC__p__grid__2026-11-04_10-00-00",
+                 "PC__p__sweep__2026-11-04_11-00-00",
+                 "PC__p__ms__2026-11-04_09-00-00"):
+        (tmp_path / name).mkdir()
+    w.prefs.default_workdir = str(tmp_path)
+    got = [p.split("/")[-1].split("\\")[-1] for p in w._plan_folders()]
+    assert got == ["PC__p__grid__2026-11-04_10-00-00",
+                   "PC__p__sweep__2026-11-04_11-00-00"]
