@@ -56,6 +56,7 @@ from gui.core.domain_sizing import DomainDims
 from gui.core.model_config import OptimizationCfg as _OptimizationCfg
 from gui.core.logging_util import log_swallowed
 from gui.sensitivity.mesh_gci_worker import MeshGciWorker
+from gui.sensitivity.domain_richardson_worker import DomainRichardsonWorker
 from gui.core.tool_geometry_calc import tool_nose_points
 from gui.sensitivity.domain_independence import (
     dims_union, initial_dims_by_hand, initial_dims_from_zoi, zoi_inside)
@@ -791,6 +792,25 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "The domain diagonal only raises a warning.")
         self.btn_domain.clicked.connect(self._on_run_domain_independence)
         btn_row.addWidget(self.btn_domain)
+        # Richardson test on the domain (decision 2026-11-06): measures
+        # whether the boundary influence decays as a power of 1/L; it does
+        # not change D*.
+        self.btn_dom_rich = QPushButton("Richardson test (3 domains)")
+        self.btn_dom_rich.setToolTip(
+            "Runs the Eulerian domain of the model (D), r·D and r²·D\n"
+            "(the four sides multiplied by the same factor r, rounded up to\n"
+            "whole elements), at the element size and mass scaling of the\n"
+            "model. Per QoI: observed order p in 1/L, value extrapolated to\n"
+            "an infinite domain, and deviation of each domain against it in\n"
+            "eps_q x the domain share. When p < 0.5 or the series is not\n"
+            "monotone, the reference is the largest domain.\n"
+            "A test only: D* and the domain step are not changed.")
+        self.btn_dom_rich.clicked.connect(self._on_run_domain_richardson)
+        btn_row.addWidget(self.btn_dom_rich)
+        btn_row.addWidget(QLabel("r"))
+        self.le_dom_rich_ratio = num_edit(
+            "1.5", tip="Ratio r of the Richardson domain series (> 1).")
+        btn_row.addWidget(self.le_dom_rich_ratio)
         btn_row.addStretch(1)
         dv.addLayout(btn_row)
         dv.addLayout(status_row("domain"))
@@ -1359,7 +1379,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         there would replace the one the pipeline starts next)."""
         running = bool(self._is_busy or self._pipeline)
         for b in (self.btn_ms, self.btn_mesh, self.btn_domain, self.btn_all,
-                  self.btn_open):
+                  self.btn_open, self.btn_dom_rich):
             b.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
         # The checks button and the "Use in model" buttons.
@@ -1403,7 +1423,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._cancel_evt.set()
         workers = []
         for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
-                     "_ms_worker"):
+                     "_ms_worker", "_dr_worker"):
             w = getattr(self, attr, None)
             if w is None or not w.isRunning():
                 continue
@@ -1826,7 +1846,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         def stop_study():
             self._cancel_evt.set()
             for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
-                         "_ms_worker"):
+                         "_ms_worker", "_dr_worker"):
                 w = getattr(self, attr, None)
                 if w is not None and hasattr(w, "cancel"):
                     w.cancel()
@@ -3640,6 +3660,156 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._after_study("mesh", res)
 
     # ===================================================================
+    # Richardson test on the domain (a measurement, not a step result)
+    # ===================================================================
+    def _domain_richardson_spec(self):
+        """Settings of a Richardson test on the domain, or None after a
+        warning."""
+        title = "Richardson test on the domain"
+        if not self.thresholds_complete():
+            QMessageBox.warning(
+                self, title,
+                "Set the six absolute tolerances eps_q of the Setup tab "
+                "(Vx, Vy, T, EVF, Fc, Ff) first.")
+            return None
+        try:
+            window = self.window()
+        except ValueError as e:
+            QMessageBox.warning(self, "Time window", str(e))
+            return None
+        shares = self._shares_or_warn(title)
+        if shares is None:
+            return None
+        ratio = self._float_or(self.le_dom_rich_ratio, None)
+        if ratio is None or not ratio > 1.0:
+            QMessageBox.warning(self, title,
+                                "The ratio r of the series must be > 1.")
+            return None
+        return {
+            "study": "domain_richardson",
+            "zoi": self._zoi_dict(self.zoi()), "window": list(window),
+            "eps_shares": shares, "ratio": float(ratio), "n_levels": 3,
+            "elem_size": float(self.cfg.elem_size),
+            "grid_step": self.grid_step(),
+            "tolerances": self._gci_tolerances(),
+            "evf_threshold": 0.5,
+            "domain_dims": self._dims_dict(self._dims_from_cfg()),
+            "base_ms": self._base_ms(),
+            "filter_verify": bool(getattr(self.cfg.step,
+                                          "output_filter_verify", True))}
+
+    def _on_run_domain_richardson(self):
+        if self.is_running() or self._cannot_start("The Richardson test"):
+            return
+        spec = self._domain_richardson_spec()
+        if spec is None:
+            return
+        val = self._validate_launch()
+        if val is None:
+            return
+        prefs, wd, cpus = val
+        spec["cache_folders"] = (self._known_folders()
+                                 if self.cb_reuse_runs.isChecked() else [])
+        run_dir = self._study_run_dir(wd, "domainRichardson", spec)
+        self._start_domain_richardson(spec, Path(run_dir), prefs, cpus)
+
+    def _start_domain_richardson(self, spec, run_dir, prefs, cpus):
+        from gui.sensitivity.run_cache import RunCache
+        self._cancel_evt.clear()
+        self._study_offline = False
+        self._study_cache = RunCache(
+            [run_dir] + [f for f in (spec.get("cache_folders") or []) if f])
+        self._add_unclaimed_remote_runs(prefs)
+        run_bundle = self._make_run_bundle(prefs, run_dir, cpus, "domRich")
+        dims = DomainDims(**{k: float(spec["domain_dims"][k])
+                             for k in DIM_KEYS})
+        tol = _scaled(spec["tolerances"], spec, 2)
+        window = tuple(float(v) for v in spec["window"])
+        self._pending_dr = (run_dir, tol)
+        self.log.clear()
+        self._log_machine(prefs, run_dir)
+        self._busy(True, "Richardson test on the domain\u2026")
+        self._log_ui("=" * 68)
+        self._log_ui("RICHARDSON TEST ON THE DOMAIN: D, r D, r\u00b2 D, "
+                     "r = %.3g, h = %.4g mm (D* is not changed)"
+                     % (spec["ratio"], spec["elem_size"]))
+        self._log_ui("=" * 68)
+        self._retire_worker("_dr_worker")
+        self._dr_worker = DomainRichardsonWorker(
+            run_bundle, self._study_base_cfg(spec), zoi_tuple(spec), dims,
+            float(spec["elem_size"]), ratio=float(spec["ratio"]),
+            n_levels=int(spec["n_levels"]), tolerances=tol,
+            grid_step=float(spec["grid_step"]), window=window,
+            evf_threshold=float(spec["evf_threshold"]))
+        self._dr_worker.progress.connect(self._on_dr_progress)
+        self._dr_worker.finished_ok.connect(self._on_dr_done)
+        self._dr_worker.failed.connect(self._on_dr_failed)
+        self._start_progress()
+        self._dr_worker.start()
+        return True
+
+    def _on_dr_progress(self, ev):
+        d = ev.get("dims")
+        self._log_ui("  domain %d (scale %.3g): l_wp=%.4g h_wp=%.4g "
+                     "l_void=%.4g h_void=%.4g -> %s" % (
+                         ev.get("level", 0) + 1, ev.get("scale", 1.0),
+                         d.l_wp, d.h_wp, d.l_void, d.h_void,
+                         "  ".join("%s=%.4g" % (q, v) for q, v in
+                                   sorted(ev.get("scalars", {}).items())
+                                   if v is not None)))
+
+    def _on_dr_failed(self, msg):
+        self._stop_progress()
+        self._busy(False)
+        self.lbl_status.setStyleSheet("color: #b91c1c;")
+        self.lbl_status.setText("Richardson test failed: %s" % msg)
+        self._log_ui("ERROR: %s" % msg)
+
+    def _on_dr_done(self, res):
+        import json
+        self._stop_progress()
+        self._busy(False)
+        folder, _tol = getattr(self, "_pending_dr", (None, {}))
+        self._last_domain_richardson = res
+        if res.stopped_by != "ok":
+            self.lbl_status.setStyleSheet("color: #b45309;")
+            self.lbl_status.setText("Richardson test stopped (%s)"
+                                    % (res.message or res.stopped_by))
+            self._log_ui("Richardson test stopped: %s"
+                         % (res.message or res.stopped_by))
+        else:
+            self._log_ui("RICHARDSON TEST RESULT (reference: Richardson when "
+                         "p >= 0.5 and monotone, else the largest domain)")
+            for q, g in sorted(res.per_quantity.items()):
+                self._log_ui(
+                    "  %-5s p=%.3g  f_inf=%.4g  f_largest=%.4g  asym=%.3g  "
+                    "ref=%s%s" % (q, g.p, g.f_extrapolated, g.f_fine,
+                                  g.asymptotic_ratio,
+                                  res.reference_kind.get(q, "?"),
+                                  "" if g.monotonic else "  (non-monotone)"))
+            for k, dev in enumerate(res.deviation):
+                self._log_ui("  domain %d: %s" % (k + 1, "  ".join(
+                    "%s E/eps=%.3g" % (q, v) for q, v in sorted(dev.items()))))
+            sp = res.smallest_passing
+            self._log_ui("  smallest domain within eps_q: %s"
+                         % ("none" if sp is None else "domain %d" % (sp + 1)))
+            self._log_ui("  power law in 1/L for every QoI: %s"
+                         % ("yes" if res.power_law else "no"))
+            self.lbl_status.setStyleSheet(
+                "color: %s;" % ("#15803d" if res.power_law else "#b45309"))
+            self.lbl_status.setText(
+                "Richardson test on the domain \u2014 power law: %s"
+                % ("yes" if res.power_law else "no (fallback: largest)"))
+        if folder is not None:
+            try:
+                (Path(folder) / "domain_richardson.json").write_text(
+                    json.dumps(res.record(), indent=1), encoding="utf-8")
+                self._log_ui("[EXPORT] domain_richardson.json -> %s" % folder)
+            except Exception as e:
+                self._log_ui("[EXPORT] failed: %s: %s"
+                             % (type(e).__name__, e))
+
+    # ===================================================================
     # Cancel / failure
     # ===================================================================
     def _on_cancel(self):
@@ -3666,7 +3836,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         usable result" -- so a half-written bundle is never read as data.
         """
         for attr in ("_di_worker", "_mesh_worker", "_checks_worker",
-                     "_ms_worker"):
+                     "_ms_worker", "_dr_worker"):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
                 w.cancel()
