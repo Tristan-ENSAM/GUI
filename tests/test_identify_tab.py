@@ -70,7 +70,8 @@ def test_tables_and_collect(qapp):
         tab.collect_targets()
     tab.set_reference({q: 1.0 for q in mq.MODEL_QOIS}, "typed")
     qois, targets, st = tab.collect_targets()
-    assert qois == list(mq.MODEL_QOIS) and len(targets) == 6
+    # The chip thickness is not ticked by default.
+    assert qois == list(mq.SIZING_QOIS) and len(targets) == 6
     assert targets[0].eps == 10.0 and st["window"] == (0.3, 1.0)
 
 

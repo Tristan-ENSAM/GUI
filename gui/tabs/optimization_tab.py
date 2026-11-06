@@ -437,6 +437,38 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             eps_row.addSpacing(10)
         eps_row.addStretch(1)
         cg0.addLayout(eps_row, 1, 1)
+        # Chip thickness e: a QoI of Explore / Sensitivity / Identify only
+        # (the sizing studies keep their six quantities).
+        lab_e = QLabel("chip thickness e")
+        tip_e = (
+            "e: width of the chip on a line parallel to the cutting\n"
+            "direction, at the height y0 above the workpiece, from the rake\n"
+            "face to the free surface of the chip (EVF \u2265 0.5), averaged\n"
+            "over the window T, as measured on high-speed camera images.\n"
+            "Used by Explore, Sensitivity and Identify, not by the sizing\n"
+            "studies.")
+        lab_e.setToolTip(tip_e)
+        cg0.addWidget(lab_e, 2, 0)
+        e_row = QHBoxLayout()
+        e_row.setSpacing(4)
+        e_row.addWidget(QLabel("\u03b5_e"))
+        self.le_chip_eps = num_edit(
+            placeholder="mm", tip="Admitted deviation of e [mm]. Default "
+            "0.005 mm (a choice: about 1.5 pixel of a 3 \u00b5m/px camera; "
+            "set it from the camera of your tests).")
+        self.le_chip_eps.setFixedWidth(64)
+        e_row.addWidget(self.le_chip_eps)
+        e_row.addWidget(QLabel("mm"))
+        e_row.addSpacing(10)
+        e_row.addWidget(QLabel("line height y0"))
+        self.le_chip_y0 = num_edit(
+            placeholder="= t1", tip="Height of the measuring line above the "
+            "workpiece [mm]. Empty = the uncut chip thickness t1.")
+        self.le_chip_y0.setFixedWidth(64)
+        e_row.addWidget(self.le_chip_y0)
+        e_row.addWidget(QLabel("mm"))
+        e_row.addStretch(1)
+        cg0.addLayout(e_row, 2, 1)
         cg0.setColumnStretch(1, 1)
         cv0.addWidget(setup_hint(
             "ε_q: defaults are those of the reference case (Ti6Al4V). "
@@ -1194,6 +1226,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                self.le_ms_factor, self.le_ms_stop, self.le_ms_max]
         les += list(self.le_zoi.values())
         les += list(self._q_eps.values())
+        les += [self.le_chip_eps, self.le_chip_y0]
         les += list(self._eps_share.values())
         les += list(self._max.values())
         les += list(self._dom_texts.values())
@@ -1247,6 +1280,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.zoi = {k: self.le_zoi[k].text()
                  for k in ("xmin", "xmax", "ymin", "ymax")}
         o.criterion_rmse = {q: le.text() for q, le in self._q_eps.items()}
+        o.chip_eps = self.le_chip_eps.text()
+        o.chip_y0 = self.le_chip_y0.text()
         for step, le in self._eps_share.items():
             setattr(o, "eps_share_" + step, le.text())
         o.gci_finest = self.le_gci_finest.text()
@@ -1291,6 +1326,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 self.le_zoi[k].setText(str(o.zoi.get(k, "")))
             for q, le in self._q_eps.items():
                 le.setText(str(o.criterion_rmse.get(q, "")))
+            self.le_chip_eps.setText(str(getattr(o, "chip_eps", "0.005")))
+            self.le_chip_y0.setText(str(getattr(o, "chip_y0", "")))
             for step, le in self._eps_share.items():
                 attr = "eps_share_" + step
                 le.setText(str(getattr(o, attr, getattr(
@@ -2150,8 +2187,13 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         """eps_q, the window T, the ZOI and the EVF threshold, for the ZOI
         proposal and the QoI of the Parameter plans tab (same values as the
         studies of this tab)."""
-        return {"eps": self.thresholds(), "window": self.window(),
-                "zoi": self.zoi(), "evf_threshold": 0.5}
+        eps = dict(self.thresholds())
+        e = self._float_or(self.le_chip_eps, None)
+        if e is not None and e > 0:
+            eps["e"] = e
+        return {"eps": eps, "window": self.window(),
+                "zoi": self.zoi(), "evf_threshold": 0.5,
+                "chip_y0": self._float_or(self.le_chip_y0, None)}
 
     def _zoi_from_roi(self):
         for k, v in zip(("xmin", "xmax", "ymin", "ymax"),
