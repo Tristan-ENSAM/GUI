@@ -312,8 +312,8 @@ class StepTab(QWidget):
             "           filter ... is too low' (possible filter instability;\n"
             "           the run goes on and the filter is applied);\n"
             "  > 0.5  : NO filtering at all, silently (Analysis Guide).\n"
-            "The finest GCI mesh (Optimization > Model sizing) has the smallest\n"
-            "increment, hence the binding lower bound.")
+            "The finest GCI mesh (Optimization > Identify, Model sizing) has\n"
+            "the smallest increment, hence the binding lower bound.")
         v.addWidget(self.lbl_filter_check)
 
         # ---- Admissible mass-scaling window (computed, no run needed) ------

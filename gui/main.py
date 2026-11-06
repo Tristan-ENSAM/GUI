@@ -33,6 +33,7 @@ from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
 from gui.tabs.identify_tab import IdentifyTab
+from gui.tabs.identify_modes import IdentifyModes
 from gui.tabs.sensitivity_tab import (
     SensitivityTab, EXPLORE_METHODS, SENSITIVITY_METHODS)
 from gui.tabs.optimization_tab import OptimizationTab
@@ -166,13 +167,19 @@ class MainWindow(QMainWindow):
         self.compare_tab = CompareRunsPanel(
             folders=self.optimization_tab.known_folders(), start_dir=_wd,
             settings_getter=self.optimization_tab.compare_settings)
+        # Model sizing is the identification of the numerical parameters
+        # against a numerical reference (decision 2026-11-06): one Identify
+        # tab with two modes, Model sizing and Physical parameters.
+        self.identify_modes = IdentifyModes(self.optimization_tab,
+                                            self.identify_tab)
+        self.identify_modes.modeChanged.connect(
+            self._refresh_sensitivity_if_visible)
         self.opt_tabs = QTabWidget()
         self.opt_tabs.addTab(self.setup_tab,         "1 · Setup")
-        self.opt_tabs.addTab(self.optimization_tab,  "2 · Model sizing")
-        self.opt_tabs.addTab(self.explore_tab,       "3 · Explore")
-        self.opt_tabs.addTab(self.sensitivity_tab,   "4 · Sensitivity")
-        self.opt_tabs.addTab(self.identify_tab,      "5 · Identify")
-        self.opt_tabs.addTab(self.compare_tab,       "6 · Compare runs")
+        self.opt_tabs.addTab(self.explore_tab,       "2 · Explore")
+        self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Sensitivity")
+        self.opt_tabs.addTab(self.identify_modes,    "4 · Identify")
+        self.opt_tabs.addTab(self.compare_tab,       "5 · Compare runs")
         # Opening Compare runs lists the study folders made since.
         self.opt_tabs.currentChanged.connect(self._refresh_compare_if_visible)
         self.optimization_tab.compareRequested.connect(self._show_compare)
@@ -486,8 +493,8 @@ class MainWindow(QMainWindow):
         if running:
             QMessageBox.information(
                 self, title,
-                "A study of the Model sizing tab (Optimization > Model sizing) is "
-                "running. "
+                "A Model sizing study (Optimization > Identify, mode Model "
+                "sizing) is running. "
                 "Its results go into the current profile: wait for it to end, "
                 "or cancel it, before opening another profile.")
         return running
@@ -621,6 +628,8 @@ class MainWindow(QMainWindow):
         only when Sensitivity is actually the page on screen (so we don't
         rebuild its table on every unrelated tab switch)."""
         page = self.opt_tabs.currentWidget()
+        if page is self.identify_modes:
+            page = page.current_page()
         if (self.tabs.currentWidget() is self.opt_tabs
                 and (page in self._plan_tabs()
                      or page is self.identify_tab)):

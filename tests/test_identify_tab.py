@@ -158,5 +158,37 @@ def test_worker_reports_a_failed_run(qapp, monkeypatch, tmp_path):
 def test_main_window_has_identify(qapp):
     from gui.main import MainWindow
     w = MainWindow(); w._dirty = False
-    assert w.opt_tabs.widget(4) is w.identify_tab
+    assert w.opt_tabs.widget(3) is w.identify_modes
     assert w.identify_tab._model_settings_getter is not None
+
+
+def test_identify_modes_hold_sizing_and_physical(qapp):
+    from gui.main import MainWindow
+    from gui.tabs import identify_modes as im
+    w = MainWindow(); w._dirty = False
+    m = w.identify_modes
+    # Model sizing first: it comes before the physical identification.
+    assert m.mode() == im.MODE_SIZING
+    assert m.current_page() is w.optimization_tab
+    seen = []
+    m.modeChanged.connect(seen.append)
+    m.set_mode(im.MODE_PHYSICAL)
+    assert m.current_page() is w.identify_tab
+    assert seen == [im.MODE_PHYSICAL]
+    m.show_page(w.optimization_tab)
+    assert m.mode() == im.MODE_SIZING
+    with pytest.raises(ValueError):
+        m.set_mode("nope")
+
+
+def test_physical_mode_refreshes_ref_column(qapp, monkeypatch):
+    from gui.main import MainWindow
+    from gui.tabs import identify_modes as im
+    w = MainWindow(); w._dirty = False
+    w.tabs.setCurrentWidget(w.opt_tabs)
+    w.opt_tabs.setCurrentWidget(w.identify_modes)
+    calls = []
+    monkeypatch.setattr(w.identify_tab, "refresh_from_model",
+                        lambda: calls.append(1))
+    w.identify_modes.set_mode(im.MODE_PHYSICAL)
+    assert calls == [1]

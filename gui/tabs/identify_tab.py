@@ -133,7 +133,6 @@ class IdentifyTab(QWidget):
         help_lbl.setVisible(False)
         self.lbl_intro = help_lbl
         top = QHBoxLayout()
-        top.addWidget(QLabel("Mode: Physical parameters"))
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.toggled.connect(help_lbl.setVisible)
