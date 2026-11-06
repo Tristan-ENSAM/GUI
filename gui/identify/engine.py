@@ -444,6 +444,13 @@ class Identification:
         best = self._best()
         return self._result(status, best[0], best[1], msg)
 
+    def snapshot(self, status: str = "running",
+                 message: str = "") -> IdentifyResult:
+        """The search so far (best point, evaluations, iterations), e.g. to
+        save the history after each iteration."""
+        x, q = self._best()
+        return self._result(status, x, q, message)
+
     def _best(self):
         """Point of lowest J among the evaluations (the search point on
         ties)."""
