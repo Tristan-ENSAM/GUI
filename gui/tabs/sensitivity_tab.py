@@ -761,7 +761,12 @@ class SensitivityTab(QWidget):
                 note = _note_of(spec)
                 it_note = QTableWidgetItem(_NOTE_TEXT.get(note, ""))
                 it_note.setFlags(Qt.ItemIsEnabled)
-                it_note.setToolTip(_NOTE_TIP.get(note, ""))
+                tip = _NOTE_TIP.get(note, "")
+                if spec.path in pr.EULER_MESH_PATHS:
+                    tip += ("\nThe Eulerian mesh changes: no per-element "
+                            "field sensitivity or map for this parameter "
+                            "(the scalar QoI are computed).")
+                it_note.setToolTip(tip)
                 if note:
                     from PySide6.QtGui import QColor
                     it_note.setForeground(QColor("#b45309" if note == "remesh"

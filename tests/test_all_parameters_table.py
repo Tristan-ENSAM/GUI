@@ -129,3 +129,27 @@ def test_main_window_wires_both_tabs(qapp):
     assert w.explore_tab is not w.sensitivity_tab
     assert w.explore_tab._model_settings_getter is not None
     assert w.sensitivity_tab._known_folders_getter is not None
+
+
+def test_no_element_map_when_the_eulerian_mesh_changes():
+    """elem_size gives another Eulerian mesh: its field sensitivity and map
+    are NaN ('mesh changes'), a physical parameter keeps its map."""
+    import numpy as np
+    from gui.sensitivity import jacobian_plan as jac
+    from gui.sensitivity import runner_core as rc
+    specs = [pr.spec_for("elem_size"), pr.spec_for("interaction.friction_coeff")]
+    plan = jac.build_plan([(specs[0], 0.005, 0.001, False),
+                           (specs[1], 0.3, 0.03, False)], scheme="forward")
+
+    class B:
+        def __init__(self, v):
+            self.v = v
+
+        def field(self, inst, var):
+            return np.full((3, 4), self.v)
+    bundles = [B(float(i)) for i in range(plan.n_runs)]
+    maps = rc.jacobian_field_maps(plan, bundles, ["V1"], instance="I")
+    assert np.isnan(maps["V1"]["elem_size"]).all()
+    assert not np.isnan(maps["V1"]["interaction.friction_coeff"]).any()
+    fa = rc.jacobian_field_analysis(plan, bundles, ["V1"], instance="I")
+    assert fa["V1"]["elem_size"]["scheme_used"] == "mesh changes"

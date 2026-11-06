@@ -30,6 +30,7 @@ from gui.sensitivity import morris_plan as mp
 from gui.sensitivity import jacobian_plan as jac
 from gui.sensitivity import sweep_plan as sw
 from gui.sensitivity import field_metrics as fm
+from gui.sensitivity import param_registry as pr
 from gui.core.logging_util import log_swallowed
 
 
@@ -99,6 +100,11 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
         per_param = {}
         for i, spec in enumerate(plan.specs):
             d = plan.deltas[i]
+            if spec.path in pr.EULER_MESH_PATHS:
+                # another Eulerian mesh: no element-by-element difference
+                per_param[spec.path] = {"sensitivity": nan, "rel_pct": nan,
+                                        "scheme_used": "mesh changes"}
+                continue
             used = jac.central_fallback(plan, i, fields.ok)
             val = rel = nan
             try:
@@ -180,6 +186,12 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None,
         per_param = {}
         used_per = {}
         for i, spec in enumerate(plan.specs):
+            if spec.path in pr.EULER_MESH_PATHS:
+                # another Eulerian mesh: no element-by-element difference
+                per_param[spec.path] = np.full(
+                    np.asarray(base_field, float).shape, np.nan)
+                used_per[spec.path] = "mesh changes"
+                continue
             used = jac.central_fallback(plan, i, fields.ok)
             try:
                 if used is None:

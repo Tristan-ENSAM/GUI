@@ -312,6 +312,16 @@ def _non_material_specs() -> list[ParamSpec]:
     ]
 
 
+# Values whose change rebuilds the Eulerian mesh (element count or element
+# positions): the element fields of two runs are then not comparable
+# element by element, so no per-element field difference is computed.
+EULER_MESH_PATHS = frozenset({
+    "elem_size", "euler_geometry.h_wp", "euler_geometry.l_wp",
+    "euler_geometry.h_void", "euler_geometry.l_void",
+    "euler_position.x0", "euler_position.y0",
+})
+
+
 # Tool material: the keys the model writes for the tool (no Johnson-Cook).
 _TOOL_MAT_KEYS = ("rho", "E", "nu", "k", "Cp", "alpha")
 
