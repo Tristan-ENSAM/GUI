@@ -26,8 +26,8 @@ def _row(tab, path):
 
 
 def _tab(design="sweep", paths=(MU,)):
-    from gui.tabs.sensitivity_tab import SensitivityTab
-    tab = SensitivityTab(ModelConfig())
+    from tests.conftest import _connected_tab as connected_tab
+    tab = connected_tab()
     tab.cb_method.setCurrentIndex({"sweep": 2, "grid": 3}[design])
     for p in paths:
         tab.table.item(_row(tab, p), 0).setCheckState(Qt.Checked)

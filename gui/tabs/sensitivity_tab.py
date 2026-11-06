@@ -60,14 +60,6 @@ from gui.results import qoi as qoi_mod
 from gui.core.logging_util import log_swallowed
 import logging
 
-# "Other" QoI ticked by default when the tab runs without the Model tab
-# (standalone): the ones we can also measure on the planing rig (cutting/feed
-# forces and peak temperature). In the main window the Model-tab QoI are
-# ticked instead.
-_DEFAULT_QOIS = ("Fx_mean", "Fy_mean", "T_max")
-# Registry QoI not offered under "Other": Fc / Ff are the Model-tab QoI
-# (window T of the Model tab, not the warm-up fraction).
-_HIDDEN_LEGACY_QOIS = ("Fc", "Ff")
 
 # Every registered parameter is offered (decision 2026-11-06): geometry,
 # mesh and outputs too. Those that rebuild the mesh or only change the
@@ -393,33 +385,11 @@ class SensitivityTab(QWidget):
                      1, 2)
         qoi_row.addWidget(model_box, 1)
 
-        qoi_box = QGroupBox("Other QoI (no \u03b5_q)")
-        qg = QGridLayout(qoi_box)
+        # The "Other QoI" (Fx/Fy mean and max, T_max, PEEQ_max) and their
+        # warm-up fraction were removed (QoI sort of 2026-11-06): the plans
+        # use the QoI of the sizing studies, judged against eps_q. Old plan
+        # folders that hold them are still read.
         self._qoi_checks = {}
-        legacy = [q for q in qoi_mod.REGISTRY
-                  if q.id not in _HIDDEN_LEGACY_QOIS]
-        for i, q in enumerate(legacy):
-            cb = QCheckBox("%s  [%s]" % (q.label, q.unit))
-            cb.setChecked(q.id in _DEFAULT_QOIS)
-            self._qoi_checks[q.id] = cb
-            cb.toggled.connect(self._mark_plan_stale)
-            qg.addWidget(cb, i // 2, i % 2)
-        wrow = QHBoxLayout()
-        wrow.addWidget(QLabel("Warm-up (force history):"))
-        self.spin_warmup = QDoubleSpinBox()
-        self.spin_warmup.setRange(0.0, 0.9)
-        self.spin_warmup.setSingleStep(0.05)
-        self.spin_warmup.setDecimals(2)
-        self.spin_warmup.setValue(0.0)
-        self.spin_warmup.setToolTip(
-            "Fraction of the RF1/RF2 history ignored at the start (tool\n"
-            "entering the material) before the force QoI of this group are\n"
-            "computed (mean AND max). 0 = use the whole signal. T_max and\n"
-            "PEEQ_max, and the Model-tab QoI (window T), are not affected.")
-        wrow.addWidget(self.spin_warmup)
-        wrow.addStretch(1)
-        qg.addLayout(wrow, (len(legacy) + 1) // 2, 0, 1, 2)
-        qoi_row.addWidget(qoi_box, 1)
         bl.addLayout(qoi_row)
 
         # Field QoI: screen how much each parameter moves whole Eulerian
@@ -1579,7 +1549,7 @@ class SensitivityTab(QWidget):
             copy.deepcopy(self.cfg),
             abaqus_cmd=prefs.abaqus_cmd, abaqus_script=prefs.abaqus_script,
             workdir=str(wd), cpus=cpus,
-            warmup_frac=float(self.spin_warmup.value()),
+            warmup_frac=0.0,
             job_prefix=self._run_job_prefix, field_vars=field_vars,
             eps=(self._plan_model_qoi or {}).get("eps"),
             remote_prefs=prefs if is_remote(prefs) else None,
@@ -1675,7 +1645,7 @@ class SensitivityTab(QWidget):
                                       and self.chk_full_domain.isChecked(),
                "cpus": int(cpus),
                "machine": self.cmb_machine.machine_label(),
-               "warmup_frac": float(self.spin_warmup.value()),
+               "warmup_frac": 0.0,
                "temp_unit": tu,
                "unit_system": (system.to_dict()
                                if hasattr(system, "to_dict") else None),
@@ -2074,13 +2044,6 @@ class SensitivityTab(QWidget):
             cb.setEnabled(on)
             cb.setChecked(on)
             cb.blockSignals(False)
-        if on:
-            for qid in _DEFAULT_QOIS:
-                cb = self._qoi_checks.get(qid)
-                if cb is not None:
-                    cb.blockSignals(True)
-                    cb.setChecked(False)
-                    cb.blockSignals(False)
 
     def _model_settings(self):
         if self._model_settings_getter is None:
