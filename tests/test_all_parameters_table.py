@@ -42,6 +42,9 @@ def test_kinds_and_remesh_marks():
     assert by["elem_size"].remesh and by["elem_size"].kind == "numerical"
     assert by["bbox.xmin"].kind == "output" and not by["bbox.xmin"].remesh
     assert by["step.n_frames"].dtype == "int"
+    # a translation of the tool or of the workpiece keeps every mesh
+    assert not by["tool_position.x0"].remesh
+    assert not by["wp_position.y0"].remesh
     assert by["interaction.friction_coeff"].kind == "physical"
 
 
@@ -71,7 +74,8 @@ def test_table_lists_all_with_notes_and_unset_row(qapp):
     tab = SensitivityTab(ModelConfig())
     assert len(tab._row_spec) == 71
     assert tab.table.item(_row(tab, "tool_geometry.r_tool"), 10).text() \
-        == "remesh"
+        == "tool mesh"
+    assert tab.table.item(_row(tab, "elem_size"), 10).text() == "remesh"
     assert tab.table.item(_row(tab, "bbox.xmin"), 10).text() == "output only"
     assert tab.table.item(_row(tab, "interaction.friction_coeff"), 10).text() \
         == ""
@@ -154,6 +158,82 @@ def test_no_element_map_when_the_eulerian_mesh_changes():
     assert not np.isnan(maps["V1"]["interaction.friction_coeff"]).any()
     fa = rc.jacobian_field_analysis(plan, bundles, ["V1"], instance="I")
     assert fa["V1"]["elem_size"]["scheme_used"] == "mesh changes"
+
+
+def test_mesh_note_follows_discretize():
+    """An Eulerian side keeps the element size when Discretize is on (whole
+    elements added or removed); with it off the element size L / n follows
+    L, so the note says 'may remesh'."""
+    cfg = ModelConfig()
+    l_wp = pr.spec_for("euler_geometry.l_wp")
+    cfg.euler_geometry.discretize = True
+    assert pr.mesh_note(l_wp, cfg) == "elements"
+    cfg.euler_geometry.discretize = False
+    assert pr.mesh_note(l_wp, cfg) == "may remesh"
+    assert pr.mesh_note(pr.spec_for("elem_size"), cfg) == "remesh"
+    assert pr.mesh_note(pr.spec_for("euler_position.x0"), cfg) == "grid shift"
+    assert pr.mesh_note(pr.spec_for("tool_geometry.r_tool"), cfg) == "tool mesh"
+    assert pr.mesh_note(pr.spec_for("tool_position.x0"), cfg) == ""
+
+
+@pytest.mark.parametrize("which", ["explore", "identify"])
+def test_note_column_follows_discretize(qapp, which):
+    cfg = ModelConfig()
+    cfg.euler_geometry.discretize = True
+    if which == "explore":
+        from gui.tabs.sensitivity_tab import SensitivityTab, EXPLORE_METHODS
+        tab = SensitivityTab(cfg, methods=EXPLORE_METHODS)
+        col = 10
+    else:
+        from gui.tabs.identify_tab import IdentifyTab, C_NOTE
+        tab = IdentifyTab(cfg)
+        col = C_NOTE
+    r = _row(tab, "euler_geometry.l_wp")
+    assert tab.table.item(r, col).text() == "\u00b1 elements"
+    cfg.euler_geometry.discretize = False
+    tab.refresh_from_model()
+    assert tab.table.item(r, col).text() == "may remesh"
+    assert "Discretize is off" in tab.table.item(r, col).toolTip()
+
+
+class _MeshBundle:
+    def __init__(self, v, centroids=None):
+        self.v, self.c = v, centroids
+
+    def field(self, inst, var):
+        import numpy as np
+        return np.full((3, 4), self.v)
+
+    def element_centroids_init(self, inst):
+        if self.c is None:
+            raise RuntimeError("no centroids")
+        return self.c
+
+
+def test_element_map_kept_when_the_mesh_stays_the_same():
+    """A side changed by less than one element (Discretize on) leaves the
+    mesh identical: the element-by-element map is computed. Another element
+    count gives NaN ('mesh changes'), whatever the parameter."""
+    import numpy as np
+    from gui.sensitivity import jacobian_plan as jac
+    from gui.sensitivity import runner_core as rc
+    specs = [pr.spec_for("euler_geometry.l_wp"),
+             pr.spec_for("interaction.friction_coeff")]
+    plan = jac.build_plan([(specs[0], 0.5, 0.001, False),
+                           (specs[1], 0.3, 0.03, False)], scheme="forward")
+    grid = np.zeros((4, 3))
+    i_l, i_mu = plan.idx_plus[0], plan.idx_plus[1]
+    same = [_MeshBundle(float(i), grid) for i in range(plan.n_runs)]
+    maps = rc.jacobian_field_maps(plan, same, ["V1"], instance="I")
+    assert not np.isnan(maps["V1"]["euler_geometry.l_wp"]).any()
+    other = list(same)
+    other[i_l] = _MeshBundle(float(i_l), np.zeros((5, 3)))
+    other[i_mu] = _MeshBundle(float(i_mu), np.ones((4, 3)))
+    maps = rc.jacobian_field_maps(plan, other, ["V1"], instance="I")
+    assert np.isnan(maps["V1"]["euler_geometry.l_wp"]).all()
+    assert np.isnan(maps["V1"]["interaction.friction_coeff"]).all()
+    fa = rc.jacobian_field_analysis(plan, other, ["V1"], instance="I")
+    assert fa["V1"]["euler_geometry.l_wp"]["scheme_used"] == "mesh changes"
 
 
 @pytest.mark.parametrize("which", ["explore", "identify"])
