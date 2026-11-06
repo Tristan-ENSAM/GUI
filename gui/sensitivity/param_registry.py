@@ -129,6 +129,13 @@ class ParamSpec:
     # `abs_range` is used as an absolute half-width instead of `rel_range`.
     rel_range: float = 0.20
     abs_range: float = 0.0
+    # What changing the value does, shown as a warning in the tables (never
+    # a block): "physical" changes the modelled physics, "numerical" a
+    # setting of the model (mesh, domain, mass scaling, duration...),
+    # "output" only what is written or extracted (ROI box, frames, filters).
+    kind: str = "physical"
+    # True when a new value rebuilds the geometry or the mesh.
+    remesh: bool = False
 
     # -- conversions --
     # `system` pins the conversion to one UnitSystem instead of the app-wide
@@ -199,7 +206,11 @@ _MAT_REL_RANGE = {
 }
 
 
-def _material_specs() -> list[ParamSpec]:
+def _material_specs(prefix: str = "euler_material",
+                    only=None, category: str = "") -> list[ParamSpec]:
+    """Specs of the material dict at `prefix` (the workpiece by default);
+    `only` limits them to some keys, `category` puts them all in one
+    group."""
     specs: list[ParamSpec] = []
     grouped_keys: dict[str, str] = {}
     for cat, keys in _MAT_GROUPS:
@@ -209,7 +220,9 @@ def _material_specs() -> list[ParamSpec]:
     # Iterate in the order units.MATERIAL_FIELDS declares them so the UI
     # ordering is stable and matches the Materials tab.
     for key, (label, unit, factor) in units.MATERIAL_FIELDS.items():
-        cat = grouped_keys.get(key, "Matériau — autres")
+        if only is not None and key not in only:
+            continue
+        cat = category or grouped_keys.get(key, "Matériau — autres")
         is_temp = (unit == "TEMP")
         # For TEMP keys the displayed unit resolves later via temp_unit;
         # store a neutral placeholder, the UI calls display_unit() anyway.
@@ -218,7 +231,7 @@ def _material_specs() -> list[ParamSpec]:
         f = 1.0 if (factor is None) else float(factor)
         rel = _MAT_REL_RANGE.get(key, 0.20)
         specs.append(ParamSpec(
-            path=f"euler_material.{key}",
+            path=f"{prefix}.{key}",
             label=f"{label}",
             category=cat,
             display_unit=disp_unit,
@@ -239,35 +252,85 @@ def _material_specs() -> list[ParamSpec]:
 def _non_material_specs() -> list[ParamSpec]:
     return [
         # --- Tool geometry (stored in mm / deg, displayed as-is) ---
-        ParamSpec("tool_geometry.rake_angle",  "Angle de coupe (rake)",  "Géométrie outil", "deg", rel_range=0.0, abs_range=10.0),
-        ParamSpec("tool_geometry.clear_angle", "Angle de dépouille",     "Géométrie outil", "deg", rel_range=0.40, abs_range=3.0),
-        ParamSpec("tool_geometry.r_tool",      "Rayon d'arête r",        "Géométrie outil", "mm",  rel_range=0.50),
-        ParamSpec("tool_geometry.h_tool",      "Hauteur outil h",        "Géométrie outil", "mm",  rel_range=0.20),
-        ParamSpec("tool_geometry.l_tool",      "Longueur outil l",       "Géométrie outil", "mm",  rel_range=0.20),
+        ParamSpec("tool_geometry.rake_angle",  "Angle de coupe (rake)",  "Géométrie outil", "deg", rel_range=0.0, abs_range=10.0, remesh=True),
+        ParamSpec("tool_geometry.clear_angle", "Angle de dépouille",     "Géométrie outil", "deg", rel_range=0.40, abs_range=3.0, remesh=True),
+        ParamSpec("tool_geometry.r_tool",      "Rayon d'arête r",        "Géométrie outil", "mm",  rel_range=0.50, remesh=True),
+        ParamSpec("tool_geometry.h_tool",      "Hauteur outil h",        "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
+        ParamSpec("tool_geometry.l_tool",      "Longueur outil l",       "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
+        ParamSpec("tool_position.x0",          "Position outil x0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
+        ParamSpec("tool_position.y0",          "Position outil y0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
 
-        # --- Workpiece / Eulerian geometry ---
-        ParamSpec("euler_geometry.h_wp",       "Hauteur pièce h_wp",     "Géométrie pièce", "mm",  rel_range=0.20),
-        ParamSpec("euler_geometry.l_wp",       "Longueur pièce l_wp",    "Géométrie pièce", "mm",  rel_range=0.20),
+        # --- Workpiece / Eulerian geometry (the domain D of Model sizing) ---
+        ParamSpec("euler_geometry.h_wp",       "Hauteur pièce h_wp",     "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.l_wp",       "Longueur pièce l_wp",    "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.h_void",     "Hauteur du vide h_void", "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.l_void",     "Longueur du vide l_void", "Géométrie pièce", "mm", rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("wp_position.x0",            "Position pièce x0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
+        ParamSpec("wp_position.y0",            "Position pièce y0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
+        ParamSpec("euler_position.x0",         "Position domaine eulérien x0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
+        ParamSpec("euler_position.y0",         "Position domaine eulérien y0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
 
         # --- Process / boundary conditions ---
         # cutting_speed: stored mm/s, displayed in the system's velocity unit.
         ParamSpec("bcs.cutting_speed",         "Vitesse de coupe",       "Procédé / CL", "m/min", unit_kind="velocity_named", rel_range=0.30),
+        ParamSpec("bcs.initial_velocity",      "Vitesse initiale",       "Procédé / CL", "m/min", unit_kind="velocity_named", rel_range=0.30),
         # ambient_temperature: stored °C, displayed per temp_unit.
         ParamSpec("bcs.ambient_temperature",   "Température ambiante",   "Procédé / CL", "°C", is_temp=True, rel_range=0.0, abs_range=50.0),
 
         # --- Contact ---
         ParamSpec("interaction.friction_coeff", "Coefficient de frottement µ", "Contact", "—", rel_range=0.50),
+        ParamSpec("interaction.slip_tolerance", "Tolérance de glissement", "Contact", "—", rel_range=0.50, kind="numerical"),
+        ParamSpec("interaction.heat_conversion_fraction", "Fraction convertie en chaleur η", "Contact", "—", rel_range=0.20),
+        # The master share follows as 1 - slave (as in the Interaction tab).
+        ParamSpec("interaction.heat_fraction_to_slave", "Part de chaleur vers la pièce", "Contact", "—", rel_range=0.20),
+        # None (= not written, Abaqus default) until set in the Interaction tab.
+        ParamSpec("interaction.gap_conductance", "Conductance thermique de contact", "Contact", "mW/(mm²·K)", rel_range=0.50, abs_range=100.0),
 
         # --- Numerical ---
-        ParamSpec("elem_size",                 "Taille d'élément",       "Numérique", "mm", rel_range=0.40),
-        ParamSpec("step.mass_scaling_factor", "Mass scaling (pièce + outil)", "Numérique", "—", rel_range=0.0, abs_range=0.0),
+        ParamSpec("elem_size",                 "Taille d'élément",       "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("tool_elem_size",            "Maille outil, pointe",   "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("inter_elem_size",           "Maille outil, bout des faces", "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("max_elem_size",             "Maille outil, bords",    "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("step.mass_scaling_factor", "Mass scaling (pièce + outil)", "Numérique", "—", rel_range=0.0, abs_range=0.0, kind="numerical"),
+        ParamSpec("step.sim_time",             "Durée simulée",          "Numérique", "s",  rel_range=0.20, kind="numerical"),
+
+        # --- Outputs: what is written or extracted, not the physics ---
+        ParamSpec("bbox.xmin", "ROI d'extraction xmin", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.xmax", "ROI d'extraction xmax", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.ymin", "ROI d'extraction ymin", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.ymax", "ROI d'extraction ymax", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.zmin", "ROI d'extraction zmin", "Sorties", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
+        ParamSpec("bbox.zmax", "ROI d'extraction zmax", "Sorties", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
+        ParamSpec("step.n_frames", "Frames de champ", "Sorties", "—", dtype="int", rel_range=0.20, kind="output"),
+        ParamSpec("step.output.ho_n_intervals", "Points des historiques", "Sorties", "—", dtype="int", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_camera_fps", "Filtre champs : cadence caméra", "Sorties", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_camera_atten_db", "Filtre champs : atténuation", "Sorties", "dB", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_force_acq_hz", "Filtre efforts : acquisition", "Sorties", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_force_atten_db", "Filtre efforts : atténuation", "Sorties", "dB", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_cutoff_hz", "Filtre champs : coupure", "Sorties", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_cutoff_history_hz", "Filtre efforts : coupure", "Sorties", "Hz", rel_range=0.20, kind="output"),
     ]
+
+
+# Tool material: the keys the model writes for the tool (no Johnson-Cook).
+_TOOL_MAT_KEYS = ("rho", "E", "nu", "k", "Cp", "alpha")
+
+
+# Values that follow another one when it is written (same rule as the tab
+# that edits them): path -> (dependent path, function of the new value).
+_LINKED = {
+    "interaction.heat_fraction_to_slave":
+        ("interaction.heat_fraction_to_master", lambda v: max(0.0, 1.0 - v)),
+}
 
 
 # ---------------------------------------------------------------------------
 # Public registry
 # ---------------------------------------------------------------------------
-REGISTRY: list[ParamSpec] = _material_specs() + _non_material_specs()
+REGISTRY: list[ParamSpec] = (
+    _material_specs()
+    + _material_specs("tool_material", _TOOL_MAT_KEYS, "Matériau outil")
+    + _non_material_specs())
 
 # Fast lookup by path
 _BY_PATH: dict[str, ParamSpec] = {s.path: s for s in REGISTRY}
@@ -299,6 +362,8 @@ def default_display_bounds(cfg, spec: ParamSpec,
 
     The returned tuple is always (lo, hi) with lo <= hi.
     """
+    if not is_set(cfg, spec):
+        return (0.0, 0.0)
     stored = float(get_stored(cfg, spec.path))
     disp = spec.to_display(stored, temp_unit)
     if abs(disp) > 1e-12 and spec.rel_range > 0.0:
@@ -311,6 +376,16 @@ def default_display_bounds(cfg, spec: ParamSpec,
     return (lo, hi)
 
 
+def is_set(cfg, spec: ParamSpec) -> bool:
+    """True when the model holds a number at `spec.path` (an optional
+    value such as the contact conductance is None until it is set)."""
+    try:
+        v = get_stored(cfg, spec.path)
+    except (AttributeError, KeyError):
+        return False
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def get_display(cfg, spec: ParamSpec, temp_unit: str = "C",
                 system=None) -> float:
     """Current value of `spec` in DISPLAYED units."""
@@ -321,5 +396,8 @@ def get_display(cfg, spec: ParamSpec, temp_unit: str = "C",
 def apply_display(cfg, spec: ParamSpec, displayed: float,
                   temp_unit: str = "C", system=None) -> None:
     """Write a DISPLAYED value back into the cfg (converting to stored)."""
-    set_stored(cfg, spec.path, spec.to_stored(displayed, temp_unit,
-                                              system=system))
+    stored = spec.to_stored(displayed, temp_unit, system=system)
+    set_stored(cfg, spec.path, stored)
+    link = _LINKED.get(spec.path)
+    if link is not None:
+        set_stored(cfg, link[0], link[1](stored))

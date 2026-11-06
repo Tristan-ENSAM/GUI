@@ -32,7 +32,8 @@ from gui.tabs.mesh_tab import MeshTab
 from gui.tabs.step_tab import StepTab
 from gui.tabs.job_tab import JobTab
 from gui.tabs.results_tab import ResultsTab
-from gui.tabs.sensitivity_tab import SensitivityTab
+from gui.tabs.sensitivity_tab import (
+    SensitivityTab, EXPLORE_METHODS, SENSITIVITY_METHODS)
 from gui.tabs.optimization_tab import OptimizationTab
 from gui.tabs.setup_tab import SetupTab
 from gui.widgets.compare_runs_panel import CompareRunsPanel
@@ -94,10 +95,19 @@ class MainWindow(QMainWindow):
         self.job_tab         = JobTab(self.cfg, lambda: self.prefs,
                                       profile_name_getter=self._profile_name)
         self.results_tab     = ResultsTab()
+        # Explore (sweep, grid) and Sensitivity (Jacobian, Morris): the same
+        # parameter table and run machinery, one instance each, so the
+        # ticked parameters and settings are kept per tab.
+        self.explore_tab = SensitivityTab(
+            self.cfg, lambda: self.prefs,
+            cpus_getter=lambda: self.job_tab.cpus(),
+            profile_name_getter=self._profile_name,
+            methods=EXPLORE_METHODS)
         self.sensitivity_tab = SensitivityTab(
             self.cfg, lambda: self.prefs,
             cpus_getter=lambda: self.job_tab.cpus(),
-            profile_name_getter=self._profile_name)
+            profile_name_getter=self._profile_name,
+            methods=SENSITIVITY_METHODS)
         self.optimization_tab = OptimizationTab(
             self.cfg, lambda: self.prefs,
             cpus_getter=lambda: self.job_tab.cpus(),
@@ -106,12 +116,12 @@ class MainWindow(QMainWindow):
         self.optimization_tab.changed.connect(self._mark_dirty)
         # The Sensitivity tab proposes a ZOI from its maps with the eps_q and
         # window T of the Model tab, and can copy it there.
-        self.sensitivity_tab.set_model_settings_getter(
-            self.optimization_tab.model_settings)
-        self.sensitivity_tab.zoiProposed.connect(self.optimization_tab.set_zoi)
-        # Sweep / grid plans may reuse the finished runs of the sizing studies.
-        self.sensitivity_tab.set_known_folders_getter(
-            self.optimization_tab.known_folders)
+        for tab in self._plan_tabs():
+            tab.set_model_settings_getter(self.optimization_tab.model_settings)
+            tab.zoiProposed.connect(self.optimization_tab.set_zoi)
+            # Sweep / grid plans may reuse the finished runs of the sizing
+            # studies.
+            tab.set_known_folders_getter(self.optimization_tab.known_folders)
         # "Use in model" / "Run all steps" write ms*, h* and D* into the cfg;
         # the tabs that show them are reloaded here.
         self.optimization_tab.set_model_refresher(self._reload_sized_model)
@@ -149,15 +159,16 @@ class MainWindow(QMainWindow):
         self.opt_tabs = QTabWidget()
         self.opt_tabs.addTab(self.setup_tab,         "1 · Setup")
         self.opt_tabs.addTab(self.optimization_tab,  "2 · Model sizing")
-        self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Parameter plans")
-        self.opt_tabs.addTab(self.compare_tab,       "4 · Compare runs")
-        self.opt_tabs.addTab(_placeholder("Inverse identification — coming later"),
-                             "5 · Inverse identification")
+        self.opt_tabs.addTab(self.explore_tab,       "3 · Explore")
+        self.opt_tabs.addTab(self.sensitivity_tab,   "4 · Sensitivity")
+        self.opt_tabs.addTab(_placeholder("Identify — coming later"),
+                             "5 · Identify")
+        self.opt_tabs.addTab(self.compare_tab,       "6 · Compare runs")
         # Opening Compare runs lists the study folders made since.
         self.opt_tabs.currentChanged.connect(self._refresh_compare_if_visible)
         self.optimization_tab.compareRequested.connect(self._show_compare)
-        self.sensitivity_tab.compareRunsRequested.connect(
-            self._compare_plan_runs)
+        for tab in self._plan_tabs():
+            tab.compareRunsRequested.connect(self._compare_plan_runs)
 
         tabs = QTabWidget()
         tabs.addTab(self.model_tabs,        "Numerical Model")
@@ -274,8 +285,8 @@ class MainWindow(QMainWindow):
         units.set_active_system(system)
         self.materials_tab.refresh_units()
         self.bcs_tab.refresh_units()
-        if self.opt_tabs.currentWidget() is self.sensitivity_tab:
-            self.sensitivity_tab.refresh_from_model()
+        if self.opt_tabs.currentWidget() in self._plan_tabs():
+            self.opt_tabs.currentWidget().refresh_from_model()
 
     def _open_unit_system_dialog(self):
         dlg = UnitSystemDialog(self, self.cfg.units)
@@ -295,7 +306,7 @@ class MainWindow(QMainWindow):
                     self, "Save preferences",
                     f"Failed to save preferences:\n{type(e).__name__}: {e}",
                 )
-            for tab in (self.job_tab, self.sensitivity_tab,
+            for tab in (self.job_tab, *self._plan_tabs(),
                         self.optimization_tab):
                 tab.refresh_machines()
             self._deploy_remote_agents()
@@ -588,9 +599,14 @@ class MainWindow(QMainWindow):
         """Resync the Sensitivity Ref column with the current model, but
         only when Sensitivity is actually the page on screen (so we don't
         rebuild its table on every unrelated tab switch)."""
+        page = self.opt_tabs.currentWidget()
         if (self.tabs.currentWidget() is self.opt_tabs
-                and self.opt_tabs.currentWidget() is self.sensitivity_tab):
-            self.sensitivity_tab.refresh_from_model()
+                and page in self._plan_tabs()):
+            page.refresh_from_model()
+
+    def _plan_tabs(self) -> tuple:
+        """Explore and Sensitivity (the two parameter-plan tabs)."""
+        return (self.explore_tab, self.sensitivity_tab)
 
     def _rebind_cfg(self):
         """When the cfg is replaced wholesale (New, Open), the existing tabs
@@ -607,7 +623,8 @@ class MainWindow(QMainWindow):
         # Sensitivity also holds a cfg reference (used for the Ref column).
         # It has no apply_from_cfg(); refresh_from_model() rebuilds its Ref
         # values, and is called whenever it becomes the visible page.
-        self.sensitivity_tab.cfg = self.cfg
+        for tab in self._plan_tabs():
+            tab.cfg = self.cfg
         # Optimization reads t1/rake/mu/ROI/elem straight from the cfg; it is
         # rebound here and refreshed once the other tabs are reloaded.
         self.optimization_tab.cfg = self.cfg
@@ -664,7 +681,7 @@ class MainWindow(QMainWindow):
         # A sensitivity campaign runs its Abaqus jobs from a worker thread in
         # their own process session: closing without stopping it leaves the
         # solver running (licence tokens held) and destroys a live QThread.
-        sens_running = self.sensitivity_tab.is_running()
+        sens_running = any(t.is_running() for t in self._plan_tabs())
         if sens_running and not confirm(
                 "Sensitivity campaign running",
                 "A sensitivity campaign is still running. Quitting now will\n"
@@ -691,7 +708,9 @@ class MainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 if sens_running:
-                    self.sensitivity_tab.shutdown()
+                    for t in self._plan_tabs():
+                        if t.is_running():
+                            t.shutdown()
                 if model_running:
                     self.optimization_tab.shutdown()
             finally:

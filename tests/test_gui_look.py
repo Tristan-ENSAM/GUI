@@ -15,12 +15,13 @@ def test_optimization_sub_tabs_in_work_order(qapp):
     from gui.main import MainWindow
     w = MainWindow(); w._dirty = False
     names = [w.opt_tabs.tabText(i) for i in range(w.opt_tabs.count())]
-    assert names == ["1 · Setup", "2 · Model sizing", "3 · Parameter plans",
-                     "4 · Compare runs", "5 · Inverse identification"]
+    assert names == ["1 · Setup", "2 · Model sizing", "3 · Explore",
+                     "4 · Sensitivity", "5 · Identify", "6 · Compare runs"]
     assert w.opt_tabs.widget(0) is w.setup_tab
     assert w.opt_tabs.widget(1) is w.optimization_tab
-    assert w.opt_tabs.widget(2) is w.sensitivity_tab
-    assert w.opt_tabs.widget(3) is w.compare_tab
+    assert w.opt_tabs.widget(2) is w.explore_tab
+    assert w.opt_tabs.widget(3) is w.sensitivity_tab
+    assert w.opt_tabs.widget(5) is w.compare_tab
 
 
 def test_style_sheet_is_complete():
