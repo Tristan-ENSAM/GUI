@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Parameter plans tab (attribute `sensitivity_tab` of the main window) —
+Explore and Sensitivity tabs (attributes `explore_tab` and `sensitivity_tab` of the main window) —
 sweep (one parameter at a time), grid (all combinations), local Jacobian
 (finite differences) or Morris screening.
 
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QCheckBox, QPlainTextEdit, QAbstractItemView, QSplitter, QComboBox,
     QProgressBar, QTabWidget, QFileDialog, QSlider, QDoubleSpinBox,
-    QListWidget, QListWidgetItem,
+    QListWidget, QListWidgetItem, QLineEdit,
 )
 from PySide6.QtCore import QThread, QTimer
 
@@ -69,13 +69,39 @@ _DEFAULT_QOIS = ("Fx_mean", "Fy_mean", "T_max")
 # (window T of the Model tab, not the warm-up fraction).
 _HIDDEN_LEGACY_QOIS = ("Fc", "Ff")
 
-# Geometric / mesh parameters are excluded from sensitivity: changing them
-# re-runs `discretize` (re-meshing), which can stall the identification.
-# Tool and Eulerian-domain dimensions get a dedicated dimension-optimisation
-# tab later. The element size (the discretize step) is excluded for the
-# same reason.
-_EXCLUDED_CATEGORIES = {"Géométrie outil", "Géométrie pièce"}
-_EXCLUDED_PATHS = {"elem_size"}
+# Every registered parameter is offered (decision 2026-11-06): geometry,
+# mesh and outputs too. Those that rebuild the mesh or only change the
+# outputs carry a warning in the Note column, never a block.
+_NOTE_TEXT = {"remesh": "remesh", "output": "output only",
+              "numerical": "numerical"}
+_NOTE_TIP = {
+    "remesh": "A new value rebuilds the geometry or the mesh of the run.",
+    "output": "Changes only what is written or extracted (ROI box, frames, "
+              "filters), not the modelled physics.",
+    "numerical": "A setting of the model (domain, mesh, mass scaling, "
+                 "duration), not a physical property.",
+}
+# Methods of the tab, in the order of the method combo.
+ALL_METHODS = ("jacobian", "morris", "sweep", "grid")
+EXPLORE_METHODS = ("sweep", "grid")
+SENSITIVITY_METHODS = ("jacobian", "morris")
+_METHOD_LABELS = {
+    "jacobian": "Jacobian (finite differences)",
+    "morris": "Morris (global screening)",
+    "sweep": "Sweep (one parameter at a time)",
+    "grid": "Grid (all combinations)",
+}
+
+
+def _note_of(spec) -> str:
+    """remesh | output | numerical | "" (the Note column of a row)."""
+    if spec.kind == "output":
+        return "output"
+    if spec.remesh:
+        return "remesh"
+    if spec.kind == "numerical":
+        return "numerical"
+    return ""
 
 
 class SensitivityTab(QWidget):
@@ -90,9 +116,13 @@ class SensitivityTab(QWidget):
     compareRunsRequested = Signal(str, str, str)
 
     def __init__(self, cfg, prefs_getter=None, cpus_getter=None,
-                 profile_name_getter=None):
+                 profile_name_getter=None, methods=ALL_METHODS):
         super().__init__()
         self.cfg = cfg
+        # Explore holds sweep / grid, Sensitivity Jacobian / Morris; the
+        # same class serves both so the plans and runs stay identical.
+        self._methods = tuple(m for m in ALL_METHODS if m in methods) \
+            or ALL_METHODS
         self._prefs_getter = prefs_getter
         self._profile_name_getter = profile_name_getter
         self._cpus_getter = cpus_getter
@@ -152,21 +182,34 @@ class SensitivityTab(QWidget):
 
         root = QVBoxLayout(self)
 
-        intro = QLabel(
+        help_lines = [
             "Tick the parameters to vary, pick the QoI, then generate and "
-            "run the plan. The Ref column is the current model value.\n"
-            "Sweep: each parameter takes its values in turn, the others stay "
-            "at Ref; the Ref run is shared (cost 1 + the values different "
-            "from Ref). Shows QoI = f(parameter), blind to interactions.\n"
-            "Grid: every combination of the values (cost = product of the "
-            "numbers of values, + 1 when Ref is not one of them). Shows "
-            "interactions; meant for 2 or 3 parameters.\n"
-            "Values: n values from Min to Max (Levels, Spacing), or the "
-            "Values cell typed by hand (e.g. 1; 100; 1000).\n"
-            "Jacobian: finite differences around Ref with the step Delta, "
-            "Min/Max a trust region; cost k+1 (forward/backward) or 2k+1 "
-            "(central). Morris: global screening over Min..Max."
-        )
+            "run the plan. The Ref column is the current model value. Every "
+            "parameter of the model is listed; the Note column flags those "
+            "that rebuild the mesh or only change the outputs."]
+        if "sweep" in self._methods:
+            help_lines.append(
+                "Sweep: each parameter takes its values in turn, the others "
+                "stay at Ref; the Ref run is shared (cost 1 + the values "
+                "different from Ref). Shows QoI = f(parameter), blind to "
+                "interactions.")
+        if "grid" in self._methods:
+            help_lines.append(
+                "Grid: every combination of the values (cost = product of "
+                "the numbers of values, + 1 when Ref is not one of them). "
+                "Shows interactions; meant for 2 or 3 parameters.")
+        if "sweep" in self._methods or "grid" in self._methods:
+            help_lines.append(
+                "Values: n values from Min to Max (Levels, Spacing), or the "
+                "Values cell typed by hand (e.g. 1; 100; 1000).")
+        if "jacobian" in self._methods:
+            help_lines.append(
+                "Jacobian: finite differences around Ref with the step "
+                "Delta, Min/Max a trust region; cost k+1 (forward/backward) "
+                "or 2k+1 (central).")
+        if "morris" in self._methods:
+            help_lines.append("Morris: global screening over Min..Max.")
+        intro = QLabel("\n".join(help_lines))
         intro.setWordWrap(True)
         # Grey help, hidden until "Show help" (as in the Model sizing tab).
         intro.setStyleSheet("color:#6b7280;")
@@ -187,10 +230,34 @@ class SensitivityTab(QWidget):
         # ---- Parameters table ------------------------------------------
         param_box = QGroupBox("Parameters to vary")
         pv = QVBoxLayout(param_box)
-        self.table = QTableWidget(0, 10)
+        # Filter: every parameter, the physical ones, or the ticked ones,
+        # and a search on the name.
+        frow = QHBoxLayout()
+        frow.addWidget(QLabel("Show:"))
+        self.cb_filter = QComboBox()
+        self.cb_filter.addItem("All", "all")
+        self.cb_filter.addItem("Physical", "physical")
+        self.cb_filter.addItem("Ticked", "ticked")
+        self.cb_filter.setToolTip(
+            "All: every parameter of the model. Physical: without the "
+            "numerical settings and the outputs. Ticked: the parameters of "
+            "the plan.")
+        self.cb_filter.currentIndexChanged.connect(self._apply_filter)
+        frow.addWidget(self.cb_filter)
+        self.le_search = QLineEdit()
+        self.le_search.setPlaceholderText("Search a parameter…")
+        self.le_search.setClearButtonEnabled(True)
+        self.le_search.textChanged.connect(self._apply_filter)
+        frow.addWidget(self.le_search, 1)
+        pv.addLayout(frow)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
             ["Vary", "Parameter", "Ref", "Min", "Max", "Delta", "Delta%",
-             "Norm", "Unit", "Values"])
+             "Norm", "Unit", "Values", "Note"])
+        self.table.horizontalHeaderItem(10).setToolTip(
+            "remesh: a new value rebuilds the geometry or the mesh. output "
+            "only: changes what is written or extracted, not the physics. "
+            "numerical: a setting of the model. A warning, not a block.")
         self.table.horizontalHeaderItem(9).setToolTip(
             "Sweep / grid: values typed by hand, separated by ';' or spaces "
             "(use a dot for decimals). Empty: Levels values from Min to Max.")
@@ -200,7 +267,7 @@ class SensitivityTab(QWidget):
             | QAbstractItemView.EditKeyPressed)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for c in (0, 2, 3, 4, 5, 6, 7, 8):
+        for c in (0, 2, 3, 4, 5, 6, 7, 8, 10):
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
         pv.addWidget(self.table)
@@ -216,10 +283,8 @@ class SensitivityTab(QWidget):
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method:"))
         self.cb_method = QComboBox()
-        self.cb_method.addItems(["Jacobian (finite differences)",
-                                 "Morris (global screening)",
-                                 "Sweep (one parameter at a time)",
-                                 "Grid (all combinations)"])
+        for m in self._methods:
+            self.cb_method.addItem(_METHOD_LABELS[m], m)
         self.cb_method.currentIndexChanged.connect(self._on_method_changed)
         self.cb_method.currentIndexChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.cb_method)
@@ -621,12 +686,8 @@ class SensitivityTab(QWidget):
         self.table.setRowCount(0)
         tu = self._temp_unit()
         self._table_units = pr.current_system(tu)
+        self._header_rows = {}
         for category, specs in pr.registry_by_category().items():
-            if category in _EXCLUDED_CATEGORIES:
-                continue
-            specs = [s for s in specs if s.path not in _EXCLUDED_PATHS]
-            if not specs:
-                continue
             # category header row
             r = self.table.rowCount()
             self.table.insertRow(r)
@@ -634,14 +695,18 @@ class SensitivityTab(QWidget):
             fnt = head.font(); fnt.setBold(True); head.setFont(fnt)
             head.setFlags(Qt.ItemIsEnabled)
             self.table.setItem(r, 0, head)
-            self.table.setSpan(r, 0, 1, 10)
+            self.table.setSpan(r, 0, 1, self.table.columnCount())
+            head_row = r
+            self._header_rows[head_row] = []
 
             for spec in specs:
                 r = self.table.rowCount()
                 self.table.insertRow(r)
                 self._row_spec[r] = spec
+                self._header_rows[head_row].append(r)
                 lo, hi = pr.default_display_bounds(self.cfg, spec, tu)
-                ref = pr.get_display(self.cfg, spec, tu)
+                ref = (pr.get_display(self.cfg, spec, tu)
+                       if pr.is_set(self.cfg, spec) else 0.0)
                 delta = (hi - lo) / 2.0
                 # col 0: "vary" checkbox
                 chk = QTableWidgetItem()
@@ -692,7 +757,69 @@ class SensitivityTab(QWidget):
                 self.table.setItem(r, 8, unit)
                 # col 9: values typed by hand (sweep / grid), empty
                 self.table.setItem(r, 9, QTableWidgetItem(""))
+                # col 10: what a new value changes (warning only)
+                note = _note_of(spec)
+                it_note = QTableWidgetItem(_NOTE_TEXT.get(note, ""))
+                it_note.setFlags(Qt.ItemIsEnabled)
+                tip = _NOTE_TIP.get(note, "")
+                if spec.path in pr.EULER_MESH_PATHS:
+                    tip += ("\nThe Eulerian mesh changes: no per-element "
+                            "field sensitivity or map for this parameter "
+                            "(the scalar QoI are computed).")
+                it_note.setToolTip(tip)
+                if note:
+                    from PySide6.QtGui import QColor
+                    it_note.setForeground(QColor("#b45309" if note == "remesh"
+                                                 else "#6b7280"))
+                self.table.setItem(r, 10, it_note)
+                self._set_row_available(r, spec)
         self.table.blockSignals(False)
+        self._apply_filter()
+
+    def _set_row_available(self, row, spec):
+        """A value the model does not hold yet (e.g. the contact
+        conductance before it is set) cannot be varied: its row is shown
+        greyed out with "not set" as Ref."""
+        ok = pr.is_set(self.cfg, spec)
+        chk = self.table.item(row, 0)
+        if chk is None:
+            return
+        if ok:
+            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk.setToolTip("")
+        else:
+            chk.setCheckState(Qt.Unchecked)
+            chk.setFlags(Qt.NoItemFlags)
+            chk.setToolTip("Not set in the model: give it a value in the "
+                           "Numerical Model tabs to vary it.")
+            ref = self.table.item(row, 2)
+            if ref is not None:
+                ref.setText("not set")
+
+    def _apply_filter(self, *_):
+        """Show the rows the filter and the search keep; a category header
+        is shown when one of its rows is."""
+        if not hasattr(self, "_header_rows"):
+            return
+        mode = self.cb_filter.currentData() or "all"
+        words = self.le_search.text().strip().lower()
+        for head, rows in self._header_rows.items():
+            any_shown = False
+            for r in rows:
+                spec = self._row_spec[r]
+                keep = True
+                if mode == "physical":
+                    keep = spec.kind == "physical"
+                elif mode == "ticked":
+                    it = self.table.item(r, 0)
+                    keep = it is not None and it.checkState() == Qt.Checked
+                if keep and words:
+                    keep = (words in spec.label.lower()
+                            or words in spec.path.lower()
+                            or words in spec.category.lower())
+                self.table.setRowHidden(r, not keep)
+                any_shown = any_shown or keep
+            self.table.setRowHidden(head, not any_shown)
 
     # ------------------------------------------------------------------
     # Selection helpers
@@ -809,6 +936,9 @@ class SensitivityTab(QWidget):
         self.table.blockSignals(True)
         try:
             for r, spec in self._row_spec.items():
+                self._set_row_available(r, spec)
+                if not pr.is_set(self.cfg, spec):
+                    continue
                 try:
                     new_ref = pr.get_display(self.cfg, spec, tu)
                 except Exception:
@@ -932,13 +1062,10 @@ class SensitivityTab(QWidget):
                              [r for _s, r, _lv in sel], method)
         return jac.n_runs(k, self._scheme())
 
-    _METHODS = ("jacobian", "morris", "sweep", "grid")
-
     def _method(self) -> str:
         """jacobian | morris | sweep | grid (the combo entry)."""
-        i = self.cb_method.currentIndex()
-        return self._METHODS[i] if 0 <= i < len(self._METHODS) \
-            else "jacobian"
+        m = self.cb_method.currentData()
+        return m if m in ALL_METHODS else self._methods[0]
 
     @staticmethod
     def _plan_kind_of(method: str) -> str:

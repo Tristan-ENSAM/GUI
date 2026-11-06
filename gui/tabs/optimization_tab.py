@@ -377,7 +377,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Zone where two runs are compared (measurement zone of this tab).\n"
             "It is NOT the ROI: the ROI is the output zone of the Geometry\n"
             "tab, matched to the DIC/IRT fields. An empty bound takes the\n"
-            "ROI bound. The Parameter plans tab can propose a ZOI from its\n"
+            "ROI bound. The Sensitivity tab can propose a ZOI from its\n"
             "maps ('Copy ZOI to the Setup tab').")
         cg0.addWidget(lab, 0, 0)
         self.le_zoi = {}
@@ -465,7 +465,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "only: check the cutting force of a run in the Results tab and\n"
             "start T after the force has stabilised.\n"
             "Default 0.3 to 1.0: the value hard-coded in the studies before\n"
-            "it became a setting. Also used by the Parameter plans and\n"
+            "it became a setting. Also used by the Explore, Sensitivity and\n"
             "Compare runs tabs.")
         ag.addWidget(lab, 1, 0)
         self._dom_texts = {}
