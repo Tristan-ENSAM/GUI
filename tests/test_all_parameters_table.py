@@ -4,6 +4,7 @@ Note column, the filter, and the split of Parameter plans into Explore
 (sweep, grid) and Sensitivity (Jacobian, Morris)."""
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import Qt
 
 from gui.core.model_config import ModelConfig
@@ -153,3 +154,27 @@ def test_no_element_map_when_the_eulerian_mesh_changes():
     assert not np.isnan(maps["V1"]["interaction.friction_coeff"]).any()
     fa = rc.jacobian_field_analysis(plan, bundles, ["V1"], instance="I")
     assert fa["V1"]["elem_size"]["scheme_used"] == "mesh changes"
+
+
+@pytest.mark.parametrize("which", ["explore", "identify"])
+def test_filter_by_category(qapp, which):
+    from gui.sensitivity import param_registry as pr
+    from gui.widgets.param_filter import CATEGORY_PREFIX
+    if which == "explore":
+        from gui.tabs.sensitivity_tab import SensitivityTab, EXPLORE_METHODS
+        tab = SensitivityTab(ModelConfig(), methods=EXPLORE_METHODS)
+    else:
+        from gui.tabs.identify_tab import IdentifyTab
+        tab = IdentifyTab(ModelConfig())
+    cats = list(pr.registry_by_category())
+    data = [tab.cb_filter.itemData(i) for i in range(tab.cb_filter.count())]
+    assert [d for d in data if d and d.startswith(CATEGORY_PREFIX)] == [
+        CATEGORY_PREFIX + c for c in cats]
+    mu_cat = pr.spec_for("interaction.friction_coeff").category
+    tab.cb_filter.setCurrentIndex(
+        tab.cb_filter.findData(CATEGORY_PREFIX + mu_cat))
+    for r, spec in tab._row_spec.items():
+        assert tab.table.isRowHidden(r) == (spec.category != mu_cat)
+    shown_heads = [h for h in tab._header_rows
+                   if not tab.table.isRowHidden(h)]
+    assert len(shown_heads) == 1
