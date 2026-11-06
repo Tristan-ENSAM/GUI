@@ -200,8 +200,11 @@ class SensitivityTab(QWidget):
                 "Shows interactions; meant for 2 or 3 parameters.")
         if "sweep" in self._methods or "grid" in self._methods:
             help_lines.append(
-                "Values: n values from Min to Max (Levels, Spacing), or the "
-                "Values cell typed by hand (e.g. 1; 100; 1000).")
+                "Values of a row, from Min to Max (both always included): "
+                "n values (Levels, Spacing above, or the row's Spacing), a "
+                "step (Min, Min + step, ... then Max) or a ratio (Min, "
+                "Min x ratio, ... then Max), or the Values cell typed by "
+                "hand (e.g. 1; 100; 1000). The Levels column shows them.")
         if "jacobian" in self._methods:
             help_lines.append(
                 "Jacobian: finite differences around Ref with the step "
@@ -250,10 +253,23 @@ class SensitivityTab(QWidget):
         self.le_search.textChanged.connect(self._apply_filter)
         frow.addWidget(self.le_search, 1)
         pv.addLayout(frow)
-        self.table = QTableWidget(0, 11)
+        self.table = QTableWidget(0, 14)
         self.table.setHorizontalHeaderLabels(
             ["Vary", "Parameter", "Ref", "Min", "Max", "Delta", "Delta%",
-             "Norm", "Unit", "Values", "Note"])
+             "Norm", "Unit", "Values", "Note", "Spacing", "n / step / ratio",
+             "Levels"])
+        self.table.horizontalHeaderItem(11).setToolTip(
+            "How the values of the row are made from Min to Max. default: "
+            "Levels and Spacing above. linear, step: Min, Min + step, ... "
+            "then Max. geometric, ratio: Min, Min x ratio, ... then Max. Min "
+            "and Max are always in the plan; when the last step overshoots "
+            "Max, the last interval is shorter. A Values cell typed by hand "
+            "wins.")
+        self.table.horizontalHeaderItem(12).setToolTip(
+            "The n, step or ratio of the row's Spacing (step in the unit of "
+            "the row).")
+        self.table.horizontalHeaderItem(13).setToolTip(
+            "The values the plan will run for the ticked rows.")
         self.table.horizontalHeaderItem(10).setToolTip(
             "remesh: a new value rebuilds the geometry or the mesh. output "
             "only: changes what is written or extracted, not the physics. "
@@ -267,7 +283,7 @@ class SensitivityTab(QWidget):
             | QAbstractItemView.EditKeyPressed)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for c in (0, 2, 3, 4, 5, 6, 7, 8, 10):
+        for c in (0, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12):
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.table.itemChanged.connect(self._on_item_changed)
         pv.addWidget(self.table)
@@ -772,9 +788,94 @@ class SensitivityTab(QWidget):
                     it_note.setForeground(QColor("#b45309" if note == "remesh"
                                                  else "#6b7280"))
                 self.table.setItem(r, 10, it_note)
+                # cols 11-13: per-row spacing, its n / step / ratio, and the
+                # levels the plan will run (sweep / grid)
+                cb = QComboBox()
+                cb.addItem("default", "default")
+                for key, label, _what in sw.ROW_SPACINGS:
+                    cb.addItem(label, key)
+                cb.currentIndexChanged.connect(
+                    lambda _i, row=r: self._on_row_spacing_changed(row))
+                self.table.setCellWidget(r, 11, cb)
+                self.table.setItem(r, 12, QTableWidgetItem(""))
+                it_lv = QTableWidgetItem("")
+                it_lv.setFlags(Qt.ItemIsEnabled)
+                self.table.setItem(r, 13, it_lv)
                 self._set_row_available(r, spec)
         self.table.blockSignals(False)
         self._apply_filter()
+
+    def _row_spacing(self, row) -> str:
+        cb = self.table.cellWidget(row, 11)
+        return (cb.currentData() if cb is not None else None) or "default"
+
+    def _on_row_spacing_changed(self, row):
+        """Pre-fill the n / step / ratio cell when it does not fit the new
+        spacing: n = Levels, step = (Max - Min) / 4, ratio = 2."""
+        how = self._row_spacing(row)
+        cur = self._cell_float(row, 12)
+        lo, hi = self._cell_float(row, 3), self._cell_float(row, 4)
+        text = None
+        if how in ("linear_n", "geometric_n"):
+            if cur is None or not float(cur).is_integer() or cur < 2:
+                text = str(self.spin_nlev.value())
+        elif how == "linear_step":
+            if (cur is None or cur <= 0) and lo is not None and hi is not None \
+                    and hi > lo:
+                text = "%.6g" % ((hi - lo) / 4.0)
+        elif how == "geometric_ratio":
+            if cur is None or cur <= 1:
+                text = "2"
+        if text is not None:
+            self._set_cell(row, 12, text)   # itemChanged updates the cost
+        self._mark_plan_stale()
+        self._update_cost()
+
+    def _row_levels(self, row, spec):
+        """(levels, how they were made) of a row, displayed units.
+        ValueError when Min/Max/Values/step are not usable."""
+        it = self.table.item(row, 9)
+        lv = sw.parse_values(it.text() if it is not None else "")
+        if lv is not None:
+            return lv, "typed"
+        lo, hi = self._cell_float(row, 3), self._cell_float(row, 4)
+        if lo is None or hi is None:
+            raise ValueError("Min and Max must be numbers.")
+        how = self._row_spacing(row)
+        if how == "default":
+            g = self.cb_spacing.currentData() or "linear"
+            return sw.levels(lo, hi, self.spin_nlev.value(), g), g
+        val = self._cell_float(row, 12)
+        if val is None:
+            what = dict((k, w) for k, _l, w in sw.ROW_SPACINGS)[how]
+            raise ValueError("give the %s of the row." % what)
+        return sw.row_levels(lo, hi, how, val), sw.spacing_record(how, val)
+
+    def _refresh_level_cells(self):
+        """Show in the Levels column the values each ticked row will run
+        (or why it cannot), empty for the others."""
+        if self._method() not in sw.DESIGNS:
+            return
+        ticked = {r for r, _s in self._selected_rows()}
+        self.table.blockSignals(True)
+        try:
+            for r, spec in self._row_spec.items():
+                it = self.table.item(r, 13)
+                if it is None:
+                    continue
+                if r not in ticked:
+                    it.setText(""); it.setToolTip("")
+                    continue
+                try:
+                    lv, _how = self._row_levels(r, spec)
+                    txt = "; ".join("%.6g" % float(v) for v in lv)
+                    it.setText(txt)
+                    it.setToolTip("%d values: %s" % (len(lv), txt))
+                except ValueError as e:
+                    it.setText("?")
+                    it.setToolTip(str(e))
+        finally:
+            self.table.blockSignals(False)
 
     def _set_row_available(self, row, spec):
         """A value the model does not hold yet (e.g. the contact
@@ -834,11 +935,11 @@ class SensitivityTab(QWidget):
 
     def _on_item_changed(self, item):
         col = item.column()
-        if col in (0, 3, 4, 5, 6, 7, 9):   # anything the plan is built from
+        if col in (0, 3, 4, 5, 6, 7, 9, 12):  # anything the plan is built from
             self._mark_plan_stale()
-        if col in (0, 3, 4, 9):            # changes the number of runs
+        if col in (0, 3, 4, 9, 12):        # changes the number of runs
             self._update_cost()
-        if col in (0, 9):
+        if col in (0, 9, 12):
             return
         if col in (5, 6, 3, 4, 7):         # delta / delta% / min / max / norm
             self._sync_row(item.row(), col)
@@ -1086,7 +1187,8 @@ class SensitivityTab(QWidget):
         # Delta / Delta% / Norm are the Jacobian step; Values the levels.
         for c in (5, 6, 7):
             self.table.setColumnHidden(c, method != "jacobian")
-        self.table.setColumnHidden(9, not sweep)
+        for c in (9, 11, 12, 13):
+            self.table.setColumnHidden(c, not sweep)
         self.chk_reuse.setVisible(sweep)
         self.lbl_hint.setText({
             "morris": "screens Min..Max globally (mu*, sigma)",
@@ -1099,6 +1201,7 @@ class SensitivityTab(QWidget):
         if not hasattr(self, "lbl_cpus"):
             return   # called during construction before the cost labels exist
         self.lbl_cpus.setText(str(self._current_cpus()))
+        self._refresh_level_cells()
         k = len(self._selected_rows())
         if k == 0:
             self.lbl_cost.setText("0 parameters selected")
@@ -1160,23 +1263,13 @@ class SensitivityTab(QWidget):
         ValueError naming the row when Min/Max/Values are not usable."""
         selected, spacing = [], []
         tu = self._temp_unit()
-        n = self.spin_nlev.value()
-        how = self.cb_spacing.currentData() or "linear"
         for r, spec in self._selected_rows():
             x0 = pr.get_display(self.cfg, spec, tu, system=self._table_units)
-            it = self.table.item(r, 9)
             try:
-                lv = sw.parse_values(it.text() if it is not None else "")
-                if lv is not None:
-                    spacing.append("typed")
-                else:
-                    lo, hi = self._cell_float(r, 3), self._cell_float(r, 4)
-                    if lo is None or hi is None:
-                        raise ValueError("Min and Max must be numbers.")
-                    lv = sw.levels(lo, hi, n, how)
-                    spacing.append(how)
+                lv, how = self._row_levels(r, spec)
             except ValueError as e:
                 raise ValueError("%s: %s" % (spec.label, e))
+            spacing.append(how)
             selected.append((spec, x0, lv))
         return selected, spacing
 
@@ -2518,7 +2611,7 @@ class SensitivityTab(QWidget):
             ax.plot([x_ref], [q_ref], "*", color="#b91c1c", markersize=12,
                     label="Ref run")
         sp_i = plan.spacing[idx] if idx < len(plan.spacing) else "linear"
-        if sp_i == "geometric" or (
+        if str(sp_i).startswith("geometric") or (
                 sp_i == "typed" and np.all(np.asarray(a["x"]) > 0)
                 and len(a["x"]) > 2
                 and np.max(a["x"]) / np.min(a["x"]) >= 100):
