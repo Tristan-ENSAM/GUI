@@ -496,6 +496,13 @@ class OptimizationCfg:
     criterion_rmse: dict = field(default_factory=lambda: {
         "Vx": "10", "Vy": "10", "T": "10", "EVF": "0.1",
         "Fc": "10", "Ff": "10"})
+    # Chip thickness e (QoI of the plans, not of the sizing studies;
+    # 2026-11-06): admitted deviation [mm] and height of the measuring line
+    # above the workpiece [mm] ("" = the uncut chip thickness t1). 0.005
+    # is a choice (about 1.5 px of the camera of the reference thesis,
+    # 2.9-3.5 um/px), to be set from the camera of the tests.
+    chip_eps:       str  = "0.005"
+    chip_y0:        str  = ""
     sizing_tol:     dict = field(default_factory=lambda: {
         q: "0.02" for q in ("EVF", "TEMP", "V1", "V2", "force")})
     gci_finest:     str  = ""

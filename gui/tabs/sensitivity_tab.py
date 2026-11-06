@@ -1277,7 +1277,8 @@ class SensitivityTab(QWidget):
         if model:
             st = self._model_qoi_settings(model)
             specs += mq.make_specs(st["zoi"], st["window"],
-                                   st["evf_threshold"], qois=model)
+                                   st["evf_threshold"], qois=model,
+                                   chip_y0=st.get("chip_y0"))
             self._plan_model_qoi = st
         specs += [q for q in qoi_mod.REGISTRY
                   if q.id in self._qoi_checks
@@ -1319,6 +1320,7 @@ class SensitivityTab(QWidget):
                                          crop["ymin"], crop["ymax"])))
         return {"zoi": zoi, "window": window,
                 "evf_threshold": float(st.get("evf_threshold", 0.5)),
+                "chip_y0": st.get("chip_y0"),
                 "eps": {q: eps[q] for q in qois}}
 
     def _selected_field_vars(self):
@@ -2039,10 +2041,12 @@ class SensitivityTab(QWidget):
         on = fn is not None
         # Wiring, not a user edit: the defaults change without discarding a
         # plan already generated.
-        for cb in self._model_qoi_checks.values():
+        # The chip thickness is not ticked by default (the six QoI of the
+        # sizing studies are).
+        for q, cb in self._model_qoi_checks.items():
             cb.blockSignals(True)
             cb.setEnabled(on)
-            cb.setChecked(on)
+            cb.setChecked(on and q != mq.CHIP_QOI)
             cb.blockSignals(False)
 
     def _model_settings(self):

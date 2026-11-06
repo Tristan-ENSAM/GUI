@@ -12,6 +12,12 @@ with the admitted deviations eps_q of the Model tab:
   samples inside the window T, divided by the simulated width w (the
   element size of the run), in N/mm.
 
+and the Explore / Sensitivity / Identify plans may add
+
+* e : chip thickness, mean over the window T of the width of the chip on a
+  line parallel to the cutting direction at the height y0 above the
+  workpiece (gui.results.chip_thickness; not a QoI of the sizing studies).
+
 `make_specs` returns them as `QoISpec`s whose function closes over the ZOI,
 the window and the EVF threshold, so the runner reduces each run with the
 same settings as the Model tab. Each spec carries `eps_key`, the eps_q it
@@ -19,10 +25,11 @@ is judged against (see `runner_core.add_eps_ratios`).
 """
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from gui.results import chip_thickness as ct
 from gui.results.qoi import QoISpec
 from gui.sensitivity.domain_independence import (
     FIELD_QUANTITIES, FORCE_QUANTITIES, MASKED_QUANTITIES, zoi_within_crop)
@@ -31,12 +38,16 @@ from gui.sensitivity.zoi_sampling import (
     history_window_mean, window_mask, zoi_area_means)
 
 # Order and labels of the Model tab (eps_q row).
-MODEL_QOIS: Tuple[str, ...] = ("Vx", "Vy", "T", "EVF", "Fc", "Ff")
+# The six QoI of the sizing studies, then the chip thickness (plans only).
+SIZING_QOIS: Tuple[str, ...] = ("Vx", "Vy", "T", "EVF", "Fc", "Ff")
+CHIP_QOI = "e"
+MODEL_QOIS: Tuple[str, ...] = SIZING_QOIS + (CHIP_QOI,)
 LABELS = {"Vx": "Vx (ZOI mean)", "Vy": "Vy (ZOI mean)",
           "T": "T (ZOI mean)", "EVF": "φ = EVF (ZOI mean)",
-          "Fc": "Fc = RF1/w (mean)", "Ff": "Ff = RF2/w (mean)"}
+          "Fc": "Fc = RF1/w (mean)", "Ff": "Ff = RF2/w (mean)",
+          CHIP_QOI: "e = chip thickness (mean)"}
 UNITS = {"Vx": "mm/s", "Vy": "mm/s", "T": "°C", "EVF": "–",
-         "Fc": "N/mm", "Ff": "N/mm"}
+         "Fc": "N/mm", "Ff": "N/mm", CHIP_QOI: "mm"}
 
 
 def _elem_size(bundle) -> float:
@@ -78,10 +89,28 @@ def force_mean(bundle, q: str, window) -> float:
     return float("nan") if m is None else float(m) / w
 
 
+def chip_mean(bundle, window, evf_threshold: float,
+              y0: Optional[float] = None) -> float:
+    """Mean chip thickness over the window T (mm); NaN when the Eulerian
+    instance or the frames are missing, ValueError when the line cannot be
+    placed (gui.results.chip_thickness)."""
+    inst = eulerian_instance(bundle)
+    h = _elem_size(bundle)
+    if not inst or not (np.isfinite(h) and h > 0):
+        return float("nan")
+    tmask = window_mask(np.asarray(bundle.times, dtype=float), *window)
+    if not tmask.any():
+        return float("nan")
+    return ct.mean_thickness(bundle, inst, h, tmask, y0, evf_threshold)
+
+
 def make_specs(zoi: Sequence[float], window: Sequence[float],
                evf_threshold: float = 0.5,
-               qois: Sequence[str] = MODEL_QOIS) -> list:
-    """QoISpecs of the Model-tab quantities `qois` with these settings."""
+               qois: Sequence[str] = MODEL_QOIS,
+               chip_y0: Optional[float] = None) -> list:
+    """QoISpecs of the Model-tab quantities `qois` with these settings.
+    `chip_y0`: height of the chip-thickness line above the workpiece
+    (None = the uncut chip thickness t1 of the run)."""
     zoi = tuple(float(v) for v in zoi)
     window = (float(window[0]), float(window[1]))
     thr = float(evf_threshold)
@@ -93,6 +122,11 @@ def make_specs(zoi: Sequence[float], window: Sequence[float],
         elif q in FORCE_QUANTITIES:
             def fn(bundle, instance=None, warmup_frac=0.0, _q=q):
                 return force_mean(bundle, _q, window)
+        elif q == CHIP_QOI:
+            y0 = None if chip_y0 is None else float(chip_y0)
+
+            def fn(bundle, instance=None, warmup_frac=0.0, _y0=y0):
+                return chip_mean(bundle, window, thr, _y0)
         else:
             raise KeyError("unknown Model-tab quantity %r" % q)
         specs.append(QoISpec(q, LABELS[q], UNITS[q], fn, eps_key=q))

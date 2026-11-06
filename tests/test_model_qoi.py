@@ -166,7 +166,8 @@ def test_tab_defaults_follow_the_model_tab(qapp):
     assert not any(cb.isEnabled() for cb in tab._model_qoi_checks.values())
     assert tab._qoi_checks == {}                 # no "Other QoI" any more
     tab.set_model_settings_getter(lambda: _settings())
-    assert all(cb.isChecked() for cb in tab._model_qoi_checks.values())
+    assert all(cb.isChecked() == (q != mq.CHIP_QOI)
+               for q, cb in tab._model_qoi_checks.items())
 
 
 def test_tab_generates_with_model_settings(qapp):
@@ -176,7 +177,7 @@ def test_tab_generates_with_model_settings(qapp):
     tab.set_model_settings_getter(lambda: _settings(zoi=_inside_zoi(cfg)))
     tab._on_generate()
     assert tab.plan is not None, tab.status.text()
-    assert [q.id for q in tab.selected_qois] == list(mq.MODEL_QOIS)
+    assert [q.id for q in tab.selected_qois] == list(mq.SIZING_QOIS)
     rec = tab._plan_record([], 1)
     assert rec["model_qoi"]["eps"]["Fc"] == 10.0
     assert rec["model_qoi"]["window"] == [0.3, 1.0]

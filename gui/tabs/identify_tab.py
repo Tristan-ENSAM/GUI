@@ -91,6 +91,7 @@ def setup_qoi_settings(getter, cfg, qois) -> dict:
                              "tab).")
     return {"zoi": zoi, "window": window,
             "evf_threshold": float(st.get("evf_threshold", 0.5)),
+            "chip_y0": st.get("chip_y0"),
             "eps": {q: eps[q] for q in qois}}
 
 
@@ -187,7 +188,10 @@ class IdentifyTab(QWidget):
         for i, q in enumerate(mq.MODEL_QOIS):
             chk = QTableWidgetItem()
             chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            chk.setCheckState(Qt.Checked)
+            # The chip thickness is off by default: the six QoI of the
+            # sizing studies are the default reference.
+            chk.setCheckState(Qt.Unchecked if q == mq.CHIP_QOI
+                              else Qt.Checked)
             self.ref_table.setItem(i, R_USE, chk)
             for c, text, editable in ((R_QOI, mq.LABELS[q], False),
                                       (R_REF, "", True), (R_EPS, "", False),
@@ -530,10 +534,12 @@ class IdentifyTab(QWidget):
         from gui.results.reader import ResultsBundle
         from gui.identify.worker import point_qoi
         try:
+            qois = self._used_qois() or list(mq.SIZING_QOIS)
             st = setup_qoi_settings(self._model_settings_getter, self.cfg,
-                                    list(mq.MODEL_QOIS))
+                                    qois)
             specs = mq.make_specs(st["zoi"], st["window"],
-                                  st["evf_threshold"])
+                                  st["evf_threshold"], qois=qois,
+                                  chip_y0=st.get("chip_y0"))
             q = point_qoi(ResultsBundle.load(path), specs)
         except Exception as e:
             self._warn("Reference not read: %s" % e)
@@ -595,7 +601,7 @@ class IdentifyTab(QWidget):
         return IdentifyWorker(
             specs, params, targets,
             mq.make_specs(st["zoi"], st["window"], st["evf_threshold"],
-                          qois=qois),
+                          qois=qois, chip_y0=st.get("chip_y0")),
             copy.deepcopy(self.cfg), settings={
                 "zoi": list(st["zoi"]), "window": list(st["window"]),
                 "evf_threshold": st["evf_threshold"], "eps": st["eps"]},
