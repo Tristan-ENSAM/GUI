@@ -254,7 +254,8 @@ def test_cutting_speed_follows_velocity_unit():
 def test_generate_warns_when_step_leaves_trust_region(qapp):
     from PySide6.QtCore import Qt
     from gui.tabs.sensitivity_tab import SensitivityTab
-    tab = SensitivityTab(ModelConfig())
+    from tests.conftest import _connected_tab as connected_tab
+    tab = connected_tab()
     r = _row(tab, S_A.path)
     tab.table.item(r, 0).setCheckState(Qt.Checked)
     hi = tab._cell_float(r, 4)
@@ -275,13 +276,14 @@ def test_generate_warns_when_step_leaves_trust_region(qapp):
 def test_plan_discarded_when_selection_changes(qapp, edit):
     from PySide6.QtCore import Qt
     from gui.tabs.sensitivity_tab import SensitivityTab
-    tab = SensitivityTab(ModelConfig())
+    from tests.conftest import _connected_tab as connected_tab
+    tab = connected_tab()
     r = _row(tab, S_A.path)
     tab.table.item(r, 0).setCheckState(Qt.Checked)
     tab._on_generate()
     assert tab.plan is not None
     if edit == "qoi":
-        tab._qoi_checks["PEEQ_max"].setChecked(True)
+        tab._model_qoi_checks["Vx"].setChecked(False)
     elif edit == "field":
         tab._field_checks["EVF"].setChecked(True)
     elif edit == "scheme":
@@ -296,7 +298,8 @@ def test_plan_discarded_when_model_value_changes(qapp):
     from PySide6.QtCore import Qt
     from gui.tabs.sensitivity_tab import SensitivityTab
     cfg = ModelConfig()
-    tab = SensitivityTab(cfg)
+    from tests.conftest import _connected_tab as connected_tab
+    tab = connected_tab(cfg)
     tab.table.item(_row(tab, S_A.path), 0).setCheckState(Qt.Checked)
     tab._on_generate()
     tab.refresh_from_model()                               # nothing changed
@@ -316,13 +319,15 @@ def test_field_vars_are_captured_at_generate(qapp):
     assert tab.plan_field_vars == ["TEMP"]
 
 
-def test_warmup_is_recorded(qapp):
+def test_warmup_is_no_longer_offered(qapp):
+    """The warm-up fraction went with the 'Other QoI' (QoI sort of
+    2026-11-06); the record keeps the key at 0 for old readers."""
     from gui.tabs.sensitivity_tab import SensitivityTab
     tab = SensitivityTab(ModelConfig())
+    assert not hasattr(tab, "spin_warmup") and tab._qoi_checks == {}
     tab.plan = jac.build_plan([(S_A, 100, 10, False)], scheme="forward")
     tab.plan_kind = "jacobian"
-    tab.spin_warmup.setValue(0.25)
-    assert tab._plan_record([], 1)["warmup_frac"] == pytest.approx(0.25)
+    assert tab._plan_record([], 1)["warmup_frac"] == 0.0
 
 
 def test_failed_run_does_not_enter_the_time_estimate(qapp):

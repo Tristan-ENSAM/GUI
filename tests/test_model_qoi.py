@@ -164,11 +164,9 @@ def test_tab_defaults_follow_the_model_tab(qapp):
     from gui.tabs.sensitivity_tab import SensitivityTab
     tab = SensitivityTab(ModelConfig())
     assert not any(cb.isEnabled() for cb in tab._model_qoi_checks.values())
-    assert tab._qoi_checks["Fx_mean"].isChecked()
-    assert "Fc" not in tab._qoi_checks           # the Model-tab Fc only
+    assert tab._qoi_checks == {}                 # no "Other QoI" any more
     tab.set_model_settings_getter(lambda: _settings())
     assert all(cb.isChecked() for cb in tab._model_qoi_checks.values())
-    assert not any(cb.isChecked() for cb in tab._qoi_checks.values())
 
 
 def test_tab_generates_with_model_settings(qapp):

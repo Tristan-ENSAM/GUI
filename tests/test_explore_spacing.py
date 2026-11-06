@@ -51,8 +51,9 @@ def _row(tab, path):
 
 
 def _explore():
-    from gui.tabs.sensitivity_tab import SensitivityTab, EXPLORE_METHODS
-    return SensitivityTab(ModelConfig(), methods=EXPLORE_METHODS)
+    from gui.tabs.sensitivity_tab import EXPLORE_METHODS
+    from tests.conftest import _connected_tab
+    return _connected_tab(methods=EXPLORE_METHODS)
 
 
 def test_row_spacing_in_the_table(qapp):
