@@ -39,8 +39,12 @@ from gui.widgets.param_filter import fill_filter_combo, keep as filter_keep
 from gui.widgets.machine_combo import MachineCombo
 from gui.widgets.theme import mark_primary
 
-_NOTE = {"output": "output only", "remesh": "remesh",
-         "numerical": "numerical", "": ""}
+_NOTE = {"output": "output only", "numerical": "numerical", "": "",
+         **pr.MESH_NOTE_LABEL}
+_NOTE_TIP = {"output": "Changes only what is written or extracted, not "
+                       "the modelled physics.",
+             "numerical": "A setting of the model, not a physical property.",
+             **pr.MESH_NOTE_TIP}
 
 # Columns of the parameter table
 C_USE, C_NAME, C_REF, C_MIN, C_MAX, C_START, C_UNIT, C_NOTE = range(8)
@@ -48,11 +52,12 @@ C_USE, C_NAME, C_REF, C_MIN, C_MAX, C_START, C_UNIT, C_NOTE = range(8)
 R_USE, R_QOI, R_REF, R_EPS, R_W, R_UNIT = range(6)
 
 
-def _note(spec) -> str:
+def _note(spec, cfg=None) -> str:
     if spec.kind == "output":
         return "output"
-    if spec.remesh:
-        return "remesh"
+    mesh = pr.mesh_note(spec, cfg)
+    if mesh:
+        return mesh
     return "numerical" if spec.kind == "numerical" else ""
 
 
@@ -374,7 +379,6 @@ class IdentifyTab(QWidget):
                     self.table.setItem(r, c, it)
                 for c in (C_MIN, C_MAX, C_START):
                     self.table.setItem(r, c, QTableWidgetItem(""))
-                self.table.item(r, C_NOTE).setText(_NOTE[_note(spec)])
                 self._fill_row(r, spec, bounds=True)
         self.table.blockSignals(False)
         self._apply_filter()
@@ -398,6 +402,9 @@ class IdentifyTab(QWidget):
                 self.table.item(r, C_MIN).setText(_fmt(lo))
                 self.table.item(r, C_MAX).setText(_fmt(hi))
         self.table.item(r, C_UNIT).setText(spec.unit_str(tu))
+        note = _note(spec, self.cfg)
+        self.table.item(r, C_NOTE).setText(_NOTE[note])
+        self.table.item(r, C_NOTE).setToolTip(_NOTE_TIP.get(note, ""))
 
     def refresh_from_model(self):
         """Mirror the current model: Ref column; untouched rows also get

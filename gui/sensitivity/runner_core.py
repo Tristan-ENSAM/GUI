@@ -87,6 +87,7 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
         return {}
     ref = bundles[0]
     inst = instance or eulerian_instance(ref)
+    meshes = _MeshCheck(bundles, inst)
     nan = float("nan")
     out = {}
     for var in field_vars:
@@ -100,7 +101,8 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
         per_param = {}
         for i, spec in enumerate(plan.specs):
             d = plan.deltas[i]
-            if spec.path in pr.EULER_MESH_PATHS:
+            if not meshes.same(spec.path, (plan.idx_plus.get(i),
+                                           plan.idx_minus.get(i))):
                 # another Eulerian mesh: no element-by-element difference
                 per_param[spec.path] = {"sensitivity": nan, "rel_pct": nan,
                                         "scheme_used": "mesh changes"}
@@ -130,6 +132,50 @@ def jacobian_field_analysis(plan, bundles, field_vars, metric="ssd",
                                     "scheme_used": used or plan.scheme}
         out[var] = per_param
     return out
+
+
+class _MeshCheck:
+    """Tells whether the runs of a parameter have the base run's Eulerian
+    mesh, from their initial element centroids: same element count and the
+    same centroids (to 1e-9 mm). Element fields are compared element by
+    element only then. When a run's centroids cannot be read, falls back to
+    the parameter path (pr.EULER_MESH_PATHS = may change the mesh)."""
+    TOL = 1e-9
+
+    def __init__(self, bundles, inst):
+        self._b, self._inst = bundles, inst
+        self._c = {}
+
+    def _centroids(self, idx):
+        if idx not in self._c:
+            c = None
+            b = self._b[idx] if (idx is not None and idx < len(self._b)) \
+                else None
+            if b is not None and hasattr(b, "element_centroids_init"):
+                try:
+                    c = np.asarray(b.element_centroids_init(self._inst),
+                                   dtype=float)
+                except Exception:
+                    log_swallowed("reading element centroids of run %s"
+                                  % idx, level=logging.DEBUG)
+                    c = None
+            self._c[idx] = c
+        return self._c[idx]
+
+    def same(self, path, idxs) -> bool:
+        base = self._centroids(0)
+        idxs = [i for i in idxs if i is not None and i < len(self._b)
+                and self._b[i] is not None]
+        if base is None:
+            return path not in pr.EULER_MESH_PATHS
+        for i in idxs:
+            c = self._centroids(i)
+            if c is None:
+                return path not in pr.EULER_MESH_PATHS
+            if c.shape != base.shape or not np.allclose(
+                    c, base, rtol=0.0, atol=self.TOL):
+                return False
+        return True
 
 
 class _FieldCache:
@@ -174,6 +220,7 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None,
         return {}
     ref = bundles[0]
     inst = instance or eulerian_instance(ref)
+    meshes = _MeshCheck(bundles, inst)
     out = {}
     for var in field_vars:
         try:
@@ -186,7 +233,8 @@ def jacobian_field_maps(plan, bundles, field_vars, instance=None,
         per_param = {}
         used_per = {}
         for i, spec in enumerate(plan.specs):
-            if spec.path in pr.EULER_MESH_PATHS:
+            if not meshes.same(spec.path, (plan.idx_plus.get(i),
+                                           plan.idx_minus.get(i))):
                 # another Eulerian mesh: no element-by-element difference
                 per_param[spec.path] = np.full(
                     np.asarray(base_field, float).shape, np.nan)

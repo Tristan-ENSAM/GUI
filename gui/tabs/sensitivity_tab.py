@@ -65,15 +65,19 @@ import logging
 # Every registered parameter is offered (decision 2026-11-06): geometry,
 # mesh and outputs too. Those that rebuild the mesh or only change the
 # outputs carry a warning in the Note column, never a block.
-_NOTE_TEXT = {"remesh": "remesh", "output": "output only",
-              "numerical": "numerical"}
+_NOTE_TEXT = {"output": "output only", "numerical": "numerical",
+              **pr.MESH_NOTE_LABEL}
 _NOTE_TIP = {
-    "remesh": "A new value rebuilds the geometry or the mesh of the run.",
     "output": "Changes only what is written or extracted (ROI box, frames, "
               "filters), not the modelled physics.",
     "numerical": "A setting of the model (domain, mesh, mass scaling, "
                  "duration), not a physical property.",
+    **pr.MESH_NOTE_TIP,
 }
+_MESH_FIELD_TIP = ("\nPer-element field sensitivities and maps are computed "
+                   "only when the runs have the same Eulerian mesh (checked "
+                   "on their element centroids); the scalar QoI are always "
+                   "computed.")
 # Methods of the tab, in the order of the method combo.
 ALL_METHODS = ("jacobian", "morris", "sweep", "grid")
 EXPLORE_METHODS = ("sweep", "grid")
@@ -86,12 +90,14 @@ _METHOD_LABELS = {
 }
 
 
-def _note_of(spec) -> str:
-    """remesh | output | numerical | "" (the Note column of a row)."""
+def _note_of(spec, cfg=None) -> str:
+    """output | a mesh note (pr.mesh_note) | numerical | "" (the Note column
+    of a row), for the model `cfg`."""
     if spec.kind == "output":
         return "output"
-    if spec.remesh:
-        return "remesh"
+    mesh = pr.mesh_note(spec, cfg)
+    if mesh:
+        return mesh
     if spec.kind == "numerical":
         return "numerical"
     return ""
@@ -258,8 +264,12 @@ class SensitivityTab(QWidget):
         self.table.horizontalHeaderItem(13).setToolTip(
             "The values the plan will run for the ticked rows.")
         self.table.horizontalHeaderItem(10).setToolTip(
-            "remesh: a new value rebuilds the geometry or the mesh. output "
-            "only: changes what is written or extracted, not the physics. "
+            "What a new value changes, for the current model. remesh: "
+            "another Eulerian element size. may remesh: an Eulerian side "
+            "with Discretize off. \u00b1 elements: an Eulerian side with "
+            "Discretize on (same element size). grid shift: the Eulerian "
+            "grid moves. tool mesh: only the tool is remeshed. output only: "
+            "changes what is written or extracted, not the physics. "
             "numerical: a setting of the model. A warning, not a block.")
         self.table.horizontalHeaderItem(9).setToolTip(
             "Sweep / grid: values typed by hand, separated by ';' or spaces "
@@ -662,6 +672,19 @@ class SensitivityTab(QWidget):
     def _temp_unit(self) -> str:
         return getattr(self.cfg.ui, "temp_unit", "C")
 
+    def _set_note(self, item, spec):
+        """Note column of a row: what a new value changes, for the current
+        model (the mesh notes follow the Discretize option)."""
+        from PySide6.QtGui import QColor
+        note = _note_of(spec, self.cfg)
+        item.setText(_NOTE_TEXT.get(note, ""))
+        tip = _NOTE_TIP.get(note, "")
+        if note in pr.MESH_NOTE_LABEL and note != "tool mesh":
+            tip += _MESH_FIELD_TIP
+        item.setToolTip(tip)
+        item.setForeground(QColor("#b45309" if note in pr.MESH_NOTE_LABEL
+                                  else "#6b7280"))
+
     def _populate_table(self):
         self.table.blockSignals(True)
         self.table.setRowCount(0)
@@ -739,19 +762,9 @@ class SensitivityTab(QWidget):
                 # col 9: values typed by hand (sweep / grid), empty
                 self.table.setItem(r, 9, QTableWidgetItem(""))
                 # col 10: what a new value changes (warning only)
-                note = _note_of(spec)
-                it_note = QTableWidgetItem(_NOTE_TEXT.get(note, ""))
+                it_note = QTableWidgetItem("")
                 it_note.setFlags(Qt.ItemIsEnabled)
-                tip = _NOTE_TIP.get(note, "")
-                if spec.path in pr.EULER_MESH_PATHS:
-                    tip += ("\nThe Eulerian mesh changes: no per-element "
-                            "field sensitivity or map for this parameter "
-                            "(the scalar QoI are computed).")
-                it_note.setToolTip(tip)
-                if note:
-                    from PySide6.QtGui import QColor
-                    it_note.setForeground(QColor("#b45309" if note == "remesh"
-                                                 else "#6b7280"))
+                self._set_note(it_note, spec)
                 self.table.setItem(r, 10, it_note)
                 # cols 11-13: per-row spacing, its n / step / ratio, and the
                 # levels the plan will run (sweep / grid)
@@ -975,10 +988,18 @@ class SensitivityTab(QWidget):
         Called by MainWindow when Sensitivity becomes the visible page
         (showEvent is unreliable for a doubly-nested tab page)."""
         self._resync_reference_values()   # mirror the current Numerical Model
+        self._resync_notes()
         if self._plan_base_changed():
             self._mark_plan_stale(reason="a varied parameter's model value "
                                   "changed")
         self._update_cost()          # refresh CPU mirror + cost estimate
+
+    def _resync_notes(self):
+        """The mesh notes depend on the model (Discretize): refresh them."""
+        for r, spec in self._row_spec.items():
+            it = self.table.item(r, 10)
+            if it is not None:
+                self._set_note(it, spec)
 
     def _resync_reference_values(self):
         """Refresh the Ref column (col 2) from the *current* ModelConfig, so

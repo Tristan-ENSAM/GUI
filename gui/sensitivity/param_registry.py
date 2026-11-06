@@ -134,7 +134,8 @@ class ParamSpec:
     # setting of the model (mesh, domain, mass scaling, duration...),
     # "output" only what is written or extracted (ROI box, frames, filters).
     kind: str = "physical"
-    # True when a new value rebuilds the geometry or the mesh.
+    # True when a new value can change a mesh (Eulerian or tool). What it
+    # changes, given the current model, is told by mesh_note().
     remesh: bool = False
 
     # -- conversions --
@@ -257,16 +258,16 @@ def _non_material_specs() -> list[ParamSpec]:
         ParamSpec("tool_geometry.r_tool",      "Rayon d'arête r",        "Géométrie outil", "mm",  rel_range=0.50, remesh=True),
         ParamSpec("tool_geometry.h_tool",      "Hauteur outil h",        "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
         ParamSpec("tool_geometry.l_tool",      "Longueur outil l",       "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
-        ParamSpec("tool_position.x0",          "Position outil x0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
-        ParamSpec("tool_position.y0",          "Position outil y0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
+        ParamSpec("tool_position.x0",          "Position outil x0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("tool_position.y0",          "Position outil y0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01),
 
         # --- Workpiece / Eulerian geometry (the domain D of Model sizing) ---
         ParamSpec("euler_geometry.h_wp",       "Hauteur pièce h_wp",     "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
         ParamSpec("euler_geometry.l_wp",       "Longueur pièce l_wp",    "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
         ParamSpec("euler_geometry.h_void",     "Hauteur du vide h_void", "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
         ParamSpec("euler_geometry.l_void",     "Longueur du vide l_void", "Géométrie pièce", "mm", rel_range=0.20, kind="numerical", remesh=True),
-        ParamSpec("wp_position.x0",            "Position pièce x0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
-        ParamSpec("wp_position.y0",            "Position pièce y0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01, remesh=True),
+        ParamSpec("wp_position.x0",            "Position pièce x0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("wp_position.y0",            "Position pièce y0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01),
         ParamSpec("euler_position.x0",         "Position domaine eulérien x0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
         ParamSpec("euler_position.y0",         "Position domaine eulérien y0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
 
@@ -312,14 +313,73 @@ def _non_material_specs() -> list[ParamSpec]:
     ]
 
 
-# Values whose change rebuilds the Eulerian mesh (element count or element
-# positions): the element fields of two runs are then not comparable
-# element by element, so no per-element field difference is computed.
+# Values whose change can rebuild the Eulerian mesh (element count, size or
+# positions). Used only when the runs' element centroids cannot be read:
+# runner_core then skips the per-element field difference for them. When
+# the centroids are read, the runs' meshes are compared directly.
 EULER_MESH_PATHS = frozenset({
     "elem_size", "euler_geometry.h_wp", "euler_geometry.l_wp",
     "euler_geometry.h_void", "euler_geometry.l_void",
     "euler_position.x0", "euler_position.y0",
 })
+
+
+# What a new value does to the meshes (Note column of the parameter tables).
+# Facts from abaqus_scripts/cel_model.py: with "discretize" on, the four
+# Eulerian sides are floored to whole elements of elem_size before seeding;
+# with it off, seedPartInstance(size=elem_size) puts round(L / elem_size)
+# elements on a side of length L, so the element size L / n follows L.
+EULER_DIM_PATHS = frozenset({
+    "euler_geometry.h_wp", "euler_geometry.l_wp",
+    "euler_geometry.h_void", "euler_geometry.l_void",
+})
+EULER_SHIFT_PATHS = frozenset({"euler_position.x0", "euler_position.y0"})
+
+MESH_NOTE_LABEL = {
+    "remesh": "remesh",
+    "may remesh": "may remesh",
+    "elements": "\u00b1 elements",
+    "grid shift": "grid shift",
+    "tool mesh": "tool mesh",
+}
+MESH_NOTE_TIP = {
+    "remesh": "A new value changes the Eulerian element size: another "
+              "Eulerian mesh.",
+    "may remesh": "Discretize is off (Mesh tab): a side of length L gets "
+                  "round(L / elem_size) elements, so the element size "
+                  "L / n follows L. A new value gives another Eulerian "
+                  "mesh, unless the new side happens to give the same "
+                  "element size.",
+    "elements": "Discretize is on (Mesh tab): the sides are floored to whole "
+                "elements of elem_size. The element size stays the same; the "
+                "domain gains or loses whole elements, and a change smaller "
+                "than one element leaves the mesh identical.",
+    "grid shift": "The Eulerian grid moves: same elements, at other "
+                  "coordinates.",
+    "tool mesh": "The tool is rebuilt and remeshed; the Eulerian mesh does "
+                 "not change.",
+}
+
+
+def mesh_note(spec, cfg=None) -> str:
+    """What a new value of `spec` does to the meshes, for the model `cfg`:
+    "remesh" | "may remesh" | "elements" | "grid shift" | "tool mesh" | ""
+    ("" = no mesh changes). Without `cfg`, discretize is taken as on (the
+    default of the model)."""
+    if not getattr(spec, "remesh", False):
+        return ""
+    path = spec.path
+    if path == "elem_size":
+        return "remesh"
+    if path in EULER_DIM_PATHS:
+        disc = True
+        if cfg is not None:
+            disc = bool(getattr(getattr(cfg, "euler_geometry", None),
+                                "discretize", True))
+        return "elements" if disc else "may remesh"
+    if path in EULER_SHIFT_PATHS:
+        return "grid shift"
+    return "tool mesh"
 
 
 # Tool material: the keys the model writes for the tool (no Johnson-Cook).
