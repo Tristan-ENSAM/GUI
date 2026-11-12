@@ -324,12 +324,12 @@ def plan_settings(info: PlanInfo, folder, setup: Optional[CompareSettings]
     """Comparison settings of two runs of a parameter plan: the ZOI, the
     window T, the EVF threshold and eps_q frozen with the plan (when its
     QoI were those of Model sizing), the sampling step and the other eps_q
-    from the Setup tab; threshold eps_q itself (a plan is not a sizing step,
+    from the comparison settings; threshold eps_q itself (a plan is not a sizing step,
     no share). ValueError when neither gives a ZOI."""
     mq = info.model_qoi or {}
     if setup is None and not mq.get("zoi"):
-        raise ValueError("%s: the plan has no ZOI of its own and the Setup "
-                         "tab settings are not available."
+        raise ValueError("%s: the plan has no ZOI of its own and the "
+                         "comparison settings are not available."
                          % Path(folder).name)
     thr = dict(setup.thresholds) if setup is not None else {}
     for q, v in (mq.get("eps") or {}).items():
@@ -356,9 +356,9 @@ def plan_settings(info: PlanInfo, folder, setup: Optional[CompareSettings]
         share=1.0,
         source=("config.json of %s (ZOI, T, \u03b5_q of the plan)%s"
                 % (Path(folder).name,
-                   " + Setup tab (sampling step)" if setup is not None
+                   " + Mesh tab (sampling step)" if setup is not None
                    else ", sampling step = ZOI side / 50")
-                if own else "Setup tab (the plan has no ZOI of its own)"))
+                if own else "comparison settings (the plan has no ZOI of its own)"))
 
 
 # ---------------------------------------------------------------------------

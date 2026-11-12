@@ -37,7 +37,7 @@ from gui.tabs.identify_modes import IdentifyModes
 from gui.tabs.sensitivity_tab import (
     SensitivityTab, EXPLORE_METHODS, SENSITIVITY_METHODS)
 from gui.tabs.optimization_tab import OptimizationTab
-from gui.tabs.setup_tab import SetupTab
+from gui.tabs.initial_run_tab import InitialRunTab
 from gui.widgets.compare_runs_panel import CompareRunsPanel
 from gui.tabs.experimental_data_tab import ExperimentalDataTab
 from gui.widgets.preferences_dialog import PreferencesDialog
@@ -163,7 +163,20 @@ class MainWindow(QMainWindow):
         # identification. "Model sizing", not "Model", so it is not mistaken
         # for the "Numerical Model" tab.
         _wd = lambda: str(getattr(self.prefs, "default_workdir", "") or "")
-        self.setup_tab = SetupTab(self.optimization_tab, start_dir=_wd)
+        self.initial_run_tab = InitialRunTab(self.optimization_tab,
+                                             start_dir=_wd)
+        # The comparison settings, where they belong (decision 2026-11-12):
+        # ZOI + chip line in Geometry, sampling step in Mesh, window T in
+        # Step, eps_q at the top of Identify. Owned by the Model sizing tab.
+        self.geometry_tab.add_extra_group(self.optimization_tab.zoi_group)
+        self.mesh_tab.add_extra_group(self.optimization_tab.sampling_group)
+        self.step_tab.add_extra_group(self.optimization_tab.window_group)
+        self.geometry_tab.preview.extra_drawer = \
+            self.optimization_tab.draw_comparison_overlay
+        for le in (list(self.optimization_tab.le_zoi.values())
+                   + [self.optimization_tab.le_chip_y0]):
+            le.textChanged.connect(self.geometry_tab._refresh)
+        self.geometry_tab._refresh()
         self.compare_tab = CompareRunsPanel(
             folders=self.optimization_tab.known_folders(), start_dir=_wd,
             settings_getter=self.optimization_tab.compare_settings)
@@ -172,10 +185,11 @@ class MainWindow(QMainWindow):
         # tab with two modes, Model sizing and Physical parameters.
         self.identify_modes = IdentifyModes(self.optimization_tab,
                                             self.identify_tab)
+        self.identify_modes.set_header(self.optimization_tab.eps_group)
         self.identify_modes.modeChanged.connect(
             self._refresh_sensitivity_if_visible)
         self.opt_tabs = QTabWidget()
-        self.opt_tabs.addTab(self.setup_tab,         "1 · Setup")
+        self.opt_tabs.addTab(self.initial_run_tab,   "1 · Initial run")
         self.opt_tabs.addTab(self.explore_tab,       "2 · Explore")
         self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Sensitivity")
         self.opt_tabs.addTab(self.identify_modes,    "4 · Identify")

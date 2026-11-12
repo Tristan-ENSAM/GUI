@@ -376,14 +376,14 @@ class SensitivityTab(QWidget):
             cb.setToolTip(
                 "Computed exactly as the ms / mesh / domain studies of "
                 "Model sizing, with the ZOI, window T and EVF threshold of "
-                "the Setup tab. Fields: area mean over the ZOI of the time mean of each "
+                "the comparison settings. Fields: area mean over the ZOI of the time mean of each "
                 "element over its material frames in T. Forces: mean of F/w "
                 "over T. A \"/\u03b5_q\" column is added to the results.")
             cb.toggled.connect(self._mark_plan_stale)
             self._model_qoi_checks[q] = cb
             mg.addWidget(cb, i // 2, i % 2)
         self.lbl_model_qoi = QLabel(
-            "Settings read from the Setup tab when the plan is generated.")
+            "Comparison settings read when the plan is generated.")
         self.lbl_model_qoi.setWordWrap(True)
         self.lbl_model_qoi.setStyleSheet("color: #6b7280;")
         mg.addWidget(self.lbl_model_qoi, (len(mq.MODEL_QOIS) + 1) // 2, 0,
@@ -623,13 +623,13 @@ class SensitivityTab(QWidget):
         self.btn_zoi_propose.setToolTip(
             "S* = max over (field, parameter) of mean over T of "
             "|dq/dp \u00b7 \u03b4| / \u03b5_q, with \u03b5_q and the window T "
-            "of the Setup tab; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
+            "of the comparison settings; Vx, Vy, T masked by EVF \u2265 0.5 of the base "
             "run. ZOI = smallest rectangle containing every element with "
             "S* \u2265 1.")
         self.btn_zoi_propose.setEnabled(False)
         self.btn_zoi_propose.clicked.connect(self._on_propose_zoi)
         zrow.addWidget(self.btn_zoi_propose)
-        self.btn_zoi_apply = QPushButton("Copy ZOI to the Setup tab")
+        self.btn_zoi_apply = QPushButton("Copy ZOI to the Geometry tab")
         self.btn_zoi_apply.setEnabled(False)
         self.btn_zoi_apply.clicked.connect(self._on_apply_zoi)
         zrow.addWidget(self.btn_zoi_apply)
@@ -1303,22 +1303,22 @@ class SensitivityTab(QWidget):
         Model-tab QoI `qois`; ValueError when one is missing or the ZOI
         leaves the zone the runs extract."""
         if self._model_settings_getter is None:
-            raise ValueError("the Model sizing QoI need the settings of the "
-                             "Optimization > Setup tab")
+            raise ValueError("the Model sizing QoI need the comparison settings "
+                             "(ZOI, window T, \u03b5_q)")
         try:
             st = self._model_settings_getter()
             window = tuple(float(v) for v in st["window"])
             zoi = tuple(float(v) for v in st["zoi"])
         except Exception as e:
-            raise ValueError("Set the ZOI and the window T in the Setup tab "
+            raise ValueError("Set the ZOI (Geometry tab) and the window T (Step tab) "
                              "first (%s)." % e)
         eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
         missing = [q for q in qois if not (eps.get(q) or 0) > 0]
         if missing:
-            raise ValueError("Set \u03b5_q of %s in the Setup tab first."
+            raise ValueError("Set \u03b5_q of %s in Optimization > Identify first."
                              % ", ".join(missing))
         if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
-            raise ValueError("The ZOI of the Setup tab is empty.")
+            raise ValueError("The ZOI (Geometry tab) is empty.")
         if any(q in mq.FIELD_QUANTITIES for q in qois) \
                 and not self.chk_full_domain.isChecked():
             b = self.cfg.bbox
@@ -1326,7 +1326,7 @@ class SensitivityTab(QWidget):
                     "ymin": float(b.ymin), "ymax": float(b.ymax)}
             if not mq.zoi_within_crop(zoi, crop):
                 raise ValueError(
-                    "The ZOI of the Setup tab x[%g, %g] y[%g, %g] is "
+                    "The ZOI (Geometry tab) x[%g, %g] y[%g, %g] is "
                     "not inside the ROI the runs extract x[%g, %g] y[%g, %g]: "
                     "widen the ROI (Geometry tab) or tick 'Whole Eulerian "
                     "domain'." % (zoi + (crop["xmin"], crop["xmax"],
@@ -1611,7 +1611,7 @@ class SensitivityTab(QWidget):
 
     def _series_zone(self):
         """(ZOI, EVF threshold) of the time curves: those frozen with the
-        plan's Model sizing QoI, else the current Setup settings, else no
+        plan's Model sizing QoI, else the current comparison settings, else no
         zone (forces only)."""
         st = self._plan_model_qoi
         if not st and self._model_settings_getter is not None:
@@ -2064,7 +2064,7 @@ class SensitivityTab(QWidget):
 
     def _model_settings(self):
         if self._model_settings_getter is None:
-            raise ValueError("the Setup tab settings are not available")
+            raise ValueError("the comparison settings are not available")
         st = self._model_settings_getter()
         return dict(st.get("eps") or {}), tuple(st["window"])
 
@@ -2074,14 +2074,14 @@ class SensitivityTab(QWidget):
         try:
             eps, window = self._model_settings()
         except Exception as e:
-            self.lbl_zoi.setText("Set \u03b5_q and the window T in the Setup "
-                                 "tab first (%s)." % e)
+            self.lbl_zoi.setText("Set \u03b5_q (Identify) and the window T (Step "
+                                 "tab) first (%s)." % e)
             return
         need = sorted({zp.FIELD_TO_EPS[v] for v in self._field_maps
                        if v in zp.FIELD_TO_EPS} - {k for k, v in eps.items()
                                                     if v and v > 0})
         if need:
-            self.lbl_zoi.setText("Missing \u03b5_q in the Setup tab: %s."
+            self.lbl_zoi.setText("Missing \u03b5_q in Optimization > Identify: %s."
                                  % ", ".join(need))
             return
         plan = self._run_plan or self.plan

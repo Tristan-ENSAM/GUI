@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Preliminary checks on one finished run (Setup tab).
+"""Preliminary checks on one finished run (Initial run tab).
 
 Before the sizing studies, reads ONE saved run and shows
 (gui.sensitivity.preliminary_checks):
@@ -54,7 +54,7 @@ def _num(le, default=None):
 
 
 class PreliminaryChecksPanel(QWidget):
-    """Part of the Setup tab. `settings_getter()` returns the Setup tab settings
+    """Part of the Initial run tab. `settings_getter()` returns the comparison settings
     {"eps", "window", "zoi", ...} (eps_q and the default zone).
 
     Left: the inputs, each with a short explanation, the buttons and the
@@ -151,7 +151,7 @@ class PreliminaryChecksPanel(QWidget):
             "The run file gives everything else (element size, filter, tool "
             "and workpiece position). The zone is the rectangle over which "
             "Vx, Vy, T and EVF are averaged at each frame; it starts as the "
-            "ZOI of the Setup tab. Before the ZOI is fixed, take a wide zone "
+            "ZOI (Geometry tab). Before the ZOI is fixed, take a wide zone "
             "around the tool. It must lie inside the extracted region."))
         lv.addWidget(box)
 
@@ -347,7 +347,7 @@ class PreliminaryChecksPanel(QWidget):
         eps = {k: float(v) for k, v in
                (self._model().get("eps") or {}).items()}
         if not eps:
-            raise ValueError("Set ε_q in Optimization > Setup first.")
+            raise ValueError("Set ε_q in Optimization > Identify first.")
         return dict(path=path, zone=zone, L=L * 1e-6, tau=tau, att=att,
                     margin=_num(self.le_margin), gap=gap, band=band, eps=eps)
 

@@ -463,7 +463,7 @@ def test_plan_of_folder_and_labels(tmp_path):
     assert s.step is None and s.share == 1.0
     assert s.zoi == (-0.05, 0.25, -0.1, 0.1) and s.window == (0.4, 1.0)
     assert s.thresholds["T"] == 7.0 and s.thresholds["Vx"] == _THR["Vx"]
-    assert s.grid_step == setup.grid_step and "Setup tab" in s.source
+    assert s.grid_step == setup.grid_step and "Mesh tab" in s.source
     # no frozen ZOI: the Setup settings
     (tmp_path / "b").mkdir()
     info2 = dm.plan_of_folder(_plan_folder(tmp_path / "b", model_qoi=False))

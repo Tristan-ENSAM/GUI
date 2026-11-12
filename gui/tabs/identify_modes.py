@@ -47,11 +47,17 @@ class IdentifyModes(QWidget):
         row.addWidget(self.cb_mode)
         row.addStretch(1)
         root.addLayout(row)
+        self._root = root
         self.stack = QStackedWidget()
         self.stack.addWidget(sizing_tab)
         self.stack.addWidget(physical_tab)
         root.addWidget(self.stack, 1)
         self.cb_mode.currentIndexChanged.connect(self._on_mode)
+
+    def set_header(self, widget: QWidget) -> None:
+        """Show `widget` under the mode selector, above both modes (the
+        admitted deviations eps_q, common to the two modes)."""
+        self._root.insertWidget(1, widget)
 
     def mode(self) -> str:
         return self.cb_mode.currentData()

@@ -533,6 +533,16 @@ class GeometryPreview(QWidget):
         # Build handler_map so any Line2D placeholder that was flagged as
         # an "arrow" entry (velocities, Eulerian BC types) is rendered as
         # a triangular arrow in the legend box, matching the plot.
+        # Extra drawing of the tab that owns the preview (e.g. the ZOI of
+        # Optimization on the Geometry tab), before the legend is built.
+        drawer = getattr(self, "extra_drawer", None)
+        if drawer is not None:
+            try:
+                drawer(self._ax)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "extra preview drawing failed", exc_info=True)
         handler_map = {}
         for child in self._ax.get_lines():
             if getattr(child, _ARROW_FLAG, False):

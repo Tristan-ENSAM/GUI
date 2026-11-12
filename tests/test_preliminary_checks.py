@@ -170,12 +170,12 @@ def test_dialog_help_toggle(qapp):
     assert not any(lab.isHidden() for lab in dlg._help_labels)
 
 
-def test_setup_tab_holds_the_checks(qapp):
-    """The checks sit in Optimization > Setup and start from its ZOI."""
+def test_initial_run_tab_holds_the_checks(qapp):
+    """The checks sit in Optimization > Initial run and start from the ZOI."""
     from gui.core.model_config import ModelConfig
     from gui.tabs.optimization_tab import OptimizationTab
-    from gui.tabs.setup_tab import SetupTab
+    from gui.tabs.initial_run_tab import InitialRunTab
     tab = OptimizationTab(ModelConfig())
-    setup = SetupTab(tab)
+    setup = InitialRunTab(tab)
     assert setup.prelim.le_zone["xmin"].text() != ""
     assert not hasattr(tab, "btn_prelim")

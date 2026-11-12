@@ -67,7 +67,7 @@ def _plot_panel(canvas):
 class CompareRunsPanel(QWidget):
     """The Compare runs tab; `folders` are the study folders listed at
     start (`add_folders` adds the later ones). `settings_getter` returns the
-    current comparison settings of the Setup tab (dm.CompareSettings), used
+    current comparison settings of the comparison settings (dm.CompareSettings), used
     when the folder of the reference run is not a Model sizing study (e.g. a
     Parameter plans folder)."""
 
@@ -121,7 +121,8 @@ class CompareRunsPanel(QWidget):
             "runs made with the same parameters to show their\n"
             "repeatability. They are listed under 'Result files'. Outside a\n"
             "Model sizing study folder, the comparison uses the settings of\n"
-            "the Setup tab (ZOI, sampling step, T, ε_q).")
+            "the comparison settings (ZOI in Geometry, sampling step in\n"
+            "Mesh, T in Step, ε_q in Identify).")
         b.clicked.connect(self._on_add_files)
         row.addWidget(b)
         lay.addLayout(row)
@@ -493,9 +494,9 @@ class CompareRunsPanel(QWidget):
                     item.setEnabled(True)
 
     def _settings_for(self, run):
-        """Settings of the reference run's folder, else the Setup tab's
+        """Settings of the reference run's folder, else the comparison
         current ones; (settings, None) or (None, reason). A parameter plan
-        folder: its frozen ZOI, T and eps_q, completed by the Setup tab."""
+        folder: its frozen ZOI, T and eps_q, completed by the comparison settings."""
         info = self._plan_of(run)
         if info is not None:
             setup = None
@@ -518,7 +519,7 @@ class CompareRunsPanel(QWidget):
                 if s is not None:
                     return s, None
             except Exception as e:
-                err += "; Setup tab: %s" % e
+                err += "; comparison settings: %s" % e
         return None, err
 
     # ---- comparison ----------------------------------------------------
