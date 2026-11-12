@@ -454,7 +454,7 @@ def test_plan_of_folder_and_labels(tmp_path):
     info = dm.plan_of_folder(folder)
     assert info.study == "grid" and info.base_job == "grid_run001"
     assert dm.plan_run_label(info, "grid_run001") == \
-        "mu 0.3 | grid_run001 (Ref)"
+        "\u03bc 0.3 | grid_run001 (Ref)"
     assert dm.plan_run_label(info, "nope") is None
     # a sizing study folder is not a plan
     assert dm.plan_of_folder(_study_folder(tmp_path)) is None
@@ -486,9 +486,9 @@ def test_window_compares_two_runs_of_a_plan(qapp, tmp_path, monkeypatch):
     dlg = dlg_mod.CompareRunsPanel(folders=[str(folder)],
                                    settings_getter=_settings)
     assert dlg.cb_a.count() == 3
-    assert dlg.cb_a.currentText() == "mu 0.3 | grid_run001 (Ref)"
+    assert dlg.cb_a.currentText() == "\u03bc 0.3 | grid_run001 (Ref)"
     assert dlg.select_pair(folder, "grid_run001", "grid_run002")
-    assert dlg.cb_b.currentText().startswith("mu 0.4 | grid_run002")
+    assert dlg.cb_b.currentText().startswith("\u03bc 0.4 | grid_run002")
     dlg._on_compare()
     assert dlg._pair is not None
     assert dlg._pair.settings.thresholds["T"] == 7.0
@@ -497,3 +497,28 @@ def test_window_compares_two_runs_of_a_plan(qapp, tmp_path, monkeypatch):
     dev = dlg.fig_dev.axes[0]
     assert any(ln.get_label() == "threshold = ε" for ln in dev.lines)
     assert not dlg.select_pair(folder, "grid_run001", "missing")
+
+
+def test_every_parameter_has_a_symbol_in_the_glossary():
+    """Compare runs labels use the short symbols; the Help > Glossary tab
+    explains each of them (Tristan 2026-11-12)."""
+    from gui.sensitivity import param_registry as pr
+    from gui.tabs.help_tab import glossary_rows
+    syms = [pr.symbol_of(s.path) for s in pr.REGISTRY]
+    assert all(s in pr.SYMBOLS.values() for s in syms)
+    assert len(set(syms)) == len(syms)
+    listed = {row[0] for row in glossary_rows()}
+    assert set(syms) <= listed
+    assert {"Vx", "Fc", "e", "ZOI", "ms*", "sweep_run / grid_run"} <= listed
+
+
+def test_help_tab_in_main_window(qapp):
+    from gui.main import MainWindow
+    w = MainWindow(); w._dirty = False
+    names = [w.tabs.tabText(i) for i in range(w.tabs.count())]
+    assert names[-1] == "Help"
+    g = w.help_tab.glossary
+    g.le_search.setText("frottement")
+    shown = [g.table.item(r, 0).text() for r in range(g.table.rowCount())
+             if not g.table.isRowHidden(r)]
+    assert shown == ["μ"]

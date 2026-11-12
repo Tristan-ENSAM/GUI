@@ -382,6 +382,62 @@ def mesh_note(spec, cfg=None) -> str:
     return "tool mesh"
 
 
+# Short symbol of each parameter, for compact labels (Compare runs) and the
+# Help > Glossary tab (Tristan 2026-11-12: names with abbreviations, a
+# glossary in Help). Workpiece material: plain symbol; tool material: "_t".
+SYMBOLS = {
+    "euler_material.rho": "\u03c1", "euler_material.E": "E",
+    "euler_material.nu": "\u03bd", "euler_material.k": "k",
+    "euler_material.Cp": "Cp", "euler_material.alpha": "\u03b1",
+    "euler_material.beta": "\u03b2", "euler_material.A": "A",
+    "euler_material.B": "B", "euler_material.n": "n",
+    "euler_material.m": "m", "euler_material.Tm": "Tm",
+    "euler_material.Tr": "Tr", "euler_material.C": "C",
+    "euler_material.eps_dot0": "\u03b5\u03070",
+    "euler_material.D1": "D1", "euler_material.D2": "D2",
+    "euler_material.D3": "D3", "euler_material.D4": "D4",
+    "euler_material.D5": "D5", "euler_material.eps0": "\u03b5\u0307ref",
+    "euler_material.Gf": "Gf",
+    "tool_material.rho": "\u03c1_t", "tool_material.E": "E_t",
+    "tool_material.nu": "\u03bd_t", "tool_material.k": "k_t",
+    "tool_material.Cp": "Cp_t", "tool_material.alpha": "\u03b1_t",
+    "tool_geometry.rake_angle": "\u03b3", "tool_geometry.clear_angle": "\u03b1c",
+    "tool_geometry.r_tool": "r\u03b2", "tool_geometry.h_tool": "h_t",
+    "tool_geometry.l_tool": "l_t",
+    "tool_position.x0": "x_t", "tool_position.y0": "y_t",
+    "euler_geometry.h_wp": "h_wp", "euler_geometry.l_wp": "l_wp",
+    "euler_geometry.h_void": "h_void", "euler_geometry.l_void": "l_void",
+    "wp_position.x0": "x_wp", "wp_position.y0": "y_wp",
+    "euler_position.x0": "x_E", "euler_position.y0": "y_E",
+    "bcs.cutting_speed": "Vc", "bcs.initial_velocity": "V0",
+    "bcs.ambient_temperature": "T0",
+    "interaction.friction_coeff": "\u03bc",
+    "interaction.slip_tolerance": "s_tol",
+    "interaction.heat_conversion_fraction": "\u03b7",
+    "interaction.heat_fraction_to_slave": "f_wp",
+    "interaction.gap_conductance": "h_c",
+    "elem_size": "h", "tool_elem_size": "h_tip",
+    "inter_elem_size": "h_face", "max_elem_size": "h_edge",
+    "step.mass_scaling_factor": "ms", "step.sim_time": "Ttot",
+    "bbox.xmin": "ROI_xmin", "bbox.xmax": "ROI_xmax",
+    "bbox.ymin": "ROI_ymin", "bbox.ymax": "ROI_ymax",
+    "bbox.zmin": "ROI_zmin", "bbox.zmax": "ROI_zmax",
+    "step.n_frames": "N_f", "step.output.ho_n_intervals": "N_h",
+    "step.output_filter_camera_fps": "f_cam",
+    "step.output_filter_camera_atten_db": "A_cam",
+    "step.output_filter_force_acq_hz": "f_F",
+    "step.output_filter_force_atten_db": "A_F",
+    "step.output_filter_cutoff_hz": "fc_cam",
+    "step.output_filter_cutoff_history_hz": "fc_F",
+}
+
+
+def symbol_of(path: str) -> str:
+    """Short symbol of a parameter path; the last part of the path when it
+    has none."""
+    return SYMBOLS.get(path) or str(path).rsplit(".", 1)[-1]
+
+
 # Tool material: the keys the model writes for the tool (no Johnson-Cook).
 _TOOL_MAT_KEYS = ("rho", "E", "nu", "k", "Cp", "alpha")
 
