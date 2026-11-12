@@ -57,6 +57,7 @@ class MeshTab(QWidget):
         form_lay.addWidget(self._build_seeds_group())
         form_lay.addWidget(self._build_info_panel())
         form_lay.addStretch()
+        self._form_lay = form_lay
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -87,6 +88,13 @@ class MeshTab(QWidget):
     # =====================================================================
     # Sub-groups
     # =====================================================================
+
+    def add_extra_group(self, widget) -> None:
+        """Show `widget` (a group owned by another tab, e.g. the comparison
+        settings of Optimization) at the end of this tab's form."""
+        lay = self._form_lay
+        lay.insertWidget(max(0, lay.count() - 1), widget)
+
     def _build_seeds_group(self) -> QGroupBox:
         g = QGroupBox("Global mesh seeds")
         lay = QVBoxLayout(g)

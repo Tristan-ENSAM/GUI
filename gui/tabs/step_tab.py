@@ -96,6 +96,7 @@ class StepTab(QWidget):
         # and extraction defaults are fixed (nodal V + NT11, element EVF,
         # history RF1/RF2 synced to the field frames).
         inner_lay.addStretch()
+        self._form_lay = inner_lay
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -117,6 +118,13 @@ class StepTab(QWidget):
     # =====================================================================
     # Sub-groups
     # =====================================================================
+
+    def add_extra_group(self, widget) -> None:
+        """Show `widget` (a group owned by another tab, e.g. the comparison
+        settings of Optimization) at the end of this tab's form."""
+        lay = self._form_lay
+        lay.insertWidget(max(0, lay.count() - 1), widget)
+
     def _build_duration_group(self) -> QGroupBox:
         g = QGroupBox("Step duration & sampling")
         v = QVBoxLayout(g)

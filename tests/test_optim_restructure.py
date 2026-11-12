@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Optimization sub-tabs Setup / Model sizing / Parameter plans / Compare
-runs (decision 2026-11-04): the comparison settings moved to Setup without
-changing what is saved, Compare runs replaces the deviation-maps window."""
+"""Optimization sub-tabs (decisions 2026-11-04 and 2026-11-12): the Setup
+tab is gone; its comparison settings are shown in Geometry (ZOI, chip line),
+Mesh (sampling step), Step (window T) and at the top of Identify (eps_q,
+step weights) without changing what is saved; Compare runs replaces the
+deviation-maps window."""
 from __future__ import annotations
 
 from gui.core.model_config import ModelConfig
 from gui.tabs.optimization_tab import OptimizationTab
-from gui.tabs.setup_tab import SetupTab
 
 
 def _inside(widget, ancestor) -> bool:
@@ -18,17 +19,42 @@ def _inside(widget, ancestor) -> bool:
     return False
 
 
-def test_comparison_settings_shown_in_setup_not_in_sizing(qapp):
-    opt = OptimizationTab(ModelConfig())
-    setup = SetupTab(opt)
-    for w in (opt.le_zoi["xmin"], opt._q_eps["Vx"], opt.le_grid_step,
-              opt._dom_texts["window_start"]):
-        assert _inside(w, setup) and not _inside(w, opt)
-    # weights of the steps and guards stay with the steps
-    for w in (opt._eps_share["ms"], opt._dom_texts["rk_max"],
-              opt.cb_reuse_runs):
-        assert _inside(w, opt) and not _inside(w, setup)
-    assert _inside(opt.setup_preview, setup)
+def test_comparison_settings_shown_where_they_belong(qapp):
+    from gui.main import MainWindow
+    w = MainWindow(); w._dirty = False
+    opt = w.optimization_tab
+    where = [
+        (opt.le_zoi["xmin"], w.geometry_tab),
+        (opt.le_chip_y0, w.geometry_tab),
+        (opt.le_grid_step, w.mesh_tab),
+        (opt._dom_texts["window_start"], w.step_tab),
+        (opt._q_eps["Vx"], w.identify_modes),
+        (opt.le_chip_eps, w.identify_modes),
+        (opt._eps_share["ms"], w.identify_modes),
+    ]
+    for widget, tab in where:
+        assert _inside(widget, tab), widget
+        assert not _inside(widget, opt)
+    # eps_q sit above both modes, not inside the Model sizing page
+    assert not _inside(opt._q_eps["Vx"], w.identify_modes.stack)
+    # guards and run reuse stay with the steps
+    for widget in (opt._dom_texts["rk_max"], opt.cb_reuse_runs):
+        assert _inside(widget, opt)
+    names = [w.opt_tabs.tabText(i) for i in range(w.opt_tabs.count())]
+    assert "1 · Setup" not in names
+
+
+def test_geometry_preview_draws_the_zoi(qapp):
+    from gui.main import MainWindow
+    w = MainWindow(); w._dirty = False
+    opt = w.optimization_tab
+    for k, v in zip(("xmin", "xmax", "ymin", "ymax"),
+                    ("-0.1", "0.05", "-0.02", "0.06")):
+        opt.le_zoi[k].setText(v)
+    labels = [str(p.get_label()) for p in w.geometry_tab.preview._ax.patches]
+    assert "ZOI" in labels
+    lines = [str(l.get_label()) for l in w.geometry_tab.preview._ax.lines]
+    assert "Chip thickness line" in lines
 
 
 def test_settings_saved_with_the_same_keys(qapp):
@@ -53,29 +79,6 @@ def test_settings_saved_with_the_same_keys(qapp):
     assert again._dom_texts["rk_max"].text() == "0.07"
     assert again._eps_share["mesh"].text() == "2"
     assert again.le_grid_step.text() == "0.003"
-
-
-def test_advanced_counts_split_between_the_two_groups(qapp):
-    opt = OptimizationTab(ModelConfig())
-    assert {"common", "sizing"} <= set(opt._advanced)
-    opt._dom_texts["window_start"].setText("0.5")
-    opt._dom_texts["rhg_max"].setText("0.2")
-    common = [w for w, _d in opt._advanced["common"][1]()]
-    sizing = [w for w, _d in opt._advanced["sizing"][1]()]
-    assert opt._dom_texts["window_start"] in common
-    assert opt._dom_texts["rhg_max"] in sizing
-    assert opt._dom_texts["rhg_max"] not in common
-
-
-def test_setup_help_toggles_the_settings_hints(qapp):
-    opt = OptimizationTab(ModelConfig())
-    setup = SetupTab(opt)
-    setup.show()
-    assert opt.setup_hints
-    setup.cb_help.setChecked(True)
-    assert all(lab.isVisible() for lab in setup._hints)
-    setup.cb_help.setChecked(False)
-    assert not any(lab.isVisible() for lab in setup._hints)
 
 
 def test_compare_button_opens_the_compare_tab(qapp):

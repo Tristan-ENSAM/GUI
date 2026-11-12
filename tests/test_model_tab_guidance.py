@@ -34,7 +34,7 @@ def test_gci_plan_defaults_to_four_meshes(tab):
 
 
 def test_advanced_sections_start_collapsed_and_unchanged(tab):
-    assert set(tab._advanced) == {"common", "sizing", "ms", "mesh", "domain"}
+    assert set(tab._advanced) == {"sizing", "ms", "mesh", "domain"}
     for sec, _fields in tab._advanced.values():
         assert not sec.is_expanded()
         assert sec.body.isHidden()
@@ -52,9 +52,16 @@ def test_essential_inputs_stay_outside_the_advanced_sections(tab):
               tab.le_gci_finest, tab.sp_gci_n, tab.btn_ms, tab.btn_mesh,
               tab.btn_domain, tab.btn_checks):
         assert not inside(w)
-    for w in (tab.le_grid_step, tab.le_ms_elem, tab.le_gci_ratio,
+    # The sampling step and the window T are shown in the Mesh and Step
+    # tabs (decision 2026-11-12), not in an advanced section.
+    for w in (tab.le_grid_step, tab._dom_texts["window_start"],
+              tab._dom_texts["window_end"]):
+        assert not inside(w)
+    for w in (tab.le_ms_elem, tab.le_gci_ratio,
               tab.le_gci_min, tab.sp_margin, *tab._max.values(),
-              *tab._dom_spins.values(), *tab._dom_texts.values()):
+              *tab._dom_spins.values(),
+              *[le for a, le in tab._dom_texts.items()
+                if not a.startswith("window_")]):
         assert inside(w)
 
 
@@ -70,14 +77,10 @@ def test_hidden_change_is_counted_on_the_header(tab):
 
 
 def test_count_ignores_number_formatting(tab):
-    sec = tab._advanced["common"][0]
-    tab._dom_texts["window_start"].setText("0,30")     # = default 0.3
-    assert sec.n_changed() == 0
-    tab._dom_texts["window_end"].setText("0.9")
-    assert sec.n_changed() == 1
     # the guards are counted in the sizing section (moved 2026-11-04)
+    sec = tab._advanced["sizing"][0]
     tab._dom_texts["rk_max"].setText("0.01")
-    assert tab._advanced["sizing"][0].n_changed() == 1
+    assert sec.n_changed() == 1
 
 
 def test_loaded_profile_with_non_default_values_is_flagged(qapp):

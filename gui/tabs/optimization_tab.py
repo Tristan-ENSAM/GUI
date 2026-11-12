@@ -290,18 +290,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self._hints.append(lab)
             return lab
 
-        # Grey help of the comparison settings: shown by the Setup tab's own
-        # "Show help" box (setup_tab.py), as the group is shown there.
-        self.setup_hints = []
-
-        def setup_hint(text):
-            lab = QLabel(text)
-            lab.setWordWrap(True)
-            lab.setStyleSheet("color:#6b7280;")
-            lab.setVisible(False)
-            self.setup_hints.append(lab)
-            return lab
-
         def grid(group):
             g = QGridLayout(group)
             g.setHorizontalSpacing(8)
@@ -354,52 +342,71 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         intro = hint(
             "Makes the simulation results independent of three numerical "
             "choices (mass scaling, element size, Eulerian domain). Check "
-            "the comparison settings in the Setup tab, then click 'Run all steps', or run "
+            "the comparison settings (ZOI in Geometry, window T in Step, "
+            "ε_q above), then click 'Run all steps', or run "
             "steps 0 to 3 one by one and click 'Use in model' after each. "
             "Each step says whether it is done for the current model. "
             "Hover over a field for its definition and the source of its "
             "default.")
 
-        # ---- Comparison settings: ZOI, eps_q (+ advanced: grid step, T) --
-        # The ZOI is DISTINCT from the ROI (Geometry tab, model output set
-        # for DIC/IRT); empty fields default to the ROI. The ZOI, T and the
-        # tolerances eps_q are shared by every tab of Optimization: this
-        # group is shown in the Setup tab (gui/tabs/setup_tab.py), not here.
-        # Its widgets stay owned by this tab, which reads and saves them.
-        gcom = QGroupBox("Comparison settings (used by every tab)")
-        cv0 = QVBoxLayout(gcom)
-        cv0.setSpacing(4)
-        cg0 = QGridLayout()
+        # ---- Comparison settings, shown where they belong (decision
+        # 2026-11-12, the Setup tab is gone): ZOI and chip line in Numerical
+        # Model > Geometry, ZOI sampling step in Mesh, window T in Step,
+        # eps_q and the step weights at the top of Optimization > Identify.
+        # The widgets stay owned by this tab, which reads, validates and
+        # saves them with the profile under the same keys as before.
+        # -- ZOI + chip-thickness line (Geometry tab)
+        gzoi = QGroupBox("Comparison zone ZOI (Optimization)")
+        cg0 = QGridLayout(gzoi)
         cg0.setHorizontalSpacing(8)
         cg0.setVerticalSpacing(4)
-        cv0.addLayout(cg0)
-        lab = QLabel("Comparison zone ZOI [mm]")
+        lab = QLabel("Zone where two runs are compared [mm]")
         lab.setToolTip(
-            "Zone where two runs are compared (measurement zone of this tab).\n"
-            "It is NOT the ROI: the ROI is the output zone of the Geometry\n"
-            "tab, matched to the DIC/IRT fields. An empty bound takes the\n"
-            "ROI bound. The Sensitivity tab can propose a ZOI from its\n"
-            "maps ('Copy ZOI to the Setup tab').")
-        cg0.addWidget(lab, 0, 0)
+            "Zone where two runs are compared (measurement zone of the\n"
+            "Optimization tabs). It is NOT the ROI: the ROI is the output\n"
+            "zone above, matched to the DIC/IRT fields. An empty bound takes\n"
+            "the ROI bound. The Sensitivity tab can propose a ZOI from its\n"
+            "maps ('Copy ZOI to the Geometry tab').")
+        cg0.addWidget(lab, 0, 0, 1, 4)
         self.le_zoi = {}
-        zoi_row = QHBoxLayout()
-        zoi_row.setSpacing(4)
-        for lbl, key in [("x min", "xmin"), ("x max", "xmax"),
-                         ("y min", "ymin"), ("y max", "ymax")]:
-            zoi_row.addWidget(QLabel(lbl))
+        for i, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax"),
+                                        ("y min", "ymin"), ("y max", "ymax")]):
+            r, c = 1 + i // 2, 2 * (i % 2)
+            cg0.addWidget(QLabel(lbl), r, c)
             le = num_edit(placeholder="= ROI",
                           tip="ZOI bound [mm]; empty = ROI bound")
+            le.setFixedWidth(80)
             self.le_zoi[key] = le
-            zoi_row.addWidget(le)
-            zoi_row.addSpacing(6)
+            cg0.addWidget(le, r, c + 1)
             le.textChanged.connect(self._schedule_preview)
         self.btn_zoi_from_roi = QPushButton("ZOI = ROI")
         self.btn_zoi_from_roi.setToolTip("Copy the ROI of the Geometry tab "
                                          "into the ZOI fields.")
         self.btn_zoi_from_roi.clicked.connect(self._zoi_from_roi)
-        zoi_row.addWidget(self.btn_zoi_from_roi)
-        zoi_row.addStretch(1)
-        cg0.addLayout(zoi_row, 0, 1)
+        cg0.addWidget(self.btn_zoi_from_roi, 3, 0, 1, 2)
+        lab_y0 = QLabel("Chip line y0")
+        lab_y0.setToolTip(
+            "Height above the workpiece of the line on which the chip\n"
+            "thickness e is measured (QoI e of Explore, Sensitivity and\n"
+            "Identify). Empty = the uncut chip thickness t1.")
+        cg0.addWidget(lab_y0, 4, 0)
+        e_row = QHBoxLayout()
+        e_row.setSpacing(4)
+        self.le_chip_y0 = num_edit(
+            placeholder="= t1", tip="Height of the measuring line above the "
+            "workpiece [mm]. Empty = the uncut chip thickness t1.")
+        self.le_chip_y0.setFixedWidth(64)
+        e_row.addWidget(self.le_chip_y0)
+        e_row.addWidget(QLabel("mm"))
+        e_row.addStretch(1)
+        cg0.addLayout(e_row, 4, 1, 1, 3)
+        cg0.setColumnStretch(4, 1)
+        self.zoi_group = gzoi
+        # -- eps_q, eps_e and the step weights (Identify tab, both modes)
+        geps = QGroupBox("Admitted deviations ε_q (every Optimization tab)")
+        cg0 = QGridLayout(geps)
+        cg0.setHorizontalSpacing(8)
+        cg0.setVerticalSpacing(4)
         # Absolute tolerances eps_q: ONE set for every study (decision of
         # 2026-10-07): the ms and domain E_max and the GCI mesh selection.
         lab = QLabel("Admitted deviation ε_q")
@@ -410,8 +417,11 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "quantity, the means over the ZOI and the time window T of the\n"
             "two runs differ by less than its ε_q (E_max < 1).\n"
             "Defaults: values used on the reference case (Ti6Al4V\n"
-            "orthogonal cutting).")
-        cg0.addWidget(lab, 1, 0)
+            "orthogonal cutting). For another material or cutting\n"
+            "condition, set each one to the smallest difference that\n"
+            "matters for your comparison with the experiment, e.g. not\n"
+            "larger than the measurement uncertainty of that quantity.")
+        cg0.addWidget(lab, 0, 0)
         self._q_eps = {}
         _unit = {q: u for (q, _f, u) in _QUANTITIES}
         eps_row = QHBoxLayout()
@@ -436,7 +446,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             eps_row.addWidget(ulbl)
             eps_row.addSpacing(10)
         eps_row.addStretch(1)
-        cg0.addLayout(eps_row, 1, 1)
+        cg0.addLayout(eps_row, 0, 1)
         # Chip thickness e: a QoI of Explore / Sensitivity / Identify only
         # (the sizing studies keep their six quantities).
         lab_e = QLabel("chip thickness e")
@@ -448,7 +458,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Used by Explore, Sensitivity and Identify, not by the sizing\n"
             "studies.")
         lab_e.setToolTip(tip_e)
-        cg0.addWidget(lab_e, 2, 0)
+        cg0.addWidget(lab_e, 1, 0)
         e_row = QHBoxLayout()
         e_row.setSpacing(4)
         e_row.addWidget(QLabel("\u03b5_e"))
@@ -459,29 +469,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self.le_chip_eps.setFixedWidth(64)
         e_row.addWidget(self.le_chip_eps)
         e_row.addWidget(QLabel("mm"))
-        e_row.addSpacing(10)
-        e_row.addWidget(QLabel("line height y0"))
-        self.le_chip_y0 = num_edit(
-            placeholder="= t1", tip="Height of the measuring line above the "
-            "workpiece [mm]. Empty = the uncut chip thickness t1.")
-        self.le_chip_y0.setFixedWidth(64)
-        e_row.addWidget(self.le_chip_y0)
-        e_row.addWidget(QLabel("mm"))
         e_row.addStretch(1)
-        cg0.addLayout(e_row, 2, 1)
+        cg0.addLayout(e_row, 1, 1)
         cg0.setColumnStretch(1, 1)
-        cv0.addWidget(setup_hint(
-            "ε_q: defaults are those of the reference case (Ti6Al4V). "
-            "For another "
-            "material or cutting condition, set each one to the smallest "
-            "difference that matters for your comparison with the "
-            "experiment, e.g. not larger than the measurement uncertainty "
-            "of that quantity."))
-        sec = advanced("common", lambda: [
-            (self.le_grid_step, ""),
-            *[(self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
-              for a, _l, _t in _DOM_TEXTS if a.startswith("window_")]])
-        ag = sub_grid(sec.body)
+        self._eps_grid = cg0            # the step weights go on row 2
+        self.eps_group = geps
+        # -- ZOI sampling step (Mesh tab)
+        gsam = QGroupBox("ZOI sampling (Optimization)")
+        ag = QGridLayout(gsam)
+        ag.setHorizontalSpacing(8)
         ag.addWidget(QLabel("ZOI sampling step [mm]"), 0, 0)
         self.le_grid_step = num_edit(
             placeholder="= elem",
@@ -491,6 +487,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "by its area inside the ZOI), not from these points.\n"
                 "Default (empty): the element size of the Mesh tab.")
         ag.addWidget(self.le_grid_step, 0, 1)
+        ag.setColumnStretch(2, 1)
+        self.sampling_group = gsam
+        # -- time window T (Step tab)
+        gwin = QGroupBox("Comparison window T (Optimization)")
+        ag = QGridLayout(gwin)
+        ag.setHorizontalSpacing(8)
         lab = QLabel("Time window T (fraction of the simulated time)")
         lab.setToolTip(
             "Part of the simulated time over which the runs are compared\n"
@@ -500,7 +502,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Default 0.3 to 1.0: the value hard-coded in the studies before\n"
             "it became a setting. Also used by the Explore, Sensitivity and\n"
             "Compare runs tabs.")
-        ag.addWidget(lab, 1, 0)
+        ag.addWidget(lab, 0, 0)
         self._dom_texts = {}
         win_row = QHBoxLayout()
         win_row.setSpacing(4)
@@ -518,20 +520,15 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             else:                               # one safeguard per row
                 guard_rows.append((lab, le))
         win_row.addStretch(1)
-        ag.addLayout(win_row, 1, 1, 1, 2)
+        ag.addLayout(win_row, 0, 1, 1, 2)
         ag.setColumnStretch(3, 1)
-        cv0.addWidget(sec)
-        self.settings_group = gcom
+        self.window_group = gwin
 
         # ---- Sizing settings: weight of each step, guards, reuse ---------
         # Only the steps of this tab use them.
         gsz = QGroupBox("Sizing settings (used by the steps below)")
         sv0 = QVBoxLayout(gsz)
         sv0.setSpacing(4)
-        wg = QGridLayout()
-        wg.setHorizontalSpacing(8)
-        wg.setVerticalSpacing(4)
-        sv0.addLayout(wg)
         lab = QLabel("Weight of each step in ε_q")
         share_tip = (
             "How ε_q is split between the steps: ms (step 0), h (step 1)\n"
@@ -546,7 +543,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "checks use the same shares (ms at the point: ms share; domain\n"
             "grown: D share; mesh plan on D*: h share).")
         lab.setToolTip(share_tip)
-        wg.addWidget(lab, 0, 0)
+        self._eps_grid.addWidget(lab, 2, 0)
         share_row = QHBoxLayout()
         share_row.setSpacing(4)
         self._eps_share = {}
@@ -561,8 +558,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             share_row.addWidget(le)
             share_row.addSpacing(10)
         share_row.addStretch(1)
-        wg.addLayout(share_row, 0, 1)
-        wg.setColumnStretch(1, 1)
+        self._eps_grid.addLayout(share_row, 2, 1)
         sec = advanced("sizing", lambda: [
             (self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
             for a, _l, _t in _DOM_TEXTS if not a.startswith("window_")])
@@ -981,7 +977,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         btn_prev = QPushButton("Refresh preview")
         btn_prev.clicked.connect(self._draw_preview)
         pv.addWidget(btn_prev)
-        # The same drawing for the Setup tab, next to the ZOI fields.
+        # The same drawing for the Initial run tab, with its checks.
         self.setup_preview = GeometryPreview()
         self.setup_preview.fit_override = self._draw_preview
 
@@ -2183,6 +2179,27 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self.le_zoi[k].setText("%.6g" % float(v))
         self._draw_preview()
 
+    def draw_comparison_overlay(self, ax) -> None:
+        """Draw the ZOI and the chip-thickness line on a preview of the
+        model (the Geometry tab, where they are set)."""
+        from matplotlib.patches import Rectangle
+        zoi = self.zoi()
+        if zoi[1] > zoi[0] and zoi[3] > zoi[2]:
+            ax.add_patch(Rectangle((zoi[0], zoi[2]), zoi[1] - zoi[0],
+                                   zoi[3] - zoi[2], fill=False,
+                                   edgecolor=_C_ZOI, lw=1.8, zorder=7,
+                                   label="ZOI"))
+        try:
+            ys = float(self.cfg.wp_position.y0)
+            t1 = ys - float(self.cfg.tool_position.y0)
+        except (AttributeError, TypeError, ValueError):
+            return
+        y0 = self._float_or(self.le_chip_y0, t1 if t1 > 0 else None)
+        if y0 is None:
+            return
+        ax.axhline(ys + y0, color=_C_ZOI, lw=1.0, ls=":", zorder=7,
+                   label="Chip thickness line")
+
     def model_settings(self) -> dict:
         """eps_q, the window T, the ZOI and the EVF threshold, for the ZOI
         proposal and the QoI of the Parameter plans tab (same values as the
@@ -2238,7 +2255,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         return CompareSettings(
             step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
             window=self.window(), thresholds=self.thresholds(),
-            source="current settings of the Setup tab (the folder of run a "
+            source="current comparison settings (the folder of run a "
                    "is not a study of the Model sizing tab)")
 
     def _validate_launch(self, folder=None):
@@ -3711,7 +3728,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, title,
-                "Set the six absolute tolerances eps_q of the Setup tab "
+                "Set the six absolute tolerances eps_q at the top of Identify "
                 "(Vx, Vy, T, EVF, Fc, Ff) first.")
             return None
         try:
