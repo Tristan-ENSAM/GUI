@@ -37,6 +37,7 @@ from gui.tabs.identify_modes import IdentifyModes
 from gui.tabs.sensitivity_tab import (
     SensitivityTab, EXPLORE_METHODS, SENSITIVITY_METHODS)
 from gui.tabs.optimization_tab import OptimizationTab
+from gui.tabs.help_tab import HelpTab
 from gui.tabs.setup_tab import SetupTab
 from gui.widgets.compare_runs_panel import CompareRunsPanel
 from gui.tabs.experimental_data_tab import ExperimentalDataTab
@@ -190,6 +191,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.model_tabs,        "Numerical Model")
         tabs.addTab(self.experimental_tab,  "Experimental Data")
         tabs.addTab(self.opt_tabs,          "Optimization")
+        # Glossary of the abbreviations (run names, Compare runs, tables).
+        self.help_tab = HelpTab()
+        tabs.addTab(self.help_tab,          "Help")
         self.tabs = tabs
         self.setCentralWidget(tabs)
 

@@ -301,9 +301,11 @@ def plan_of_folder(folder) -> Optional[PlanInfo]:
 
 
 def plan_run_label(info: PlanInfo, job: str) -> Optional[str]:
-    """'Coefficient de frottement 0.2, Vitesse de coupe 40 | grid_run003
-    (Ref)': the values of the varied parameters (the plan's units). None
-    when the job is not in the plan."""
+    """'\u03bc 0.2, Vc 40 m/min | grid_run003 (Ref)': the short symbols
+    (param_registry.SYMBOLS, see Help > Glossary) and values of the varied
+    parameters, in the plan's units. None when the job is not in the
+    plan."""
+    from gui.sensitivity.param_registry import SYMBOLS
     r = info.runs.get(job)
     if r is None:
         return None
@@ -312,7 +314,8 @@ def plan_run_label(info: PlanInfo, job: str) -> Optional[str]:
         v = r["values"].get(p["path"])
         if v is None:
             continue
-        cells.append("%s %s%s" % (p.get("label") or p["path"],
+        name = SYMBOLS.get(p["path"]) or p.get("label") or p["path"]
+        cells.append("%s %s%s" % (name,
                                   "%g" % float(v),
                                   (" " + p["unit"]) if p.get("unit") else ""))
     text = "%s | %s" % (", ".join(cells) or "–", job)
