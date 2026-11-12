@@ -6,7 +6,7 @@ Find the values of the ticked parameters whose QoI match a reference:
     with Min / Max (search bounds), Start (empty = the model value) and
     the Note column;
   * reference: the six QoI of the sizing studies (Vx, Vy, T, EVF, Fc, Ff,
-    with the ZOI, window T and eps_q of the Setup tab), typed or read from
+    with the ZOI, window T and eps_q at the top of Identify), typed or read from
     a finished run (numerical reference); a weight per QoI;
   * search: fixed point (one parameter at a time) or Levenberg-Marquardt,
     run budget, stagnation tau and n (gui.identify.engine).
@@ -69,30 +69,30 @@ def _fmt(v) -> str:
 
 
 def setup_qoi_settings(getter, cfg, qois) -> dict:
-    """ZOI, window T, EVF threshold and eps_q of the Setup tab for the QoI
+    """ZOI, window T, EVF threshold and eps_q at the top of Identify for the QoI
     `qois`; ValueError naming what is missing."""
     if getter is None:
-        raise ValueError("Identify needs the settings of the Setup tab.")
+        raise ValueError("Identify needs the comparison settings (ZOI, window T, ε_q).")
     try:
         st = getter()
         window = tuple(float(v) for v in st["window"])
         zoi = tuple(float(v) for v in st["zoi"])
     except Exception as e:
-        raise ValueError("Set the ZOI and the window T in the Setup tab "
+        raise ValueError("Set the ZOI (Geometry tab) and the window T (Step tab) "
                          "first (%s)." % e)
     eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
     missing = [q for q in qois if not (eps.get(q) or 0) > 0]
     if missing:
-        raise ValueError("Set ε_q of %s in the Setup tab first."
+        raise ValueError("Set ε_q of %s in Optimization > Identify first."
                          % ", ".join(missing))
     if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
-        raise ValueError("The ZOI of the Setup tab is empty.")
+        raise ValueError("The ZOI (Geometry tab) is empty.")
     if any(q in mq.FIELD_QUANTITIES for q in qois):
         b = cfg.bbox
         crop = {"xmin": float(b.xmin), "xmax": float(b.xmax),
                 "ymin": float(b.ymin), "ymax": float(b.ymax)}
         if not mq.zoi_within_crop(zoi, crop):
-            raise ValueError("The ZOI of the Setup tab is not inside the ROI "
+            raise ValueError("The ZOI (Geometry tab) is not inside the ROI "
                              "the runs extract: widen the ROI (Geometry "
                              "tab).")
     return {"zoi": zoi, "window": window,
@@ -127,7 +127,7 @@ class IdentifyTab(QWidget):
             "Find the values of the ticked parameters whose QoI match a "
             "reference. Min and Max bound the search; Start empty = the "
             "model value. The reference is the QoI of the sizing studies "
-            "(ZOI, window T and ε_q of the Setup tab), typed or read "
+            "(ZOI, window T and ε_q of the comparison settings), typed or read "
             "from a finished run. The search stops when every QoI is within "
             "ε_q, or when the run budget is spent. A parameter whose "
             "step moves no QoI by more than τ ε_q, n iterations in "
@@ -205,14 +205,14 @@ class IdentifyTab(QWidget):
                 if not editable:
                     it.setFlags(Qt.ItemIsEnabled)
                 self.ref_table.setItem(i, c, it)
-        self.ref_table.item(0, R_EPS).setToolTip("From the Setup tab.")
+        self.ref_table.item(0, R_EPS).setToolTip("From the \u03b5_q at the top of Identify.")
         self.ref_table.resizeColumnsToContents()
         rl.addWidget(self.ref_table)
         brow = QHBoxLayout()
         self.btn_ref_run = QPushButton("Reference from a run…")
         self.btn_ref_run.setToolTip(
             "Numerical reference: read the QoI of a finished run "
-            "(<job>.results.npz) with the ZOI and window T of the Setup tab.")
+            "(<job>.results.npz) with the ZOI and window T of the comparison settings.")
         self.btn_ref_run.clicked.connect(self._on_ref_from_run)
         brow.addWidget(self.btn_ref_run)
         brow.addStretch(1)
@@ -482,21 +482,21 @@ class IdentifyTab(QWidget):
                 if self.ref_table.item(i, R_USE).checkState() == Qt.Checked]
 
     def refresh_eps(self):
-        """eps_q column from the Setup tab."""
+        """eps_q column from the comparison settings."""
         eps = {}
         if self._model_settings_getter is not None:
             try:
                 eps = self._model_settings_getter().get("eps") or {}
             except Exception:
-                log_swallowed("reading eps_q of the Setup tab",
+                log_swallowed("reading eps_q at the top of Identify",
                               level=logging.DEBUG)
         for i, q in enumerate(mq.MODEL_QOIS):
             v = eps.get(q)
             self.ref_table.item(i, R_EPS).setText(_fmt(v) if v else "")
 
     def collect_targets(self):
-        """(qois, engine Targets, Setup settings). ValueError when a
-        reference, a weight or a Setup setting is missing."""
+        """(qois, engine Targets, comparison settings). ValueError when a
+        reference, a weight or a comparison setting is missing."""
         qois = self._used_qois()
         if not qois:
             raise ValueError("Tick at least one QoI of the reference.")
@@ -534,7 +534,7 @@ class IdentifyTab(QWidget):
 
     def reference_from_run(self, path):
         """Fill the references with the QoI of a finished run, computed
-        with the ZOI, window T and EVF threshold of the Setup tab."""
+        with the ZOI, window T and EVF threshold of the comparison settings."""
         from gui.results.reader import ResultsBundle
         from gui.identify.worker import point_qoi
         try:

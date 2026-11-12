@@ -37,6 +37,7 @@ class GeometryTab(QWidget):
             form_lay.addWidget(_maybe_widget)
         form_lay.addWidget(self._build_bbox_group())
         form_lay.addStretch()
+        self._form_lay = form_lay
 
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
@@ -75,6 +76,12 @@ class GeometryTab(QWidget):
 
         # initial draw
         self._refresh()
+
+    def add_extra_group(self, widget) -> None:
+        """Show `widget` (a group owned by another tab, e.g. the comparison
+        settings of Optimization) at the end of this tab's form."""
+        lay = self._form_lay
+        lay.insertWidget(max(0, lay.count() - 1), widget)
 
     # =====================================================================
     # Group builders
