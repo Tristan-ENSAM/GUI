@@ -89,6 +89,12 @@ HEARTBEAT_PERIOD = 2.0          # s, agent heartbeat
 ALIVE_TIMEOUT = 15.0            # s, client wait for a heartbeat change. Kept
                                 # well above the period: Windows caches file
                                 # metadata on network drives for up to ~10 s.
+SUBMIT_ALIVE_TIMEOUT = 60.0     # s, same wait before a submission fails:
+                                # a heartbeat late for a few seconds (busy
+                                # shared drive, Error 183 on older agents)
+                                # must not fail the run. Returns as soon as
+                                # the counter moves, so a live agent costs
+                                # nothing more.
 AGENT_SOURCE = Path(__file__).with_name("remote_agent.py")
 LIVE_PERIOD = 2.0               # s, live copy transit -> local run folder
 # Same lists as remote_agent.py: copied live, then brought back at the end.
@@ -331,11 +337,13 @@ class RemoteProcess:
         else:
             bat = self.queue / "start_agent.bat"
         staged = stage_scripts(self.queue, scripts_dir)
-        if check_agent and agent_alive(self.queue) is None:
+        if check_agent and agent_alive(
+                self.queue, timeout=SUBMIT_ALIVE_TIMEOUT) is None:
             raise RemoteError(
-                "the remote agent is not running (no heartbeat in %s). On the "
-                "compute PC, double-click %s and leave its window open."
-                % (self.queue, bat))
+                "the remote agent is not running (its heartbeat in %s did "
+                "not change for %g s). On the compute PC, double-click %s "
+                "and leave its window open."
+                % (self.queue, SUBMIT_ALIVE_TIMEOUT, bat))
         self.job_name = str(run_params.get("job_name", "job"))
         now = time.time()        # ids sort in submission order (ms)
         self.id = "%s%03d-%s-%s" % (time.strftime("%Y%m%d-%H%M%S",

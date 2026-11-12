@@ -123,15 +123,35 @@ def _remove(path):
         return False
 
 
+REPLACE_ATTEMPTS = 8
+REPLACE_DELAY = 0.05            # s, first pause between attempts (doubled)
+
+
 def _replace(src, dst):
     """os.replace for Python 2: on Windows os.rename refuses an existing
     destination, so remove it first. Readers tolerate the instant in between
-    (a missing file reads as "not there yet")."""
-    try:
-        os.rename(src, dst)
-    except OSError:
-        _remove(dst)
-        os.rename(src, dst)
+    (a missing file reads as "not there yet").
+
+    On the shared drive the GUI PC reads these files every half second: while
+    it holds one open, the removal is refused or left pending and the rename
+    fails with "[Error 183] cannot create a file that already exists". The
+    reader lets go within milliseconds, so retry a few times (~6 s at most)
+    before giving up."""
+    delay = REPLACE_DELAY
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.rename(src, dst)
+            return
+        except OSError:
+            _remove(dst)
+            try:
+                os.rename(src, dst)
+                return
+            except OSError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+        time.sleep(delay)
+        delay *= 2
 
 
 def _tmp_name(path):
@@ -145,7 +165,23 @@ def write_json_atomic(path, data):
         text = text.decode("utf-8")
     with io.open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
-    _replace(tmp, path)
+    try:
+        _replace(tmp, path)
+    except (IOError, OSError):
+        _remove(tmp)            # no agent.json.tmp-xxxx left on the drive
+        raise
+
+
+def write_json_in_place(path, data):
+    """Overwrite `path` without renaming. Not atomic (a reader may see a
+    half-written file and read it as "not there yet", which is harmless for
+    the heartbeat), but opening a file for writing is allowed while another
+    PC has it open for reading, which the rename is not."""
+    text = json.dumps(data, indent=1)
+    if not isinstance(text, type(u"")):
+        text = text.decode("utf-8")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 def read_json(path):
@@ -267,6 +303,7 @@ class Agent(object):
         self.host = socket.gethostname()
         self.seq = 0
         self._last_hb = 0.0
+        self._hb_failing = False
         self.job = None
         for d in SUBDIRS:
             _makedirs(self.sub(d))
@@ -295,15 +332,27 @@ class Agent(object):
             return
         self._last_hb = now
         self.seq += 1
-        try:
-            write_json_atomic(os.path.join(self.queue, "agent.json"), {
-                "seq": self.seq, "host": self.host, "pid": os.getpid(),
+        path = os.path.join(self.queue, "agent.json")
+        data = {"seq": self.seq, "host": self.host, "pid": os.getpid(),
                 "python": sys.version.split()[0],
                 "abaqus_cmd": self.abaqus_cmd,
                 "busy_job": self.job["id"] if self.job else None,
-                "time": time.strftime("%Y-%m-%d %H:%M:%S")})
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        try:
+            try:
+                write_json_atomic(path, data)
+            except (IOError, OSError):
+                # The GUI PC is reading it (rename refused): overwrite it.
+                write_json_in_place(path, data)
         except (IOError, OSError) as e:
-            self.say(u"WARNING: heartbeat not written (%s)" % _text(e))
+            if not self._hb_failing:
+                self.say(u"WARNING: heartbeat not written (%s); retrying "
+                         u"every %g s" % (_text(e), HEARTBEAT_PERIOD))
+            self._hb_failing = True
+            return
+        if self._hb_failing:
+            self.say(u"heartbeat written again")
+        self._hb_failing = False
 
     def publish(self, rid, outcome):
         outcome.setdefault("agent_host", self.host)
@@ -336,7 +385,19 @@ class Agent(object):
         else:
             self._follow()
 
+    def clean_heartbeat_leftovers(self):
+        """agent.json.tmp-xxxx left on the shared drive by older agents whose
+        heartbeat rename failed (Error 183)."""
+        try:
+            names = os.listdir(self.queue)
+        except OSError:
+            return
+        for name in names:
+            if name.startswith("agent.json.tmp-"):
+                _remove(os.path.join(self.queue, name))
+
     def run_forever(self, period=1.0):
+        self.clean_heartbeat_leftovers()
         self.recover()
         self.heartbeat(force=True)
         self.say("agent ready on %s (Python %s)" % (self.host,
