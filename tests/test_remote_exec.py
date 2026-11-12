@@ -225,7 +225,7 @@ def test_agent_restart_fails_the_interrupted_run(setup):
 
 
 def test_submit_refuses_when_no_agent_heartbeat(setup, monkeypatch):
-    monkeypatch.setattr(rx, "ALIVE_TIMEOUT", 1.0)
+    monkeypatch.setattr(rx, "SUBMIT_ALIVE_TIMEOUT", 1.0)
     with pytest.raises(rx.RemoteError, match="start_agent.bat"):
         _submit(setup, check_agent=True)
     assert list((setup["queue"] / "pending").iterdir()) == []
@@ -489,3 +489,88 @@ def test_resume_reuses_a_run_left_on_the_shared_drive(tmp_path):
         cache.add_folder(f)
     hit = cache.lookup(params, prefer=study)
     assert hit is not None and hit.job == "ms_run000_ms1"
+
+
+def _refuse_rename_onto(monkeypatch, target, times=None):
+    """os.rename onto `target` fails like Windows does while the GUI PC holds
+    the file open on the shared drive (Error 183), `times` times or always."""
+    real = os.rename
+    left = [times]
+
+    def fake(src, dst):
+        if os.path.basename(str(dst)) == target and left[0] != 0:
+            if left[0] is not None:
+                left[0] -= 1
+            raise OSError(183, "Cannot create a file when that file "
+                               "already exists")
+        return real(src, dst)
+    monkeypatch.setattr(ra.os, "rename", fake)
+    monkeypatch.setattr(ra, "REPLACE_DELAY", 0.001)
+
+
+def test_heartbeat_rename_retried_when_briefly_refused(setup, monkeypatch):
+    agent = _agent(setup)
+    agent.heartbeat(force=True)
+    _refuse_rename_onto(monkeypatch, "agent.json", times=3)
+    agent.heartbeat(force=True)
+    hb = ra.read_json(str(setup["queue"] / "agent.json"))
+    assert hb["seq"] == 2
+    assert not list(setup["queue"].glob("agent.json.tmp-*"))
+    assert "WARNING" not in agent.out.getvalue()
+
+
+def test_heartbeat_written_in_place_when_rename_keeps_failing(setup,
+                                                              monkeypatch):
+    agent = _agent(setup)
+    agent.heartbeat(force=True)
+    _refuse_rename_onto(monkeypatch, "agent.json")
+    for _ in range(3):
+        agent.heartbeat(force=True)
+    hb = ra.read_json(str(setup["queue"] / "agent.json"))
+    assert hb["seq"] == 4
+    assert not list(setup["queue"].glob("agent.json.tmp-*"))
+    assert "WARNING" not in agent.out.getvalue()
+
+
+def test_heartbeat_warning_logged_once_per_outage(setup, monkeypatch):
+    agent = _agent(setup)
+    monkeypatch.setattr(ra, "write_json_atomic", _raise_oserror)
+    monkeypatch.setattr(ra, "write_json_in_place", _raise_oserror)
+    for _ in range(4):
+        agent.heartbeat(force=True)
+    assert agent.out.getvalue().count("WARNING: heartbeat") == 1
+    monkeypatch.undo()
+    agent.heartbeat(force=True)
+    assert "heartbeat written again" in agent.out.getvalue()
+
+
+def _raise_oserror(*a, **k):
+    raise OSError(183, "Cannot create a file when that file already exists")
+
+
+def test_old_heartbeat_tmp_files_are_cleaned_at_start(setup):
+    agent = _agent(setup)
+    stale = setup["queue"] / "agent.json.tmp-1234abcd"
+    stale.write_text("{}")
+    agent.clean_heartbeat_leftovers()
+    assert not stale.exists()
+
+
+def test_submit_waits_for_a_late_heartbeat(setup, monkeypatch):
+    """The heartbeat stops for longer than ALIVE_TIMEOUT, then comes back:
+    the submission goes through instead of failing the run."""
+    monkeypatch.setattr(rx, "ALIVE_TIMEOUT", 0.5)
+    monkeypatch.setattr(rx, "SUBMIT_ALIVE_TIMEOUT", 10.0)
+    agent = _agent(setup)
+    agent.heartbeat(force=True)
+
+    def later():
+        time.sleep(2.0)
+        agent.heartbeat(force=True)
+    th = threading.Thread(target=later)
+    th.start()
+    try:
+        proc, _ = _submit(setup, check_agent=True)
+    finally:
+        th.join()
+    assert (setup["queue"] / "pending" / (proc.id + ".json")).is_file()
