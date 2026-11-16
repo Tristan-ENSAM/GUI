@@ -190,3 +190,10 @@ def display_label(key: str) -> str:
     """Return the label for a key (without the unit)."""
     spec = MATERIAL_FIELDS.get(key)
     return spec[0] if spec else key
+
+
+def display_symbol(key: str) -> str:
+    """The symbol of a key, without the name in brackets ("E (Young)" ->
+    "E"): the Materials tab shows the symbols, the meaning is in Help >
+    Glossary and in the field tooltip (Tristan 2026-11-16)."""
+    return display_label(key).split(" (", 1)[0]

@@ -90,7 +90,17 @@ class StepTab(QWidget):
         inner_lay.setContentsMargins(10, 10, 10, 10)
         inner_lay.setSpacing(10)
         inner_lay.addWidget(self._build_duration_group())
-        inner_lay.addWidget(self._build_mass_scaling_group())
+        # Mass scaling and the output filter: two groups, advanced
+        # parameters (Tristan 2026-11-16).
+        from gui.widgets.collapsible import CollapsibleSection
+        self.advanced = CollapsibleSection("Advanced parameters")
+        adv = QVBoxLayout(self.advanced.body)
+        adv.setContentsMargins(0, 0, 0, 0)
+        adv.setSpacing(8)
+        ms_group, filter_group = self._build_mass_scaling_group()
+        adv.addWidget(ms_group)
+        adv.addWidget(filter_group)
+        inner_lay.addWidget(self.advanced)
         # Field/history output selection and time scaling were removed: what
         # the solver computes is fixed in the generator source by an expert,
         # and extraction defaults are fixed (nodal V + NT11, element EVF,
@@ -125,11 +135,16 @@ class StepTab(QWidget):
         lay = self._form_lay
         lay.insertWidget(max(0, lay.count() - 1), widget)
 
+    def add_to_dynamic_step(self, widget) -> None:
+        """Show `widget` (e.g. the time window T, owned by the Optimize
+        tabs) in the Dynamic step group, after the frames."""
+        self._dyn_lay.insertWidget(self._dyn_lay.indexOf(self.lbl_dt), widget)
+
     def _build_duration_group(self) -> QGroupBox:
-        g = QGroupBox("Step duration & sampling")
+        g = QGroupBox("Dynamic step")
         v = QVBoxLayout(g)
         v.setSpacing(4)
-        v.addWidget(_section_header("Dynamic step"))
+        self._dyn_lay = v
 
         self.f_sim_time = NumField(
             "Total simulation time [s]", self.cfg.step.sim_time, "",
@@ -229,8 +244,12 @@ class StepTab(QWidget):
         )
         v.addWidget(self.f_ms_eul)
         self.f_ms_eul.valueChanged.connect(self._on_change)
+        ms_v = v
 
         # ---- Output filter (drives the lower bound of the window) ----------
+        gf = QGroupBox("Output filter")
+        v = QVBoxLayout(gf)
+        v.setSpacing(4)
         self.cb_filter = QCheckBox("Filter output (Butterworth, runtime)")
         self.cb_filter.setChecked(self.cfg.step.output_filter_enabled)
         self.cb_filter.setToolTip(
@@ -323,6 +342,7 @@ class StepTab(QWidget):
             "The finest GCI mesh (Optimize > Identify, Model sizing) has\n"
             "the smallest increment, hence the binding lower bound.")
         v.addWidget(self.lbl_filter_check)
+        v = ms_v
 
         # ---- Admissible mass-scaling window (computed, no run needed) ------
         self.lbl_ms_bounds = QLabel()
@@ -357,7 +377,7 @@ class StepTab(QWidget):
         v.addWidget(self.lbl_ms_speedup)
 
         self._refresh_ms_visibility()
-        return g
+        return g, gf
 
     def _refresh_ms_visibility(self):
         """Grey out the factor fields when mass scaling is disabled, and

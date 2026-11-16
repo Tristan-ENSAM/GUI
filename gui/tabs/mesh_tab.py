@@ -55,7 +55,6 @@ class MeshTab(QWidget):
         form_lay.setContentsMargins(8, 8, 8, 8)
         form_lay.setSpacing(8)
         form_lay.addWidget(self._build_seeds_group())
-        form_lay.addWidget(self._build_info_panel())
         form_lay.addStretch()
         self._form_lay = form_lay
 
@@ -72,7 +71,9 @@ class MeshTab(QWidget):
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         self.preview = GeometryPreview()
-        right_lay.addWidget(self.preview)
+        right_lay.addWidget(self.preview, stretch=1)
+        # Below the preview, as in the Geometry tab (Tristan 2026-11-16).
+        right_lay.addWidget(self._build_info_panel())
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)

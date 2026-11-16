@@ -50,12 +50,14 @@ def _make_field(key: str, label_override: str | None,
     `extra` is forwarded to NumField (min, max, decimals, ...).
     """
     unit_str = units.display_unit(key, temp_unit)
-    label = label_override if label_override is not None else units.display_label(key)
+    label = label_override if label_override is not None else units.display_symbol(key)
     if unit_str and unit_str != "—":
         full_label = f"{label} [{unit_str}]"
     else:
         full_label = label
-    return NumField(full_label, gui_value, "", compact=compact, **extra)
+    f = NumField(full_label, gui_value, "", compact=compact, **extra)
+    f._lbl.setToolTip(units.display_label(key))
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +387,7 @@ class MaterialsTab(QWidget):
                 finally:
                     w.blockSignals(False)
                 unit_str = units.display_unit(key, tu)
-                base = units.display_label(key)
+                base = units.display_symbol(key)
                 full = f"{base} [{unit_str}]" if unit_str and unit_str != "—" \
                     else base
                 if hasattr(w, "_lbl"):
