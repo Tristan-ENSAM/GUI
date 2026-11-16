@@ -353,7 +353,7 @@ def test_preview_legend_names_every_element_once(tab):
     tab._max["l_wp"].setText("0.5")
     tab._draw_preview()
     labels = _legend(tab)
-    assert "ROI" in labels
+    assert "ROI" not in labels          # ZOI = ROI (2026-11-16)
     assert "ZOI" in labels
     assert "Start domain" in labels
     assert "Max size" in labels   # a single cap
@@ -376,12 +376,11 @@ def test_preview_thins_the_sampling_points(tab):
     assert any("shown" in l for l in _legend(tab))
 
 
-def test_preview_warns_when_the_zoi_leaves_the_roi(tab):
-    roi = tab.config_inputs()["roi"]
-    tab.le_zoi["xmin"].setText("%g" % (roi[0] - 1.0))
-    tab._draw_preview()
-    texts = [t.get_text() for t in tab.preview._ax.texts]
-    assert any("beyond the ROI" in t for t in texts)
+def test_zoi_fields_write_the_bbox(tab):
+    """ZOI = ROI (2026-11-16): the ZOI fields are the extraction zone."""
+    tab.le_zoi["xmin"].setText("-0.123")
+    assert tab.cfg.bbox.xmin == -0.123
+    assert tab.zoi()[0] == -0.123
 
 
 # ---------------------------------------------------------------------------

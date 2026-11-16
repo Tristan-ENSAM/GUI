@@ -37,8 +37,10 @@ QOI_ROWS = [
 
 # Settings and results of the studies.
 STUDY_ROWS = [
-    ("ZOI", "Comparison zone: where two runs are compared", "mm"),
-    ("ROI", "Output zone written by each run (matched to DIC / IRT)", "mm"),
+    ("ZOI", "Zone of interest: where the outputs are extracted and two "
+     "runs compared", "mm"),
+    ("t1", "Depth of cut (uncut chip thickness) = y0 workpiece − y0 "
+     "tool", "mm"),
     ("T (window)", "Comparison window: part of the simulated time over "
      "which the means are taken", "fraction of Ttot"),
     ("ε_q", "Admitted deviation of quantity q", "unit of q"),

@@ -355,52 +355,49 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # eps_q and the step weights at the top of Optimization > Identify.
         # The widgets stay owned by this tab, which reads, validates and
         # saves them with the profile under the same keys as before.
-        # -- ZOI + chip-thickness line (Geometry tab)
-        gzoi = QGroupBox("Comparison zone ZOI (Optimize)")
+        # -- ZOI + chip-thickness line (Geometry tab). ZOI and ROI are one
+        # zone (Tristan 2026-11-16): the rectangle where the outputs are
+        # extracted (cfg.bbox, the ROI sets of the model) and the runs
+        # compared. The four fields write cfg.bbox.
+        gzoi = QGroupBox("ZOI")
+        gzoi.setToolTip(
+            "Zone of interest: the outputs are extracted in it (on the\n"
+            "z = 0 face) and two runs are compared in it (Explore,\n"
+            "Sensitivity, Identify, Compare). The Sensitivity tab can\n"
+            "propose one from its maps.")
         cg0 = QGridLayout(gzoi)
-        cg0.setHorizontalSpacing(8)
-        cg0.setVerticalSpacing(4)
-        lab = QLabel("Zone where two runs are compared [mm]")
-        lab.setToolTip(
-            "Zone where two runs are compared (measurement zone of the\n"
-            "Optimize tabs). It is NOT the ROI: the ROI is the output\n"
-            "zone above, matched to the DIC/IRT fields. An empty bound takes\n"
-            "the ROI bound. The Sensitivity tab can propose a ZOI from its\n"
-            "maps ('Copy ZOI to the Geometry tab').")
-        cg0.addWidget(lab, 0, 0, 1, 4)
+        cg0.setContentsMargins(6, 4, 6, 4)
+        cg0.setHorizontalSpacing(6)
+        cg0.setVerticalSpacing(2)
         self.le_zoi = {}
         for i, (lbl, key) in enumerate([("x min", "xmin"), ("x max", "xmax"),
                                         ("y min", "ymin"), ("y max", "ymax")]):
-            r, c = 1 + i // 2, 2 * (i % 2)
+            r, c = i // 2, 3 * (i % 2)
             cg0.addWidget(QLabel(lbl), r, c)
-            le = num_edit(placeholder="= ROI",
-                          tip="ZOI bound [mm]; empty = ROI bound")
+            le = num_edit(tip="ZOI bound [mm]")
             le.setFixedWidth(80)
             self.le_zoi[key] = le
             cg0.addWidget(le, r, c + 1)
+            cg0.addWidget(QLabel("mm"), r, c + 2)
+            le.textChanged.connect(self._zoi_to_bbox)
             le.textChanged.connect(self._schedule_preview)
+        # Kept for the code that calls it (fills the fields from cfg.bbox).
         self.btn_zoi_from_roi = QPushButton("ZOI = ROI")
-        self.btn_zoi_from_roi.setToolTip("Copy the ROI of the Geometry tab "
-                                         "into the ZOI fields.")
         self.btn_zoi_from_roi.clicked.connect(self._zoi_from_roi)
-        cg0.addWidget(self.btn_zoi_from_roi, 3, 0, 1, 2)
-        lab_y0 = QLabel("Chip line y0")
+        self.btn_zoi_from_roi.hide()
+        lab_y0 = QLabel("Chip line y<sub>e</sub>")
         lab_y0.setToolTip(
             "Height above the workpiece of the line on which the chip\n"
             "thickness e is measured (QoI e of Explore, Sensitivity and\n"
-            "Identify). Empty = the uncut chip thickness t1.")
-        cg0.addWidget(lab_y0, 4, 0)
-        e_row = QHBoxLayout()
-        e_row.setSpacing(4)
+            "Identify). Empty = the depth of cut t1.")
+        cg0.addWidget(lab_y0, 2, 0)
         self.le_chip_y0 = num_edit(
             placeholder="= t1", tip="Height of the measuring line above the "
-            "workpiece [mm]. Empty = the uncut chip thickness t1.")
-        self.le_chip_y0.setFixedWidth(64)
-        e_row.addWidget(self.le_chip_y0)
-        e_row.addWidget(QLabel("mm"))
-        e_row.addStretch(1)
-        cg0.addLayout(e_row, 4, 1, 1, 3)
-        cg0.setColumnStretch(4, 1)
+            "workpiece [mm]. Empty = the depth of cut t1.")
+        self.le_chip_y0.setFixedWidth(80)
+        cg0.addWidget(self.le_chip_y0, 2, 1)
+        cg0.addWidget(QLabel("mm"), 2, 2)
+        cg0.setColumnStretch(6, 1)
         self.zoi_group = gzoi
         # -- eps_q, eps_e and the step weights (Identify tab, both modes)
         geps = QGroupBox("Admitted deviations ε_q (every Optimize tab)")
@@ -1318,8 +1315,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             return
         self._loading = True
         try:
-            for k in ("xmin", "xmax", "ymin", "ymax"):
-                self.le_zoi[k].setText(str(o.zoi.get(k, "")))
+            # ZOI = ROI (2026-11-16): the fields show cfg.bbox; a ZOI saved
+            # apart from the ROI by an older profile is not used.
+            self.fill_zoi_from_cfg()
             for q, le in self._q_eps.items():
                 le.setText(str(o.criterion_rmse.get(q, "")))
             self.le_chip_eps.setText(str(getattr(o, "chip_eps", "0.005")))
@@ -1534,8 +1532,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # The base drawing, named for this tab; the tool reference point
         # (where the BCs apply) is not needed here.
         names = {"Eulerian domain": "Domain",
-                 "Workpiece (reference)": "Workpiece",
-                 "ROI / bbox": "ROI"}
+                 "Workpiece (reference)": "Workpiece"}
         for art in list(ax.patches) + list(ax.lines):
             lab = str(art.get_label())
             if lab in names:
@@ -1594,8 +1591,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._init_note.setText(note)
         self._init_note.setVisible(bool(note))
         if zoi_ok:
-            rect(zoi, edgecolor=_C_ZOI, lw=1.8, zorder=7,
-                 label="ZOI")
+            # The ZOI rectangle is the base drawing's (cfg.bbox).
+            boxes.append(tuple(zoi))
             self._draw_sampling_points(ax, zoi)
         if di is not None:
             start = euler_box(di.h_wp, di.h_void, di.l_wp, di.l_void)
@@ -1653,9 +1650,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not zoi_ok:
             warn.append("The ZOI is empty (min \u2265 max).")
         else:
-            if not inside(zoi, roi):
-                warn.append("The ZOI goes beyond the ROI: no results are "
-                            "written there.")
             if not inside(zoi, eul):
                 warn.append("The ZOI goes beyond the Eulerian domain of the "
                             "Geometry tab (steps 0 and 1 run on it).")
@@ -2160,21 +2154,46 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     # ZOI (measurement zone) — distinct from the ROI
     # ===================================================================
     def zoi(self):
-        """The measurement ZOI bbox (xmin, xmax, ymin, ymax).
+        """The ZOI (xmin, xmax, ymin, ymax) [mm]: cfg.bbox, where the
+        outputs are extracted and the runs compared (ZOI = ROI since
+        2026-11-16; the ZOI fields write it)."""
+        return tuple(self.config_inputs()["roi"])
 
-        DISTINCT from the ROI (Geometry tab, model output set). Empty panel
-        fields fall back to the ROI, so a blank ZOI reproduces the previous
-        ROI-as-ZOI behaviour. The studies sample THIS zone, not the ROI.
-        """
-        roi = self.config_inputs()["roi"]
-        out = []
-        for k, d in zip(("xmin", "xmax", "ymin", "ymax"), roi):
-            out.append(self._float_or(self.le_zoi[k], d))
-        return tuple(out)
+    # Called after the ZOI changed in cfg.bbox (set by the main window:
+    # redraw the Simulate previews, mark the profile modified).
+    bbox_changed_callback = None
+
+    def _zoi_to_bbox(self, *_):
+        """Write the ZOI fields into cfg.bbox (the extraction zone)."""
+        if self._loading or getattr(self, "_zoi_filling", False):
+            return
+        b = self.cfg.bbox
+        changed = False
+        for k in ("xmin", "xmax", "ymin", "ymax"):
+            v = self._float_or(self.le_zoi[k], None)
+            if v is not None and v != getattr(b, k):
+                setattr(b, k, float(v))
+                changed = True
+        if changed and self.bbox_changed_callback is not None:
+            try:
+                self.bbox_changed_callback()
+            except Exception:
+                log_swallowed("refreshing the tabs after a ZOI change")
+
+    def fill_zoi_from_cfg(self):
+        """Show cfg.bbox in the ZOI fields (profile opened, value set by
+        Identify)."""
+        self._zoi_filling = True
+        try:
+            b = self.cfg.bbox
+            for k in ("xmin", "xmax", "ymin", "ymax"):
+                self.le_zoi[k].setText("%.6g" % float(getattr(b, k)))
+        finally:
+            self._zoi_filling = False
 
     def set_zoi(self, bbox):
-        """Fill the ZOI fields with (xmin, xmax, ymin, ymax) [mm], e.g. the
-        ZOI proposed from the sensitivity maps."""
+        """Set the ZOI to (xmin, xmax, ymin, ymax) [mm], e.g. the ZOI
+        proposed from the sensitivity maps: written to cfg.bbox."""
         for k, v in zip(("xmin", "xmax", "ymin", "ymax"), bbox):
             self.le_zoi[k].setText("%.6g" % float(v))
         self._draw_preview()
@@ -2182,13 +2201,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     def draw_comparison_overlay(self, ax) -> None:
         """Draw the ZOI and the chip-thickness line on a preview of the
         model (the Geometry tab, where they are set)."""
-        from matplotlib.patches import Rectangle
-        zoi = self.zoi()
-        if zoi[1] > zoi[0] and zoi[3] > zoi[2]:
-            ax.add_patch(Rectangle((zoi[0], zoi[2]), zoi[1] - zoi[0],
-                                   zoi[3] - zoi[2], fill=False,
-                                   edgecolor=_C_ZOI, lw=1.8, zorder=7,
-                                   label="ZOI"))
+        # The ZOI rectangle itself is drawn by the preview (cfg.bbox).
         try:
             ys = float(self.cfg.wp_position.y0)
             t1 = ys - float(self.cfg.tool_position.y0)
@@ -2213,9 +2226,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "chip_y0": self._float_or(self.le_chip_y0, None)}
 
     def _zoi_from_roi(self):
-        for k, v in zip(("xmin", "xmax", "ymin", "ymax"),
-                        self.config_inputs()["roi"]):
-            self.le_zoi[k].setText("%.6g" % v)
+        """Show cfg.bbox in the ZOI fields (ZOI = ROI)."""
+        self.fill_zoi_from_cfg()
         self._draw_preview()
 
     def _gci_tolerances(self):

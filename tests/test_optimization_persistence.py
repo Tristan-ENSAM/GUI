@@ -85,7 +85,9 @@ class TestTabPersistence:
         cfg.optimization.margin_elems = 4
         tab = OptimizationTab(cfg)
         assert tab.le_gci_finest.text() == "0.009"
-        assert tab.le_zoi["xmin"].text() == "-0.07"
+        # ZOI = ROI (2026-11-16): a ZOI saved apart from the ROI is not
+        # used; the fields show cfg.bbox.
+        assert tab.le_zoi["xmin"].text() == "%.6g" % cfg.bbox.xmin
         assert tab.sp_gci_n.value() == 6
         assert tab.sp_margin.value() == 4
 

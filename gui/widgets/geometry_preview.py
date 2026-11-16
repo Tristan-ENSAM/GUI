@@ -382,7 +382,8 @@ class GeometryPreview(QWidget):
 
     def update_from_config(self, cfg: ModelConfig,
                             show_mesh: bool = False,
-                            show_bcs: bool = False) -> None:
+                            show_bcs: bool = False,
+                            show_cut_line: bool = False) -> None:
         self._cfg = cfg
         # Reset pickable segments on every redraw — they're rebuilt below.
         self._pickable_segments = []
@@ -503,14 +504,19 @@ class GeometryPreview(QWidget):
                               markersize=8, markeredgewidth=1.5,
                               label=f"Tool RP ({rp_loc})")
 
-        # --- BBox / ROI (dashed) ---
+        # --- ZOI (dashed): outputs extracted and runs compared in it ---
         bb = cfg.bbox
         if (bb.xmax > bb.xmin) and (bb.ymax > bb.ymin):
             roi = Rectangle((bb.xmin, bb.ymin),
                             bb.xmax - bb.xmin, bb.ymax - bb.ymin,
                             facecolor="none", edgecolor="#d33",
-                            linewidth=1.0, linestyle="--", label="ROI / bbox")
+                            linewidth=1.2, linestyle="--", label="ZOI")
             self._ax.add_patch(roi)
+
+        # --- Cutting line y = y0 of the tool (level of the cut surface) ---
+        if show_cut_line:
+            self._ax.axhline(cfg.tool_position.y0, color="#a8631c", lw=0.9,
+                             ls="-.", zorder=6, label="Cutting line")
 
         # --- Boundary conditions overlay (optional) ---
         # BC overlays that depend on the tool outline (temperature hatching
