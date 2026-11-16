@@ -102,7 +102,7 @@ def test_filter_and_search(qapp):
     tab._apply_filter()
     assert not tab.table.isRowHidden(mu) and tab.table.isRowHidden(box)
     tab.cb_filter.setCurrentIndex(tab.cb_filter.findData("all"))
-    tab.le_search.setText("frottement")
+    tab.le_search.setText("friction")
     assert not tab.table.isRowHidden(mu) and tab.table.isRowHidden(box)
     tab.le_search.setText("")
     assert not tab.table.isRowHidden(box)

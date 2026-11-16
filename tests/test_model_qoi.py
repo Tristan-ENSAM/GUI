@@ -183,7 +183,7 @@ def test_tab_generates_with_model_settings(qapp):
     assert rec["model_qoi"]["window"] == [0.3, 1.0]
 
 
-def test_tab_refuses_zoi_outside_roi_and_missing_eps(qapp):
+def test_tab_refuses_zoi_outside_roi_not_missing_eps(qapp):
     from gui.core.model_config import ModelConfig
     cfg = ModelConfig()
     tab = _tab_with_param(cfg)
@@ -202,4 +202,5 @@ def test_tab_refuses_zoi_outside_roi_and_missing_eps(qapp):
         lambda: _settings(zoi=_inside_zoi(cfg), eps=eps))
     tab.plan = None
     tab._on_generate()
-    assert tab.plan is None and "Ff" in tab.status.text()
+    # The QoI are measured in their unit (2026-11-16): no eps_q needed.
+    assert tab.plan is not None
