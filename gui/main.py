@@ -164,8 +164,11 @@ class MainWindow(QMainWindow):
         # identification. "Model sizing", not "Model", so it is not mistaken
         # for the "Numerical Model" tab.
         _wd = lambda: str(getattr(self.prefs, "default_workdir", "") or "")
-        self.initial_run_tab = InitialRunTab(self.optimization_tab,
-                                             start_dir=_wd)
+        self.initial_run_tab = InitialRunTab(
+            self.optimization_tab, start_dir=_wd,
+            prefs_getter=lambda: self.prefs,
+            cpus_getter=lambda: self.job_tab.cpus(),
+            profile_name_getter=self._profile_name)
         # The comparison settings, where they belong (decision 2026-11-12):
         # ZOI + chip line in Geometry, sampling step in Mesh, window T in
         # Step, eps_q at the top of Identify. Owned by the Model sizing tab.
@@ -752,9 +755,19 @@ class MainWindow(QMainWindow):
                 "Quit anyway?"):
             event.ignore()
             return
+        initial_running = self.initial_run_tab.is_running()
+        if initial_running and not confirm(
+                "Initial run running",
+                "The initial run is still running. Quitting now terminates\n"
+                "its Abaqus job; the results read so far stay in its\n"
+                "folder (<job>.live.results.npz).\n\nQuit anyway?"):
+            event.ignore()
+            return
         if job_running:
             proc.kill()
             proc.waitForFinished(2000)
+        if initial_running:
+            self.initial_run_tab.shutdown()
         if sens_running or model_running:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
