@@ -63,7 +63,7 @@ class TestRestructuredTab:
             le.setText("")
         tab._q_eps["Vx"].setText("1")
         tab._on_run_domain_independence()
-        assert warnings and "tolerances" in warnings[0].lower()
+        assert warnings and "\u03b5_q" in warnings[0]
         assert not hasattr(tab, "_di_worker")
 
     def test_gci_uses_the_absolute_step2_tolerances(self, tab):
@@ -81,7 +81,7 @@ class TestRestructuredTab:
         for le in tab._q_eps.values():
             le.setText("")
         tab._on_run_mesh_gci()
-        assert warnings and "tolerances" in warnings[0].lower()
+        assert warnings and "\u03b5_q" in warnings[0]
         assert getattr(tab, "_mesh_worker", None) is None
 
     def test_spin_boxes_follow_the_style_size_hint(self, tab, qapp):
@@ -220,7 +220,6 @@ class TestDomainIndependenceWiring:
         tab = launch
         _fill_thresholds(tab)
         tab._dom_spins["dom_step_elems"].setValue(12)
-        tab._dom_texts["rhg_max"].setText("0.07")
         tab._max["h_void"].setText("0.4")
         elem_before = tab.cfg.elem_size
         tab._on_run_domain_independence()
@@ -547,7 +546,7 @@ class TestMsStudyWiring:
         for le in ms_launch._q_eps.values():
             le.setText("")
         ms_launch._on_run_ms_independence()
-        assert warnings and "tolerances" in warnings[0].lower()
+        assert warnings and "\u03b5_q" in warnings[0]
         assert _CaptureWorker.last is None
 
     def test_requires_the_output_filter(self, ms_launch, warnings):

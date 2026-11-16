@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox,
     QCheckBox, QLineEdit, QPlainTextEdit, QTabWidget, QSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QSplitter,
-    QScrollArea, QFrame, QComboBox
+    QScrollArea, QFrame, QComboBox, QStackedWidget
 )
 
 from matplotlib.figure import Figure
@@ -135,15 +135,6 @@ _DOM_TEXTS = [
                               "of the simulated time (default 0.3)"),
     ("window_end", "end", "End of the time window T, as a fraction of the "
                           "simulated time (default 1.0)"),
-    ("rk_max", "max kinetic / internal energy G_K",
-     "R_K = \u03a3ALLKE/\u03a3ALLIE over T is reported against this value\n"
-     "(kinetic energy, typically from mass scaling). Reported only: it\n"
-     "never rejects a run, it helps explain a deviation of the compared\n"
-     "quantities. Default 0.05 (5 %)."),
-    ("rhg_max", "max artificial / internal energy G_HG",
-     "R_HG = \u03a3ALLAE/\u03a3ALLIE over T is reported against this value\n"
-     "(hourglass energy). Reported only: it never rejects a run.\n"
-     "Default 0.05 (5 %)."),
 ]
 # Domain dimensions: short label and definition (Eulerian part rectangle
 # (-l_wp, -h_wp) -> (l_void, h_void), cel_model.py create_parts).
@@ -189,6 +180,29 @@ _C_CAP = "#374151"          # largest size allowed (dark grey, dash-dot)
 _C_DSTAR = "#1e3a8a"        # D* found by step 2, not in the model (navy)
 _MAX_PREVIEW_POINTS = 2000  # sampling points drawn (subsampled beyond)
 _MAX_GRID_POINTS = 5000000  # beyond this the points are not even counted
+
+
+# Table of the numerical parameters (Identify > Model sizing).
+SIZING_COLUMNS = ("Parameter", "Min", "Max", "Method", "Parameters",
+                  "Reference", "Weight", "")
+(S_NAME, S_MIN, S_MAX, S_METHOD, S_PARAMS, S_REF, S_WEIGHT,
+ S_RUN) = range(len(SIZING_COLUMNS))
+_MS_METHODS = (("bisection", "Bisection"),
+               ("list", "Listed values"),
+               ("sweep", "Listed, sweep"))
+_DOM_METHODS = (("independence", "Independence"),
+                ("richardson", "Richardson test"))
+_SIZING_TIPS = {
+    "ms": "Mass-scaling factor ms (Step tab). ms* = the largest factor that "
+          "does not change the QoI beyond the ms share of \u03b5_q.",
+    "mesh": "Element size h [mm] (Mesh tab). h* = the coarsest mesh within "
+            "the h share of \u03b5_q of the reference.",
+    "domain": "Eulerian domain D (Geometry tab): the four sides l_wp, "
+              "l_void, h_wp, h_void.",
+}
+# Run safeguards G_K,max and G_HG,max: reported only, never blocking
+# (decision 2026-10-13); fixed at 5 % (Tristan 2026-11-16).
+GUARD_MAX = 0.05
 
 
 def _scaled(eps, spec, i) -> dict:
@@ -343,8 +357,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Makes the simulation results independent of three numerical "
             "choices (mass scaling, element size, Eulerian domain). Check "
             "the comparison settings (ZOI in Geometry, window T in Step, "
-            "ε_q above), then click 'Run all steps', or run "
-            "steps 0 to 3 one by one and click 'Use in model' after each. "
+            "the ticked QoI and their ε_q above), then click 'Run all "
+            "steps', or run the rows of the table one by one (ms, h, D) "
+            "and click 'Use in model' after each, then the final checks. "
+            "Click a row to edit the parameters of its method. "
             "Each step says whether it is done for the current model. "
             "Hover over a field for its definition and the source of its "
             "default.")
@@ -423,6 +439,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         _unit = {q: u for (q, _f, u) in _QUANTITIES}
         eps_row = QHBoxLayout()
         eps_row.setSpacing(4)
+        self._q_use = {}
+        self._q_lbl = {}
         for q in ("Vx", "Vy", "T", "EVF", "Fc", "Ff"):
             lbl = QLabel(q)
             tip = "%s: admitted deviation [%s]. %s" % (
@@ -431,6 +449,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 tip += ("\n%s on the tool RP divided by the element size."
                         % ("RF1" if q == "Fc" else "RF2"))
             lbl.setToolTip(tip)
+            # Ticked: Model sizing compares this QoI (Tristan 2026-11-16).
+            # Physical parameters has its own Use column: the label only.
+            use = QCheckBox(q)
+            use.setChecked(True)
+            use.setToolTip(tip + "\nTicked: the Model sizing studies "
+                           "compare this QoI.")
+            use.toggled.connect(self._sync_opt_to_cfg)
+            self._q_use[q] = use
+            self._q_lbl[q] = lbl
+            lbl.hide()
+            eps_row.addWidget(use)
             eps_row.addWidget(lbl)
             le = num_edit(placeholder=_unit[q], tip=tip)
             le.setFixedWidth(64)
@@ -469,7 +498,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         e_row.addStretch(1)
         cg0.addLayout(e_row, 1, 1)
         cg0.setColumnStretch(1, 1)
-        self._eps_grid = cg0            # the step weights go on row 2
         self.eps_group = geps
         # -- ZOI sampling step (Mesh tab)
         gsam = QGroupBox("ZOI sampling (Optimize)")
@@ -504,66 +532,38 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._dom_texts = {}
         win_row = QHBoxLayout()
         win_row.setSpacing(4)
-        guard_rows = []                         # placed in the sizing group
         for attr, label, tip in _DOM_TEXTS:
             lab = QLabel(label)
             lab.setToolTip(tip)
             le = num_edit(str(getattr(OptimizationCfgDefaults, attr)),
                           tip=tip)
             self._dom_texts[attr] = le
-            if attr.startswith("window_"):      # start, end on one row
-                win_row.addWidget(lab)
-                win_row.addWidget(le)
-                win_row.addSpacing(6)
-            else:                               # one safeguard per row
-                guard_rows.append((lab, le))
+            win_row.addWidget(lab)
+            win_row.addWidget(le)
+            win_row.addSpacing(6)
         win_row.addStretch(1)
         ag.addLayout(win_row, 0, 1, 1, 2)
         ag.setColumnStretch(3, 1)
         self.window_group = gwin
 
-        # ---- Sizing settings: weight of each step, guards, reuse ---------
-        # Only the steps of this tab use them.
-        gsz = QGroupBox("Sizing settings (used by the steps below)")
-        sv0 = QVBoxLayout(gsz)
-        sv0.setSpacing(4)
-        lab = QLabel("Weight of each step in ε_q")
+        # ---- Weights of the steps in eps_q (column "Weight" of the table)
         share_tip = (
-            "How ε_q is split between the steps: ms (step 0), h (step 1)\n"
-            "and D (step 2) are each judged against share × ε_q, with\n"
-            "share = weight / (sum of the three weights). The deviations\n"
-            "of the three steps add up (the final model differs from the\n"
-            "exact one by at most their sum), so the shares sum to 1 and\n"
-            "the final model stays within ε_q of the model with no mass\n"
-            "scaling, an infinitely fine mesh and an infinite domain.\n"
-            "Default 1, 1, 1: ε_q/3 each. Give a larger weight to the step\n"
-            "whose tolerance is the most expensive to tighten. The final\n"
-            "checks use the same shares (ms at the point: ms share; domain\n"
-            "grown: D share; mesh plan on D*: h share).")
-        lab.setToolTip(share_tip)
-        self._eps_grid.addWidget(lab, 2, 0)
-        share_row = QHBoxLayout()
-        share_row.setSpacing(4)
+            "How ε_q is split between the parameters: ms, h and D are each\n"
+            "judged against share × ε_q, with share = weight / (sum of the\n"
+            "three weights). The deviations of the three add up (the final\n"
+            "model differs from the exact one by at most their sum), so the\n"
+            "shares sum to 1 and the final model stays within ε_q of the\n"
+            "model with no mass scaling, an infinitely fine mesh and an\n"
+            "infinite domain.\n"
+            "Default 1, 1, 1: ε_q/3 each. Give a larger weight to the\n"
+            "parameter whose tolerance is the most expensive to tighten. The\n"
+            "final checks use the same shares.")
         self._eps_share = {}
-        for step, text in (("ms", "ms"), ("mesh", "h"), ("domain", "D")):
-            lbl = QLabel(text)
-            lbl.setToolTip(share_tip)
-            share_row.addWidget(lbl)
+        for step in ("ms", "mesh", "domain"):
             le = num_edit(getattr(OptimizationCfgDefaults,
                                   "eps_share_" + step), tip=share_tip)
-            le.setFixedWidth(64)
+            le.setFixedWidth(44)
             self._eps_share[step] = le
-            share_row.addWidget(le)
-            share_row.addSpacing(10)
-        share_row.addStretch(1)
-        self._eps_grid.addLayout(share_row, 2, 1)
-        sec = advanced("sizing", lambda: [
-            (self._dom_texts[a], str(getattr(OptimizationCfgDefaults, a)))
-            for a, _l, _t in _DOM_TEXTS if not a.startswith("window_")])
-        ag = sub_grid(sec.body)
-        for i, (lab, le) in enumerate(guard_rows):
-            ag.addWidget(lab, i, 0)
-            ag.addWidget(le, i, 1)
         self.cb_reuse_runs = QCheckBox(
             "Reuse the finished runs of earlier studies")
         self.cb_reuse_runs.setChecked(OptimizationCfgDefaults.reuse_runs)
@@ -576,18 +576,16 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "compared.\n"
             "Off: a new study launches every run. Resuming a study always\n"
             "reuses the runs of its own folder.")
-        ag.addWidget(self.cb_reuse_runs, ag.rowCount(), 0, 1, 3)
-        ag.setColumnStretch(3, 1)
-        sv0.addWidget(sec)
 
         # ---- Step 0 · mass-scaling factor by an independence study -------
-        gms = QGroupBox("Step 0 · Mass scaling factor ms")
+        gms = QWidget()
         sv = QVBoxLayout(gms)
+        sv.setContentsMargins(4, 4, 4, 4)
         sv.setSpacing(4)
         sg = QGridLayout()
         sg.setHorizontalSpacing(8)
         sv.addLayout(sg)
-        sg.addWidget(QLabel("ms values to test"), 0, 0)
+        sg.addWidget(QLabel("listed ms values"), 0, 0)
         self.le_ms_values = QLineEdit(OptimizationCfgDefaults.ms_values)
         self.le_ms_values.setToolTip(
             "Mass-scaling factors to test, strictly increasing, separated by\n"
@@ -596,7 +594,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "If every comparison passes, the study adds values by doubling\n"
             "the last one (up to 5 more) until a comparison fails.")
         sg.addWidget(self.le_ms_values, 0, 1)
-        sg.addWidget(QLabel("compare each run with"), 1, 0)
         self.cb_ms_reference = QComboBox()
         self.cb_ms_reference.addItem("the first value (reference run)",
                                      "first")
@@ -607,8 +604,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "most expensive run of the study). Previous value: each run is\n"
             "compared with the one before it (no expensive reference run).\n"
             "Both stop at the first failed comparison.")
-        sg.addWidget(self.cb_ms_reference, 1, 1)
-        sg.addWidget(QLabel("search"), 2, 0)
         self.cb_ms_search = QComboBox()
         self.cb_ms_search.addItem(
             "from ms = 1: multiply by a factor, then bisection", "bisection")
@@ -624,8 +619,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "Listed values: the list above, compared as chosen above;\n"
             "values are added by doubling if every comparison passes.")
         self.cb_ms_search.currentIndexChanged.connect(self._on_ms_search)
-        sg.addWidget(self.cb_ms_search, 2, 1)
-        sg.addWidget(QLabel("goal"), 3, 0)
         self.cb_ms_goal = QComboBox()
         self.cb_ms_goal.addItem(
             "identify ms* (stop at the first failure)", "identify")
@@ -640,7 +633,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "of passes. A sweep runs the listed values: the search is set\n"
             "to the list.")
         self.cb_ms_goal.currentIndexChanged.connect(self._on_ms_goal)
-        sg.addWidget(self.cb_ms_goal, 3, 1)
         self.btn_ms = QPushButton("Run mass-scaling study")
         mark_primary(self.btn_ms)
         self.btn_ms.setToolTip(
@@ -653,9 +645,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "is a sweep). Finished runs of\n"
             "an interrupted study are reused when it is resumed.")
         self.btn_ms.clicked.connect(self._on_run_ms_independence)
-        sg.addWidget(self.btn_ms, 0, 2)
         sg.setColumnStretch(1, 1)
-        sv.addLayout(status_row("ms"))
         sv.addWidget(hint(
             "Finds ms*, the largest factor that does not change the results "
             "beyond ε_q (larger ms = faster runs). Runs on the coarsest mesh "
@@ -667,8 +657,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         sec = advanced("ms", lambda: [
             (self.le_ms_elem, ""),
             (self.le_ms_factor, OptimizationCfgDefaults.ms_factor),
-            (self.le_ms_stop, OptimizationCfgDefaults.ms_stop_ratio),
-            (self.le_ms_max, OptimizationCfgDefaults.ms_max)])
+            (self.le_ms_stop, OptimizationCfgDefaults.ms_stop_ratio)])
         ag = sub_grid(sec.body)
         ag.addWidget(QLabel("element size of these runs [mm]"), 0, 0)
         self.le_ms_elem = num_edit(
@@ -692,18 +681,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "run time (less with the fixed cost of a run). From a\n"
                 "factor-10 bracket: 7 bisection runs.")
         ag.addWidget(self.le_ms_stop, 2, 1)
-        ag.addWidget(QLabel("largest ms tried"), 3, 0)
         self.le_ms_max = num_edit(
             OptimizationCfgDefaults.ms_max,
             tip="The bracketing never goes beyond this factor. If it passes,\n"
                 "ms* is not bracketed (the study says so).")
-        ag.addWidget(self.le_ms_max, 3, 1)
         ag.setColumnStretch(2, 1)
         sv.addWidget(sec)
 
         # ---- Step 1 · mesh size by Richardson / GCI ---------------------
-        gmesh = QGroupBox("Step 1 · Element size h (mesh convergence)")
+        gmesh = QWidget()
         mv = QVBoxLayout(gmesh)
+        mv.setContentsMargins(4, 4, 4, 4)
         mv.setSpacing(4)
         mg = QGridLayout()
         mg.setHorizontalSpacing(8)
@@ -732,17 +720,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "value and GCI per quantity. Recommends the coarsest mesh within\n"
             "the absolute tolerances eps_q (common settings) of the reference.")
         self.btn_mesh.clicked.connect(self._on_run_mesh_gci)
-        mg.addWidget(self.btn_mesh, 0, 4)
         mg.setColumnStretch(5, 1)
-        mv.addLayout(status_row("mesh"))
         mv.addWidget(hint(
             "Finds h*, the coarsest mesh whose results stay within ε_q "
             "of the reference value (the GCI in % is only reported). Runs "
             "at ms* on the Eulerian domain of the Geometry tab: keep it "
             "generous. Result: h*, for the Mesh tab."))
         sec = advanced("mesh", lambda: [
-            (self.le_gci_ratio, str(OptimizationCfgDefaults.gci_ratio)),
-            (self.le_gci_min, "")])
+            (self.le_gci_ratio, str(OptimizationCfgDefaults.gci_ratio))])
         ag = sub_grid(sec.body)
         ag.addWidget(QLabel("refinement ratio"), 0, 0)
         self.le_gci_ratio = num_edit(
@@ -751,18 +736,17 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                 "Celik et al. (2008, J. Fluids Eng. 130, 078001) recommend a\n"
                 "ratio above 1.3 for the GCI.")
         ag.addWidget(self.le_gci_ratio, 0, 1)
-        ag.addWidget(QLabel("smallest allowed finest size [mm]"), 1, 0)
         self.le_gci_min = num_edit(
             placeholder="none",
             tip="If the finest size is below this floor, the plan starts at\n"
                 "the floor instead [mm]. Default (empty): no floor.")
-        ag.addWidget(self.le_gci_min, 1, 1)
         ag.setColumnStretch(2, 1)
         mv.addWidget(sec)
 
         # ---- Step 2 · Eulerian domain -----------------------------------
-        gdom = QGroupBox("Step 2 · Eulerian domain size")
+        gdom = QWidget()
         dv = QVBoxLayout(gdom)
+        dv.setContentsMargins(4, 4, 4, 4)
         dv.setSpacing(4)
         dg = QGridLayout()
         dg.setHorizontalSpacing(8)
@@ -817,7 +801,6 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "a geometric tail.\n"
             "The domain diagonal only raises a warning.")
         self.btn_domain.clicked.connect(self._on_run_domain_independence)
-        btn_row.addWidget(self.btn_domain)
         # Richardson test on the domain (decision 2026-11-06): measures
         # whether the boundary influence decays as a power of 1/L; it does
         # not change D*.
@@ -832,14 +815,12 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "monotone, the reference is the largest domain.\n"
             "A test only: D* and the domain step are not changed.")
         self.btn_dom_rich.clicked.connect(self._on_run_domain_richardson)
-        btn_row.addWidget(self.btn_dom_rich)
-        btn_row.addWidget(QLabel("r"))
+        btn_row.addWidget(QLabel("Richardson test: ratio r"))
         self.le_dom_rich_ratio = num_edit(
             "1.5", tip="Ratio r of the Richardson domain series (> 1).")
         btn_row.addWidget(self.le_dom_rich_ratio)
         btn_row.addStretch(1)
         dv.addLayout(btn_row)
-        dv.addLayout(status_row("domain"))
         dv.addWidget(hint(
             "Starts from the starting domain (teal box of the preview: the "
             "ZOI plus the margin, or four values set by hand; it always "
@@ -886,9 +867,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         ag.setColumnStretch(4, 1)
         dv.addWidget(sec)
 
-        # ---- Step 3 · interaction checks --------------------------------
-        gchk = QGroupBox("Step 3 · Final checks at (ms*, h*, D*)")
+        # ---- Results of the three parameters and final checks ----------
+        gchk = QGroupBox("Results and final checks at (ms*, h*, D*)")
         kv = QVBoxLayout(gchk)
+        kv.setSpacing(4)
+        for step, name in (("ms", "ms"), ("mesh", "h"), ("domain", "D")):
+            row = status_row(step)
+            row.insertWidget(0, QLabel("<b>%s</b>" % name), 0, Qt.AlignTop)
+            kv.addLayout(row)
         self.btn_checks = QPushButton("Run interaction checks")
         mark_primary(self.btn_checks)
         self.btn_checks.setToolTip(
@@ -935,11 +921,174 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "curves at a clicked ZOI point. No Abaqus run.")
         self.btn_compare.clicked.connect(self.compareRequested.emit)
         top.addWidget(self.btn_compare)
+        top.addSpacing(8)
+        top.addWidget(self.cb_reuse_runs)
         top.addStretch(1)
         self.cb_help = QCheckBox("Show help")
         self.cb_help.setToolTip("Show the grey explanations under each step.")
         self.cb_help.toggled.connect(self._show_help)
         top.addWidget(self.cb_help)
+
+        # ---- The numerical parameters, one row each (Tristan 2026-11-16):
+        # bounds, identification method, its parameters (summary; edited in
+        # "Method parameters" below, page of the selected row), reference,
+        # weight in eps_q, run button.
+        gtab = QGroupBox("Numerical parameters")
+        tv = QVBoxLayout(gtab)
+        tv.setSpacing(4)
+        self.sizing_table = QTableWidget(3, len(SIZING_COLUMNS))
+        self.sizing_table.setHorizontalHeaderLabels(list(SIZING_COLUMNS))
+        self.sizing_table.verticalHeader().setVisible(False)
+        self.sizing_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.sizing_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.sizing_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sizing_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sizing_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        def cell(*widgets):
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(3, 1, 3, 1)
+            lay.setSpacing(3)
+            for x in widgets:
+                lay.addWidget(x)
+            lay.addStretch(1)
+            return w
+
+        def ro_label(tip=""):
+            lab = QLabel("")
+            lab.setToolTip(tip)
+            lab.setStyleSheet("color:#374151;")
+            return lab
+
+        # Method of each row (ms: search + goal of the study; D: the
+        # independence study or the Richardson test).
+        self.cb_ms_method = QComboBox()
+        for key, text in _MS_METHODS:
+            self.cb_ms_method.addItem(text, key)
+        self.cb_ms_method.setToolTip(
+            "Bisection from ms = 1: runs ms = 1 (the reference), then\n"
+            "1 × factor, 1 × factor²... until a comparison fails, then the\n"
+            "geometric middle of the last passing and the failed value until\n"
+            "their ratio is below the stop ratio. ms* = the last passing\n"
+            "value.\n"
+            "Listed values: the ms values of the method parameters, in order,\n"
+            "stopping at the first failure (values are added by doubling if\n"
+            "every comparison passes).\n"
+            "Listed values, sweep: every listed value is run, even after a\n"
+            "failure (whole curve E_max(ms)); same ms*.")
+        self.cb_ms_method.currentIndexChanged.connect(self._on_ms_method)
+        self.lbl_mesh_method = QLabel("GCI / Richardson")
+        self.lbl_mesh_method.setToolTip(
+            "n systematically refined meshes (finest × ratio^k): observed\n"
+            "order p, extrapolated value and GCI per QoI. h* = the coarsest\n"
+            "mesh (the finest excluded) within share × ε_q of the reference.")
+        self.cb_dom_method = QComboBox()
+        for key, text in _DOM_METHODS:
+            self.cb_dom_method.addItem(text, key)
+        self.cb_dom_method.setToolTip(
+            "Independence: each side grown by a constant step from the\n"
+            "starting domain until the QoI stop changing beyond the D share\n"
+            "of ε_q (sequential pass then fixed point on the four sides).\n"
+            "Richardson test: D, r·D and r²·D; order p in 1/L and value\n"
+            "extrapolated to an infinite domain. A test only: D* is not\n"
+            "changed.")
+        self.cb_dom_method.currentIndexChanged.connect(self._on_dom_method)
+        # Bounds that are computed or set on the page of the row.
+        self.lbl_ms_min = ro_label("ms = 1: the model without mass scaling, "
+                                   "the reference of the comparisons.")
+        self.lbl_ms_min.setText("1")
+        self.le_ms_max.setFixedWidth(60)
+        self.le_gci_min.setFixedWidth(60)
+        self.le_ms_max.setToolTip(
+            "Largest ms tried: the bracketing never goes beyond it. If it\n"
+            "passes, ms* is not bracketed (the study says so).")
+        self.le_gci_min.setToolTip(
+            "Smallest allowed finest size [mm]: if the finest mesh of the\n"
+            "plan is below it, the plan starts at it instead. Empty = no\n"
+            "floor.")
+        self.lbl_h_max = ro_label("Coarsest mesh of the plan: finest × "
+                                  "ratio^(n−1) (method parameters).")
+        self.lbl_d_min = ro_label("Starting domain of the study (method "
+                                  "parameters).")
+        self.lbl_d_max = ro_label("Largest size allowed of each side "
+                                  "(method parameters, advanced).")
+        self.lbl_ms_params = ro_label()
+        self.lbl_h_params = ro_label()
+        self.lbl_d_params = ro_label()
+        self.lbl_ms_ref = ro_label()
+        self.lbl_h_ref = ro_label(
+            "Richardson extrapolation of the QoI to h → 0; the finest mesh "
+            "when the observed order p < 0.5.")
+        self.lbl_h_ref.setText("Richardson")
+        self.lbl_d_ref = ro_label()
+        for b in (self.btn_ms, self.btn_mesh, self.btn_domain,
+                  self.btn_dom_rich):
+            b.setText("Run")
+        rows = [
+            ("ms", "Mass scaling ms", self.lbl_ms_min, self.le_ms_max,
+             self.cb_ms_method, self.lbl_ms_params,
+             cell(self.cb_ms_reference, self.lbl_ms_ref), [self.btn_ms]),
+            ("mesh", "Element size h", self.le_gci_min, self.lbl_h_max,
+             self.lbl_mesh_method, self.lbl_h_params, self.lbl_h_ref,
+             [self.btn_mesh]),
+            ("domain", "Domain D", self.lbl_d_min, self.lbl_d_max,
+             self.cb_dom_method, self.lbl_d_params, self.lbl_d_ref,
+             [self.btn_domain, self.btn_dom_rich]),
+        ]
+        self._sizing_rows = [r[0] for r in rows]
+        for i, (step, name, lo, hi, meth, par, ref, run) in enumerate(rows):
+            it = QTableWidgetItem(name)
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it.setToolTip(_SIZING_TIPS[step])
+            self.sizing_table.setItem(i, S_NAME, it)
+            for c, w in ((S_MIN, lo), (S_MAX, hi), (S_METHOD, meth),
+                         (S_PARAMS, par), (S_REF, ref),
+                         (S_WEIGHT, self._eps_share[step])):
+                self.sizing_table.setCellWidget(
+                    i, c, w if type(w) is QWidget else cell(w))
+            self.sizing_table.setCellWidget(i, S_RUN, cell(*run))
+        hh = self.sizing_table.horizontalHeader()
+        for c in range(len(SIZING_COLUMNS)):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(S_PARAMS, QHeaderView.Stretch)
+        hh.setToolTip(
+            "Min / Max: bounds of the parameter. Method: how it is\n"
+            "identified; its parameters are edited under the table (click a\n"
+            "row). Reference: what each run is compared with. Weight: share\n"
+            "of ε_q given to the parameter (weight / sum of the weights).")
+        vh = self.sizing_table.verticalHeader()
+        vh.setDefaultSectionSize(max(30, self.cb_ms_method.sizeHint().height()
+                                     + 6))
+        vh.setSectionResizeMode(QHeaderView.Fixed)
+        self.sizing_table.setFixedHeight(
+            hh.sizeHint().height() + 3 * vh.defaultSectionSize() + 4)
+        tv.addWidget(self.sizing_table)
+        # Method parameters of the selected row.
+        self.method_box = QGroupBox("Method parameters")
+        mb = QVBoxLayout(self.method_box)
+        mb.setContentsMargins(4, 4, 4, 4)
+        self.method_stack = QStackedWidget()
+        for page in (gms, gmesh, gdom):
+            self.method_stack.addWidget(page)
+        mb.addWidget(self.method_stack)
+        self.sizing_table.currentCellChanged.connect(
+            lambda r, *_: self._show_method_page(r))
+        for le in (self.le_ms_values, self.le_ms_factor, self.le_ms_stop,
+                   self.le_ms_elem, self.le_gci_finest, self.le_gci_ratio,
+                   self.le_gci_min, self.le_dom_rich_ratio,
+                   *self._init_edit.values(), *self._max.values()):
+            le.textChanged.connect(self._refresh_sizing_summaries)
+        for sp in (self.sp_gci_n, self.sp_margin, *self._dom_spins.values()):
+            sp.valueChanged.connect(self._refresh_sizing_summaries)
+        for cb in (self.cb_ms_search, self.cb_ms_goal, self.cb_ms_reference,
+                   self.cb_init_mode):
+            cb.currentIndexChanged.connect(self._refresh_sizing_summaries)
+        # The search and the goal of the ms study are set by the Method
+        # column; their combos stay (the code reads them) but are not shown.
+        for cb in (self.cb_ms_search, self.cb_ms_goal):
+            cb.setParent(self)
+            cb.hide()
 
         # ---- Inputs column (scrolls instead of squeezing) ---------------
         inputs = QWidget()
@@ -947,7 +1096,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         il_.setContentsMargins(0, 0, 4, 0)
         il_.addLayout(top)
         il_.addWidget(intro)
-        for gbox in (gsz, gms, gmesh, gdom, gchk):
+        for gbox in (gtab, self.method_box, gchk):
             il_.addWidget(gbox)
         il_.addStretch(1)
         scroll = QScrollArea()
@@ -1064,6 +1213,10 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
         self._wire_opt_persistence()
         self.refresh_inputs()
+        self._apply_dom_method()
+        self.sizing_table.selectRow(0)
+        self._show_method_page(0)
+        self._refresh_sizing_summaries()
 
     # =====================================================================
     # Config-derived inputs (pure; unit-testable)
@@ -1274,6 +1427,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         o.zoi = {k: self.le_zoi[k].text()
                  for k in ("xmin", "xmax", "ymin", "ymax")}
         o.criterion_rmse = {q: le.text() for q, le in self._q_eps.items()}
+        o.sizing_qois = self.sizing_qois()
+        o.dom_method = self.dom_method()
         o.chip_eps = self.le_chip_eps.text()
         o.chip_y0 = self.le_chip_y0.text()
         for step, le in self._eps_share.items():
@@ -1321,6 +1476,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             self.fill_zoi_from_cfg()
             for q, le in self._q_eps.items():
                 le.setText(str(o.criterion_rmse.get(q, "")))
+            qois = getattr(o, "sizing_qois", None)
+            self.set_sizing_qois(list(self._q_use) if qois is None
+                                 else qois)
+            i = self.cb_dom_method.findData(
+                "richardson" if getattr(o, "dom_method", "") == "richardson"
+                else "independence")
+            self.cb_dom_method.setCurrentIndex(max(0, i))
+            self._apply_dom_method()
             self.le_chip_eps.setText(str(getattr(o, "chip_eps", "0.005")))
             self.le_chip_y0.setText(str(getattr(o, "chip_y0", "")))
             for step, le in self._eps_share.items():
@@ -1401,6 +1564,139 @@ class OptimizationTab(ModelStepsMixin, QWidget):
     def _show_help(self, on):
         for lab in self._hints:
             lab.setVisible(bool(on))
+
+    # ---- Table of the numerical parameters --------------------------------
+    def _show_method_page(self, row):
+        """Show the method parameters of the table row `row`."""
+        if not 0 <= row < len(self._sizing_rows):
+            return
+        self.method_stack.setCurrentIndex(row)
+        name = self.sizing_table.item(row, S_NAME).text()
+        self.method_box.setTitle("Method parameters \u00b7 %s" % name)
+
+    def _on_ms_method(self, *_):
+        """Method column of ms -> search and goal of the ms study."""
+        m = self.cb_ms_method.currentData() or "bisection"
+        if m == "sweep":
+            self.set_ms_search("list")
+            self.set_ms_goal("sweep")
+        else:
+            self.set_ms_goal("identify")
+            self.set_ms_search(m)
+
+    def _sync_ms_method(self):
+        """Search and goal of the ms study -> its Method column."""
+        if not hasattr(self, "cb_ms_method"):
+            return
+        m = ("sweep" if self.ms_goal() == "sweep"
+             else "list" if self.ms_search() == "list" else "bisection")
+        i = self.cb_ms_method.findData(m)
+        if i >= 0 and i != self.cb_ms_method.currentIndex():
+            self.cb_ms_method.blockSignals(True)
+            self.cb_ms_method.setCurrentIndex(i)
+            self.cb_ms_method.blockSignals(False)
+        self._refresh_sizing_summaries()
+
+    def dom_method(self) -> str:
+        """"independence" (D*) or "richardson" (the test, D* unchanged)."""
+        return self.cb_dom_method.currentData() or "independence"
+
+    def set_dom_method(self, m) -> None:
+        i = self.cb_dom_method.findData(
+            "richardson" if m == "richardson" else "independence")
+        if i >= 0:
+            self.cb_dom_method.setCurrentIndex(i)
+        self._on_dom_method()
+
+    def _on_dom_method(self, *_):
+        self._apply_dom_method()
+        self._sync_opt_to_cfg()
+
+    def _apply_dom_method(self):
+        rich = self.dom_method() == "richardson"
+        self.btn_domain.setVisible(not rich)
+        self.btn_dom_rich.setVisible(rich)
+        self._refresh_sizing_summaries()
+
+    def _refresh_sizing_summaries(self, *_):
+        """Bounds, parameters and reference shown in the table."""
+        if not hasattr(self, "lbl_d_params"):
+            return
+
+        def num(le, default=None):
+            return self._float_or(le, default)
+
+        def g(v):
+            return "–" if v is None else "%.4g" % v
+
+        m = self.cb_ms_method.currentData() or "bisection"
+        if m == "bisection":
+            self.lbl_ms_params.setText(
+                "\u00d7%s, stop %s" % (
+                    g(num(self.le_ms_factor, 10.0)),
+                    g(num(self.le_ms_stop, 1.0201))))
+            self.lbl_ms_ref.setText("ms = 1")
+        else:
+            vals = self.le_ms_values.text().strip() or "–"
+            self.lbl_ms_params.setText(vals)
+            self.lbl_ms_ref.setText("")
+        self.cb_ms_reference.setVisible(m != "bisection")
+        self.lbl_ms_ref.setVisible(m == "bisection")
+        elem = self._float_or_elem()
+        fin = num(self.le_gci_finest, elem)
+        r = num(self.le_gci_ratio, 2.0)
+        n = int(self.sp_gci_n.value())
+        lo = num(self.le_gci_min, None)
+        if fin is not None and lo is not None and fin < lo:
+            fin = lo
+        self.lbl_h_max.setText(
+            "–" if fin is None or r is None else "%.4g" % (fin * r ** (n - 1)))
+        self.lbl_h_params.setText("%d meshes, ratio %s" % (n, g(r)))
+        if self.dom_method() == "richardson":
+            self.lbl_d_min.setText("D of the model")
+            self.lbl_d_params.setText("r = %s"
+                                      % g(num(self.le_dom_rich_ratio, 1.5)))
+            self.lbl_d_ref.setText("Richardson")
+            self.lbl_d_ref.setToolTip(
+                "Value extrapolated to an infinite domain; the largest "
+                "domain when p < 0.5 or the series is not monotone.")
+            self.lbl_d_max.setText("r\u00b2\u00b7D")
+        else:
+            self.lbl_d_min.setText(
+                "ZOI + margin" if self.init_mode() == "zoi" else "by hand")
+            caps = [d for d, le in self._max.items() if le.text().strip()]
+            self.lbl_d_max.setText("%d cap(s)" % len(caps) if caps
+                                   else "no cap")
+            sp = {a: int(w.value()) for a, w in self._dom_spins.items()}
+            self.lbl_d_params.setText(
+                "step %s el." % sp.get("dom_step_elems", "–"))
+            self.lbl_d_ref.setText("larger domain")
+            self.lbl_d_ref.setToolTip(
+                "Each run is compared with the run of the domain grown by "
+                "one step on the side studied.")
+
+    def _float_or_elem(self):
+        try:
+            return float(self.cfg.elem_size)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def set_sizing_mode(self, on: bool) -> None:
+        """Model sizing shown (True): the QoI of the header carry their
+        tick; Physical parameters (False): labels only (it has its own Use
+        column)."""
+        for q in self._q_use:
+            self._q_use[q].setVisible(bool(on))
+            self._q_lbl[q].setVisible(not on)
+
+    def sizing_qois(self) -> list:
+        """The QoI the Model sizing studies compare (ticked)."""
+        return [q for q, cb in self._q_use.items() if cb.isChecked()]
+
+    def set_sizing_qois(self, qois) -> None:
+        keep = set(qois)
+        for q, cb in self._q_use.items():
+            cb.setChecked(q in keep)
 
     def _schedule_preview(self, *_):
         self._preview_timer.start()
@@ -1733,6 +2029,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
                    linewidths=0, zorder=7, label=label)
 
     def thresholds(self) -> dict:
+        """eps_q of the QoI ticked for Model sizing (the studies compare
+        those only)."""
+        use = set(self.sizing_qois())
+        return {q: v for q, v in self.all_thresholds().items() if q in use}
+
+    def all_thresholds(self) -> dict:
+        """eps_q of every QoI with a value (Explore, Sensitivity, Physical
+        parameters, Compare)."""
         out = {}
         for q, le in self._q_eps.items():
             txt = le.text().strip().replace(",", ".")
@@ -1771,9 +2075,20 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             QMessageBox.warning(self, title, str(e))
             return None
 
+    def _eps_missing_text(self) -> str:
+        use = self.sizing_qois()
+        if not use:
+            return ("Tick at least one QoI at the top of Identify: the "
+                    "Model sizing studies compare the ticked QoI.")
+        missing = [q for q in use if q not in self.thresholds()]
+        return ("Set the admitted deviation ε_q of %s at the top of "
+                "Identify (or untick it)." % ", ".join(missing))
+
     def thresholds_complete(self) -> bool:
-        """True iff every field/force has a threshold (all are required)."""
-        return set(self.thresholds().keys()) >= {q for (q, _f, _u) in _QUANTITIES}
+        """True iff at least one QoI is ticked and every ticked one has an
+        eps_q."""
+        use = set(self.sizing_qois())
+        return bool(use) and set(self.thresholds().keys()) >= use
 
     def quantity_field_map(self) -> dict:
         # all field-backed quantities are always used (Fc/Ff have no element
@@ -2218,7 +2533,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         """eps_q, the window T, the ZOI and the EVF threshold, for the ZOI
         proposal and the QoI of the Parameter plans tab (same values as the
         studies of this tab)."""
-        eps = dict(self.thresholds())
+        eps = dict(self.all_thresholds())
         e = self._float_or(self.le_chip_eps, None)
         if e is not None and e > 0:
             eps["e"] = e
@@ -2258,7 +2573,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
     def prelim_settings(self) -> dict:
         """eps_q and the ZOI (the window T may still be unset)."""
-        return {"eps": self.thresholds(), "zoi": self.zoi()}
+        return {"eps": self.all_thresholds(), "zoi": self.zoi()}
 
     def compare_settings(self):
         """The tab's current comparison settings, for the deviation maps of
@@ -2267,7 +2582,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         from gui.sensitivity.deviation_maps import CompareSettings
         return CompareSettings(
             step=None, zoi=tuple(self.zoi()), grid_step=self.grid_step(),
-            window=self.window(), thresholds=self.thresholds(),
+            window=self.window(), thresholds=self.all_thresholds(),
             source="current comparison settings (the folder of run a "
                    "is not a study of the Model sizing tab)")
 
@@ -2328,11 +2643,8 @@ class OptimizationTab(ModelStepsMixin, QWidget):
 
     def guard_settings(self) -> GuardSettings:
         """Run safeguards: G_K,max, G_HG,max (> 0) and the window T."""
-        rk = self._float_or(self._dom_texts["rk_max"], None)
-        rhg = self._float_or(self._dom_texts["rhg_max"], None)
-        if rk is None or rhg is None or rk <= 0 or rhg <= 0:
-            raise ValueError("G_K,max and G_HG,max must be positive numbers")
-        return GuardSettings(rk_max=rk, rhg_max=rhg, window=self.window())
+        return GuardSettings(rk_max=GUARD_MAX, rhg_max=GUARD_MAX,
+                             window=self.window())
 
     def domain_settings(self) -> dict:
         """Integer settings of the domain study (step, n_max, n_hold, m)."""
@@ -2415,6 +2727,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         lst = self.ms_search() == "list"
         self.le_ms_values.setEnabled(lst)
         self.cb_ms_reference.setEnabled(lst)
+        self._sync_ms_method()
 
     def ms_goal(self) -> str:
         """"identify" (stop at the first failure) or "sweep" (run every
@@ -2434,6 +2747,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if sweep and self.ms_search() != "list":
             self.set_ms_search("list")
         self.cb_ms_search.setEnabled(not sweep)
+        self._sync_ms_method()
 
     def ms_search_settings(self):
         """(factor, stop ratio, largest ms) of the bisection; raises
@@ -2481,8 +2795,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Mass-scaling criterion",
-                "Set the six absolute tolerances eps_q of the common settings "
-                "(Vx, Vy, T, EVF, Fc, Ff): the ms study uses the same E_max.")
+                self._eps_missing_text())
             return None
         try:
             window = self.window()
@@ -2787,9 +3100,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Domain criterion",
-                "Set the six absolute tolerances eps_q of the common settings "
-                "(Vx, Vy, T, EVF, Fc, Ff): they define E_max for the domain "
-                "study.")
+                self._eps_missing_text())
             return None
         try:
             window = self.window()
@@ -3355,8 +3666,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Interaction checks",
-                "Set the six absolute tolerances eps_q of the common settings "
-                "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
+                self._eps_missing_text())
             return None
         shares = self._shares_or_warn("Interaction checks")
         if shares is None:
@@ -3555,8 +3865,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, "Mesh convergence criterion",
-                "Set the six absolute tolerances eps_q of the common settings "
-                "(Vx, Vy, T, EVF, Fc, Ff): the GCI selects the mesh with them.")
+                self._eps_missing_text())
             return None
         try:
             window = self.window()
@@ -3741,8 +4050,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         if not self.thresholds_complete():
             QMessageBox.warning(
                 self, title,
-                "Set the six absolute tolerances eps_q at the top of Identify "
-                "(Vx, Vy, T, EVF, Fc, Ff) first.")
+                self._eps_missing_text())
             return None
         try:
             window = self.window()

@@ -194,6 +194,9 @@ class MainWindow(QMainWindow):
         self.identify_modes = IdentifyModes(self.optimization_tab,
                                             self.identify_tab)
         self.identify_modes.set_header(self.optimization_tab.eps_group)
+        # The QoI ticks of the header belong to Model sizing.
+        self.identify_modes.modeChanged.connect(
+            lambda m: self.optimization_tab.set_sizing_mode(m == "sizing"))
         self.identify_modes.modeChanged.connect(
             self._refresh_sensitivity_if_visible)
         self.opt_tabs = QTabWidget()

@@ -124,7 +124,8 @@ class TestDomainStudyPersistence:
         assert (o2.rk_max, o2.rhg_max) == ("0.02", "0.06")
         tab = OptimizationTab(cfg2)
         assert tab._dom_spins["dom_step_elems"].value() == 7
-        assert tab._dom_texts["rhg_max"].text() == "0.06"
+        # The guards are fixed at 0.05 whatever the profile holds.
+        assert tab.guard_settings().rhg_max == 0.05
         tab._dom_spins["dom_n_hold"].setValue(3)
         tab._dom_texts["window_end"].setText("0.9")
         assert tab.cfg.optimization.dom_n_hold == 3

@@ -144,8 +144,7 @@ class ModelStepsMixin:
 
     def _spec_defaults(self) -> dict:
         """What an older study folder may lack, taken from the tab."""
-        return {"rk_max": self._float_or(self._dom_texts["rk_max"], 0.05),
-                "rhg_max": self._float_or(self._dom_texts["rhg_max"], 0.05),
+        return {"rk_max": 0.05, "rhg_max": 0.05,
                 "base_ms": self._base_ms(),
                 "filter_verify": bool(getattr(
                     self.cfg.step, "output_filter_verify", True))}
@@ -711,14 +710,18 @@ class ModelStepsMixin:
 
         for k, v, cur in zip(ZOI_KEYS, zoi_tuple(spec), self.zoi()):
             put(self.le_zoi[k], v, "ZOI " + k, current=cur)
-        for q, v in eps_of_spec(spec).items():
+        eps = eps_of_spec(spec)
+        for q, v in eps.items():
             if q in self._q_eps:
                 put(self._q_eps[q], v, "ε_q " + q)
+        # The QoI the study compared are those ticked for Model sizing.
+        used = [q for q in self._q_use if q in eps]
+        if used and set(used) != set(self.sizing_qois()):
+            self.set_sizing_qois(used)
+            changed.append("QoI compared")
         w = spec.get("window") or [None, None]
         put(self._dom_texts["window_start"], w[0], "T start")
         put(self._dom_texts["window_end"], w[1], "T end")
-        put(self._dom_texts["rk_max"], spec.get("rk_max"), "G_K")
-        put(self._dom_texts["rhg_max"], spec.get("rhg_max"), "G_HG")
         grid = grid_set_of_spec(spec)
         if grid is None:
             if self.le_grid_step.text().strip():
@@ -1350,8 +1353,7 @@ class ModelStepsMixin:
             return
         if not self.thresholds_complete():
             QMessageBox.warning(self, "Run all steps",
-                                "Set the six admitted deviations ε_q "
-                                "(Vx, Vy, T, EVF, Fc, Ff) first.")
+                                self._eps_missing_text())
             return
         try:
             self._current_settings()
