@@ -30,16 +30,19 @@ def test_comparison_settings_shown_where_they_belong(qapp):
         (opt._dom_texts["window_start"], w.step_tab),
         (opt._q_eps["Vx"], w.identify_modes),
         (opt.le_chip_eps, w.identify_modes),
-        (opt._eps_share["ms"], w.identify_modes),
     ]
     for widget, tab in where:
         assert _inside(widget, tab), widget
         assert not _inside(widget, opt)
     # eps_q sit above both modes, not inside the Model sizing page
     assert not _inside(opt._q_eps["Vx"], w.identify_modes.stack)
-    # guards and run reuse stay with the steps
-    for widget in (opt._dom_texts["rk_max"], opt.cb_reuse_runs):
+    # the step weights and run reuse stay with Model sizing; the guards
+    # are fixed at 0.05 (Tristan 2026-11-16)
+    for widget in (opt._eps_share["ms"], opt.cb_reuse_runs):
         assert _inside(widget, opt)
+    assert "rk_max" not in opt._dom_texts
+    g = opt.guard_settings()
+    assert (g.rk_max, g.rhg_max) == (0.05, 0.05)
     names = [w.opt_tabs.tabText(i) for i in range(w.opt_tabs.count())]
     assert "1 · Setup" not in names
 
@@ -67,7 +70,6 @@ def test_settings_saved_with_the_same_keys(qapp):
         opt.le_zoi[k].setText(v)
     opt._q_eps["Vx"].setText("12")
     opt._dom_texts["window_start"].setText("0.4")
-    opt._dom_texts["rk_max"].setText("0.07")
     opt._eps_share["mesh"].setText("2")
     opt.le_grid_step.setText("0.003")
     opt._sync_opt_to_cfg()
@@ -76,7 +78,6 @@ def test_settings_saved_with_the_same_keys(qapp):
         assert again.le_zoi[k].text() == v
     assert again._q_eps["Vx"].text() == "12"
     assert again._dom_texts["window_start"].text() == "0.4"
-    assert again._dom_texts["rk_max"].text() == "0.07"
     assert again._eps_share["mesh"].text() == "2"
     assert again.le_grid_step.text() == "0.003"
 

@@ -34,7 +34,7 @@ def test_gci_plan_defaults_to_four_meshes(tab):
 
 
 def test_advanced_sections_start_collapsed_and_unchanged(tab):
-    assert set(tab._advanced) == {"sizing", "ms", "mesh", "domain"}
+    assert set(tab._advanced) == {"ms", "mesh", "domain"}
     for sec, _fields in tab._advanced.values():
         assert not sec.is_expanded()
         assert sec.body.isHidden()
@@ -57,11 +57,12 @@ def test_essential_inputs_stay_outside_the_advanced_sections(tab):
     for w in (tab.le_grid_step, tab._dom_texts["window_start"],
               tab._dom_texts["window_end"]):
         assert not inside(w)
-    for w in (tab.le_ms_elem, tab.le_gci_ratio,
-              tab.le_gci_min, tab.sp_margin, *tab._max.values(),
-              *tab._dom_spins.values(),
-              *[le for a, le in tab._dom_texts.items()
-                if not a.startswith("window_")]):
+    # The bounds are columns of the table (Tristan 2026-11-16).
+    for w in (tab.le_ms_max, tab.le_gci_min, *tab._eps_share.values()):
+        assert not inside(w)
+        assert tab.sizing_table.isAncestorOf(w)
+    for w in (tab.le_ms_elem, tab.le_gci_ratio, tab.sp_margin,
+              *tab._max.values(), *tab._dom_spins.values()):
         assert inside(w)
 
 
@@ -77,18 +78,17 @@ def test_hidden_change_is_counted_on_the_header(tab):
 
 
 def test_count_ignores_number_formatting(tab):
-    # the guards are counted in the sizing section (moved 2026-11-04)
-    sec = tab._advanced["sizing"][0]
-    tab._dom_texts["rk_max"].setText("0.01")
+    sec = tab._advanced["mesh"][0]
+    tab.le_gci_ratio.setText("2.0")
+    assert sec.n_changed() == 0
+    tab.le_gci_ratio.setText("1.5")
     assert sec.n_changed() == 1
 
 
 def test_loaded_profile_with_non_default_values_is_flagged(qapp):
     cfg = ModelConfig()
-    cfg.optimization.rk_max = "0.01"
     cfg.optimization.gci_ratio = "1.5"
     t = OptimizationTab(cfg)
-    assert t._advanced["sizing"][0].n_changed() == 1
     assert t._advanced["mesh"][0].n_changed() == 1
 
 

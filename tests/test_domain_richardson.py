@@ -127,7 +127,11 @@ def test_run_stops_on_missing_run_or_cancel(monkeypatch):
 def test_tab_button_and_result_file(qapp, tmp_path, monkeypatch):
     from gui.tabs.optimization_tab import OptimizationTab
     tab = OptimizationTab(ModelConfig())
-    assert tab.btn_dom_rich.text().startswith("Richardson test")
+    # The Richardson test is the second method of the domain row.
+    assert tab.cb_dom_method.findData("richardson") >= 0
+    tab.set_dom_method("richardson")
+    assert tab.btn_dom_rich.isVisibleTo(tab)
+    assert not tab.btn_domain.isVisibleTo(tab)
     calls = []
     res = dr.run_domain_richardson(
         _fake_run(monkeypatch, calls), ModelConfig(), (0, 1, 0, 1), BASE,

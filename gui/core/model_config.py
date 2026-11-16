@@ -501,6 +501,13 @@ class OptimizationCfg:
     # above the workpiece [mm] ("" = the uncut chip thickness t1). 0.005
     # is a choice (about 1.5 px of the camera of the reference thesis,
     # 2.9-3.5 um/px), to be set from the camera of the tests.
+    # QoI compared by the Model sizing studies (ticked at the top of
+    # Identify, Tristan 2026-11-16); the others keep their eps_q for the
+    # other tabs. Default: the six.
+    sizing_qois:    list = field(default_factory=lambda: [
+        "Vx", "Vy", "T", "EVF", "Fc", "Ff"])
+    # Method of the domain row: "independence" (D*) or "richardson" (test).
+    dom_method:     str  = "independence"
     chip_eps:       str  = "0.005"
     chip_y0:        str  = ""
     sizing_tol:     dict = field(default_factory=lambda: {
