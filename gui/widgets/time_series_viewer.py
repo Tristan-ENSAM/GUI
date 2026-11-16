@@ -52,7 +52,7 @@ class TimeSeriesViewer(QWidget):
         # aligned between the force and energy panels.
         self._ax, self._ax_energy = self._fig.subplots(
             2, 1, sharex=True, gridspec_kw={"height_ratios": [1, 1]})
-        self._ax.set_ylabel("force")
+        self._ax.set_ylabel("force per unit width [N/mm]")
         self._ax_energy.set_xlabel("time [s]")
         self._ax_energy.set_ylabel("energy")
         # Energy quantities (ALLKE/ALLIE/ALLVD...) span orders of magnitude and
@@ -73,6 +73,7 @@ class TimeSeriesViewer(QWidget):
         self._lines: dict[str, "matplotlib.lines.Line2D"] = {}
         # One cursor per axis (a Line2D belongs to a single axes).
         self._cursors = []
+        self._energy_note = None
 
     def add_series(self, name: str, t: np.ndarray, y: np.ndarray,
                     color: str = None, linestyle: str = "-",
@@ -97,6 +98,17 @@ class TimeSeriesViewer(QWidget):
             ax.legend(loc="upper right", fontsize=9, framealpha=0.85)
         self._canvas.draw_idle()
 
+    def set_force_label(self, text: str):
+        self._ax.set_ylabel(text)
+        self._canvas.draw_idle()
+
+    def set_energy_note(self, text: str):
+        """A note above the energy panel (the energy ratios), out of the
+        curves' way."""
+        t = self._ax_energy.set_title(text or "", fontsize=8, loc="left")
+        self._energy_note = t if text else None
+        self._canvas.draw_idle()
+
     def clear(self):
         """Remove every curve and the cursor."""
         for line in self._lines.values():
@@ -105,6 +117,9 @@ class TimeSeriesViewer(QWidget):
         for c in self._cursors:
             c.remove()
         self._cursors = []
+        if self._energy_note is not None:
+            self._ax_energy.set_title("", loc="left")
+            self._energy_note = None
         for ax in (self._ax, self._ax_energy):
             leg = ax.get_legend()
             if leg is not None:

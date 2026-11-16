@@ -159,7 +159,7 @@ def test_worker_reports_a_failed_run(qapp, monkeypatch, tmp_path):
 def test_main_window_has_identify(qapp):
     from gui.main import MainWindow
     w = MainWindow(); w._dirty = False
-    assert w.opt_tabs.widget(3) is w.identify_modes
+    assert w.opt_tabs.widget(2) is w.identify_modes
     assert w.identify_tab._model_settings_getter is not None
 
 

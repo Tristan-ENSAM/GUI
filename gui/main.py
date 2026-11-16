@@ -97,7 +97,8 @@ class MainWindow(QMainWindow):
         # (the user may edit them mid-session via Preferences dialog).
         self.job_tab         = JobTab(self.cfg, lambda: self.prefs,
                                       profile_name_getter=self._profile_name)
-        self.results_tab     = ResultsTab()
+        self.results_tab     = ResultsTab(
+            window_getter=lambda: self.optimization_tab.window())
         # Explore (sweep, grid) and Sensitivity (Jacobian, Morris): the same
         # parameter table and run machinery, one instance each, so the
         # ticked parameters and settings are kept per tab.
@@ -196,10 +197,13 @@ class MainWindow(QMainWindow):
         self.identify_modes.modeChanged.connect(
             self._refresh_sensitivity_if_visible)
         self.opt_tabs = QTabWidget()
-        self.opt_tabs.addTab(self.initial_run_tab,   "1 · Initial run")
-        self.opt_tabs.addTab(self.explore_tab,       "2 · Explore")
-        self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Sensitivity")
-        self.opt_tabs.addTab(self.identify_modes,    "4 · Identify")
+        # The initial-run checks (live run, P0/P1, stop rules) are a page
+        # of Simulate > Results (Tristan 2026-11-16).
+        self.results_tab.add_page(self.initial_run_tab, "Initial run checks")
+        self.initial_run_tab.resultsReady.connect(self.results_tab.load_bundle)
+        self.opt_tabs.addTab(self.explore_tab,       "1 · Explore")
+        self.opt_tabs.addTab(self.sensitivity_tab,   "2 · Sensitivity")
+        self.opt_tabs.addTab(self.identify_modes,    "3 · Identify")
         self.optimization_tab.compareRequested.connect(self._show_compare)
         for tab in self._plan_tabs():
             tab.compareRunsRequested.connect(self._compare_plan_runs)
