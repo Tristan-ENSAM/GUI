@@ -200,7 +200,7 @@ class SensitivityTab(QWidget):
         if "sweep" in self._methods or "grid" in self._methods:
             help_lines.append(
                 "Values of a row, from Min to Max (both always included): "
-                "n values (Levels, Spacing above, or the row's Spacing), a "
+                "n values (the row's Spacing and n; default 5 linear), a "
                 "step (Min, Min + step, ... then Max) or a ratio (Min, "
                 "Min x ratio, ... then Max), or the Values cell typed by "
                 "hand (e.g. 1; 100; 1000). The Levels column shows them.")
@@ -252,8 +252,8 @@ class SensitivityTab(QWidget):
              "Norm", "Unit", "Values", "Note", "Spacing", "n / step / ratio",
              "Levels"])
         self.table.horizontalHeaderItem(11).setToolTip(
-            "How the values of the row are made from Min to Max. default: "
-            "Levels and Spacing above. linear, step: Min, Min + step, ... "
+            "How the values of the row are made from Min to Max. linear / "
+            "geometric, n values: n values (default 5). linear, step: Min, Min + step, ... "
             "then Max. geometric, ratio: Min, Min x ratio, ... then Max. Min "
             "and Max are always in the plan; when the last step overshoots "
             "Max, the last interval is shorter. A Values cell typed by hand "
@@ -333,31 +333,10 @@ class SensitivityTab(QWidget):
         self.spin_levels.valueChanged.connect(self._mark_plan_stale)
         method_row.addWidget(self.spin_levels)
 
-        # Sweep / grid controls: n levels from Min to Max, linear or
-        # geometric (a "Values" cell typed by hand wins for its row).
-        self.lbl_nlev = QLabel("Levels:")
-        method_row.addWidget(self.lbl_nlev)
-        self.spin_nlev = QSpinBox()
-        self.spin_nlev.setRange(2, 50)
-        self.spin_nlev.setValue(sw.DEFAULT_LEVELS)
-        self.spin_nlev.setToolTip(
-            "Number of values of each parameter, from Min to Max (both\n"
-            "included). A row whose Values cell is filled uses those values.")
-        self.spin_nlev.valueChanged.connect(self._update_cost)
-        self.spin_nlev.valueChanged.connect(self._mark_plan_stale)
-        method_row.addWidget(self.spin_nlev)
-        self.lbl_spacing = QLabel("Spacing:")
-        method_row.addWidget(self.lbl_spacing)
-        self.cb_spacing = QComboBox()
-        self.cb_spacing.addItem("linear", "linear")
-        self.cb_spacing.addItem("geometric", "geometric")
-        self.cb_spacing.setToolTip(
-            "linear: evenly spaced values. geometric: constant ratio between\n"
-            "two values (Min and Max > 0), e.g. a mass-scaling factor.")
-        self.cb_spacing.currentIndexChanged.connect(self._update_cost)
-        self.cb_spacing.currentIndexChanged.connect(self._mark_plan_stale)
-        method_row.addWidget(self.cb_spacing)
-
+        # Sweep / grid: the levels are set per row only (Spacing and n /
+        # step / ratio columns of the table; Tristan 2026-11-16 removed the
+        # duplicate Levels / Spacing next to Method). New rows: linear,
+        # sw.DEFAULT_LEVELS values.
         self.lbl_hint = QLabel("step = Delta per parameter")
         self.lbl_hint.setStyleSheet("color: #6b7280;")
         method_row.addWidget(self.lbl_hint)
@@ -366,7 +345,9 @@ class SensitivityTab(QWidget):
 
         # QoI of the Model tab (same reduction, same eps_q) + other QoI.
         qoi_row = QHBoxLayout()
-        model_box = QGroupBox("QoI of the sizing studies (judged against \u03b5_q)")
+        # The QoI are shown as measured, in their unit, not against eps_q
+        # (Tristan 2026-11-16); the box takes half the width.
+        model_box = QGroupBox("QoI (values in their unit)")
         mg = QGridLayout(model_box)
         self._model_qoi_checks = {}
         for i, q in enumerate(mq.MODEL_QOIS):
@@ -378,7 +359,7 @@ class SensitivityTab(QWidget):
                 "Model sizing, with the ZOI, window T and EVF threshold of "
                 "the comparison settings. Fields: area mean over the ZOI of the time mean of each "
                 "element over its material frames in T. Forces: mean of F/w "
-                "over T. A \"/\u03b5_q\" column is added to the results.")
+                "over T. The results show the QoI in its own unit.")
             cb.toggled.connect(self._mark_plan_stale)
             self._model_qoi_checks[q] = cb
             mg.addWidget(cb, i // 2, i % 2)
@@ -389,6 +370,7 @@ class SensitivityTab(QWidget):
         mg.addWidget(self.lbl_model_qoi, (len(mq.MODEL_QOIS) + 1) // 2, 0,
                      1, 2)
         qoi_row.addWidget(model_box, 1)
+        qoi_row.addStretch(1)
 
         # The "Other QoI" (Fx/Fy mean and max, T_max, PEEQ_max) and their
         # warm-up fraction were removed (QoI sort of 2026-11-06): the plans
@@ -769,13 +751,14 @@ class SensitivityTab(QWidget):
                 # cols 11-13: per-row spacing, its n / step / ratio, and the
                 # levels the plan will run (sweep / grid)
                 cb = QComboBox()
-                cb.addItem("default", "default")
                 for key, label, _what in sw.ROW_SPACINGS:
                     cb.addItem(label, key)
+                cb.setProperty("prev_how", "linear_n")
                 cb.currentIndexChanged.connect(
                     lambda _i, row=r: self._on_row_spacing_changed(row))
                 self.table.setCellWidget(r, 11, cb)
-                self.table.setItem(r, 12, QTableWidgetItem(""))
+                self.table.setItem(r, 12,
+                                   QTableWidgetItem(str(sw.DEFAULT_LEVELS)))
                 it_lv = QTableWidgetItem("")
                 it_lv.setFlags(Qt.ItemIsEnabled)
                 self.table.setItem(r, 13, it_lv)
@@ -785,18 +768,25 @@ class SensitivityTab(QWidget):
 
     def _row_spacing(self, row) -> str:
         cb = self.table.cellWidget(row, 11)
-        return (cb.currentData() if cb is not None else None) or "default"
+        return (cb.currentData() if cb is not None else None) or "linear_n"
 
     def _on_row_spacing_changed(self, row):
-        """Pre-fill the n / step / ratio cell when it does not fit the new
-        spacing: n = Levels, step = (Max - Min) / 4, ratio = 2."""
+        """Pre-fill the n / step / ratio cell for the new spacing: n = 5,
+        step = (Max - Min) / 4, ratio = 2. A value typed for the same kind
+        (n -> n) is kept."""
         how = self._row_spacing(row)
-        cur = self._cell_float(row, 12)
+        cb = self.table.cellWidget(row, 11)
+        kind = dict((k, w) for k, _l, w in sw.ROW_SPACINGS)
+        prev = cb.property("prev_how") if cb is not None else None
+        same_kind = prev is not None and kind.get(prev) == kind.get(how)
+        if cb is not None:
+            cb.setProperty("prev_how", how)
+        cur = self._cell_float(row, 12) if same_kind else None
         lo, hi = self._cell_float(row, 3), self._cell_float(row, 4)
         text = None
         if how in ("linear_n", "geometric_n"):
             if cur is None or not float(cur).is_integer() or cur < 2:
-                text = str(self.spin_nlev.value())
+                text = str(sw.DEFAULT_LEVELS)
         elif how == "linear_step":
             if (cur is None or cur <= 0) and lo is not None and hi is not None \
                     and hi > lo:
@@ -820,9 +810,6 @@ class SensitivityTab(QWidget):
         if lo is None or hi is None:
             raise ValueError("Min and Max must be numbers.")
         how = self._row_spacing(row)
-        if how == "default":
-            g = self.cb_spacing.currentData() or "linear"
-            return sw.levels(lo, hi, self.spin_nlev.value(), g), g
         val = self._cell_float(row, 12)
         if val is None:
             what = dict((k, w) for k, _l, w in sw.ROW_SPACINGS)[how]
@@ -1164,9 +1151,6 @@ class SensitivityTab(QWidget):
             w.setVisible(method == "jacobian")
         for w in (self.lbl_traj, self.spin_traj, self.lbl_levels, self.spin_levels):
             w.setVisible(morris)
-        for w in (self.lbl_nlev, self.spin_nlev, self.lbl_spacing,
-                  self.cb_spacing):
-            w.setVisible(sweep)
         # Delta / Delta% / Norm are the Jacobian step; Values the levels.
         for c in (5, 6, 7):
             self.table.setColumnHidden(c, method != "jacobian")
@@ -1312,11 +1296,10 @@ class SensitivityTab(QWidget):
         except Exception as e:
             raise ValueError("Set the ZOI (Geometry tab) and the window T (Step tab) "
                              "first (%s)." % e)
-        eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
-        missing = [q for q in qois if not (eps.get(q) or 0) > 0]
-        if missing:
-            raise ValueError("Set \u03b5_q of %s in Optimize > Identify first."
-                             % ", ".join(missing))
+        # The QoI are measured as such (no eps_q needed); eps_q, when set,
+        # is only kept in the plan record.
+        eps = {k: float(v) for k, v in (st.get("eps") or {}).items()
+               if v is not None}
         if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
             raise ValueError("The ZOI (Geometry tab) is empty.")
         if any(q in mq.FIELD_QUANTITIES for q in qois) \
@@ -1334,7 +1317,7 @@ class SensitivityTab(QWidget):
         return {"zoi": zoi, "window": window,
                 "evf_threshold": float(st.get("evf_threshold", 0.5)),
                 "chip_y0": st.get("chip_y0"),
-                "eps": {q: eps[q] for q in qois}}
+                "eps": {q: eps[q] for q in qois if (eps.get(q) or 0) > 0}}
 
     def _selected_field_vars(self):
         return [v for v, cb in self._field_checks.items() if cb.isChecked()]
@@ -1566,7 +1549,8 @@ class SensitivityTab(QWidget):
             workdir=str(wd), cpus=cpus,
             warmup_frac=0.0,
             job_prefix=self._run_job_prefix, field_vars=field_vars,
-            eps=(self._plan_model_qoi or {}).get("eps"),
+            # No "/eps_q" columns: the QoI are shown in their unit.
+            eps=None,
             remote_prefs=prefs if is_remote(prefs) else None,
             extract_full_domain=self._run_full_domain,
             series_zone=series_zone, evf_threshold=evf_thr,
@@ -2530,7 +2514,9 @@ class SensitivityTab(QWidget):
         self.compareRunsRequested.emit(str(self._run_workdir), job(a), job(b))
 
     def _qoi_eps(self, qid):
-        """eps_q of a QoI of the run (Model sizing QoI only), else None."""
+        """eps_q of a QoI: not used any more on the charts (the QoI are
+        shown in their unit, Tristan 2026-11-16)."""
+        return None
         eps = (self._plan_model_qoi or {}).get("eps") or {}
         for q in self.selected_qois:
             if q.id == qid and getattr(q, "eps_key", "") in eps:

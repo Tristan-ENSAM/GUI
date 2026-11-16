@@ -38,10 +38,11 @@ def test_method_controls_and_columns(qapp):
     tab = _tab("sweep")
     assert not tab.table.isColumnHidden(9)        # Values
     assert tab.table.isColumnHidden(5)            # Delta (Jacobian only)
-    assert not tab.spin_nlev.isHidden() and not tab.chk_reuse.isHidden()
+    assert not hasattr(tab, "spin_nlev")          # per-row levels only
+    assert not tab.table.isColumnHidden(11) and not tab.chk_reuse.isHidden()
     tab.cb_method.setCurrentIndex(0)
     assert tab.table.isColumnHidden(9) and not tab.table.isColumnHidden(5)
-    assert tab.spin_nlev.isHidden() and tab.chk_reuse.isHidden()
+    assert tab.table.isColumnHidden(11) and tab.chk_reuse.isHidden()
 
 
 def test_sweep_levels_cost_and_typed_values(qapp):
@@ -49,7 +50,7 @@ def test_sweep_levels_cost_and_typed_values(qapp):
     r = _row(tab, MU)
     tab.table.item(r, 3).setText("0.1")
     tab.table.item(r, 4).setText("0.5")
-    tab.spin_nlev.setValue(5)
+    tab.table.item(r, 12).setText("5")
     ref = pr.get_display(tab.cfg, pr.spec_for(MU), "C")
     sel, spacing = tab._collect_sweep()
     assert np.allclose(sel[0][2], [0.1, 0.2, 0.3, 0.4, 0.5])
@@ -226,3 +227,18 @@ def test_compare_two_selected_runs(qapp, tmp_path):
     tab.compareRunsRequested.connect(lambda *a: got.append(a))
     tab.btn_compare_runs.click()
     assert got == [(str(tmp_path), "grid_run000", "grid_run003")]
+
+
+def test_qoi_in_their_unit_and_english_categories(qapp):
+    """Tristan 2026-11-16: QoI shown as measured (no /eps_q), QoI box half
+    width, display categories in English."""
+    from gui.widgets.param_filter import CATEGORY_PREFIX
+    tab = _tab("sweep")
+    cats = [tab.cb_filter.itemData(i) for i in range(tab.cb_filter.count())]
+    cats = [c[len(CATEGORY_PREFIX):] for c in cats
+            if c and c.startswith(CATEGORY_PREFIX)]
+    assert "Tool geometry" in cats and "Numerical" in cats
+    assert not any(ch in "".join(cats) for ch in "éèàç")
+    assert tab._qoi_eps("Vx") is None
+    box = next(iter(tab._model_qoi_checks.values())).parentWidget()
+    assert "ε_q" not in box.title()

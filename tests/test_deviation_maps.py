@@ -522,7 +522,7 @@ def test_help_tab_in_main_window(qapp):
     w.show_help()
     assert w._help_dialog.isVisible()
     g = w.help_tab.glossary
-    g.le_search.setText("frottement")
+    g.le_search.setText("friction")
     shown = [g.table.item(r, 0).text() for r in range(g.table.rowCount())
              if not g.table.isRowHidden(r)]
     assert shown == ["μ"]

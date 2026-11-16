@@ -95,7 +95,7 @@ def test_ratio_row_and_default_row_in_one_plan(qapp):
     assert tab.table.item(rm, 12).text() == "2"
     tab.table.item(ru, 3).setText("0.1")
     tab.table.item(ru, 4).setText("0.5")
-    tab.spin_nlev.setValue(3)                          # the default row
+    tab.table.item(ru, 12).setText("3")                # linear, n values
     sel, spacing = tab._collect_sweep()
     by = {s.path: lv for s, _r, lv in sel}
     assert len(by[MS]) == 16 and by[MS][-1] == 25600

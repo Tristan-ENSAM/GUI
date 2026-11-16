@@ -186,12 +186,12 @@ class ParamSpec:
 # truth). We only expose the keys that actually live in `euler_material`.
 # ---------------------------------------------------------------------------
 # Grouping of material keys into UI categories. Keys not listed here are
-# still exposed under "Matériau pièce — autres".
+# still exposed under "Workpiece material — other".
 _MAT_GROUPS = [
-    ("Matériau — JC plasticité",   ["A", "B", "n", "C", "m"]),
-    ("Matériau — JC thermique",    ["Tm", "Tr", "eps_dot0"]),
-    ("Matériau — propriétés",      ["rho", "E", "nu", "k", "Cp", "alpha", "beta"]),
-    ("Matériau — JC endommagement", ["D1", "D2", "D3", "D4", "D5", "eps0", "Gf"]),
+    ("Material — JC plasticity",   ["A", "B", "n", "C", "m"]),
+    ("Material — JC thermal",    ["Tm", "Tr", "eps_dot0"]),
+    ("Material — properties",      ["rho", "E", "nu", "k", "Cp", "alpha", "beta"]),
+    ("Material — JC damage", ["D1", "D2", "D3", "D4", "D5", "eps0", "Gf"]),
 ]
 
 # Sensible default ± ranges (fraction of the displayed value) per material
@@ -223,7 +223,7 @@ def _material_specs(prefix: str = "euler_material",
     for key, (label, unit, factor) in units.MATERIAL_FIELDS.items():
         if only is not None and key not in only:
             continue
-        cat = category or grouped_keys.get(key, "Matériau — autres")
+        cat = category or grouped_keys.get(key, "Material — other")
         is_temp = (unit == "TEMP")
         # For TEMP keys the displayed unit resolves later via temp_unit;
         # store a neutral placeholder, the UI calls display_unit() anyway.
@@ -253,63 +253,63 @@ def _material_specs(prefix: str = "euler_material",
 def _non_material_specs() -> list[ParamSpec]:
     return [
         # --- Tool geometry (stored in mm / deg, displayed as-is) ---
-        ParamSpec("tool_geometry.rake_angle",  "Angle de coupe (rake)",  "Géométrie outil", "deg", rel_range=0.0, abs_range=10.0, remesh=True),
-        ParamSpec("tool_geometry.clear_angle", "Angle de dépouille",     "Géométrie outil", "deg", rel_range=0.40, abs_range=3.0, remesh=True),
-        ParamSpec("tool_geometry.r_tool",      "Rayon d'arête r",        "Géométrie outil", "mm",  rel_range=0.50, remesh=True),
-        ParamSpec("tool_geometry.h_tool",      "Hauteur outil h",        "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
-        ParamSpec("tool_geometry.l_tool",      "Longueur outil l",       "Géométrie outil", "mm",  rel_range=0.20, remesh=True),
-        ParamSpec("tool_position.x0",          "Position outil x0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01),
-        ParamSpec("tool_position.y0",          "Position outil y0",      "Géométrie outil", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("tool_geometry.rake_angle",  "Rake angle γ",  "Tool geometry", "deg", rel_range=0.0, abs_range=10.0, remesh=True),
+        ParamSpec("tool_geometry.clear_angle", "Clearance angle α",     "Tool geometry", "deg", rel_range=0.40, abs_range=3.0, remesh=True),
+        ParamSpec("tool_geometry.r_tool",      "Cutting-edge radius r_β",        "Tool geometry", "mm",  rel_range=0.50, remesh=True),
+        ParamSpec("tool_geometry.h_tool",      "Tool height h_tool",        "Tool geometry", "mm",  rel_range=0.20, remesh=True),
+        ParamSpec("tool_geometry.l_tool",      "Tool length l_tool",       "Tool geometry", "mm",  rel_range=0.20, remesh=True),
+        ParamSpec("tool_position.x0",          "Tool position x0",      "Tool geometry", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("tool_position.y0",          "Tool position y0",      "Tool geometry", "mm",  rel_range=0.20, abs_range=0.01),
 
         # --- Workpiece / Eulerian geometry (the domain D of Model sizing) ---
-        ParamSpec("euler_geometry.h_wp",       "Hauteur pièce h_wp",     "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
-        ParamSpec("euler_geometry.l_wp",       "Longueur pièce l_wp",    "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
-        ParamSpec("euler_geometry.h_void",     "Hauteur du vide h_void", "Géométrie pièce", "mm",  rel_range=0.20, kind="numerical", remesh=True),
-        ParamSpec("euler_geometry.l_void",     "Longueur du vide l_void", "Géométrie pièce", "mm", rel_range=0.20, kind="numerical", remesh=True),
-        ParamSpec("wp_position.x0",            "Position pièce x0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01),
-        ParamSpec("wp_position.y0",            "Position pièce y0",      "Géométrie pièce", "mm",  rel_range=0.20, abs_range=0.01),
-        ParamSpec("euler_position.x0",         "Position domaine eulérien x0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
-        ParamSpec("euler_position.y0",         "Position domaine eulérien y0", "Géométrie pièce", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.h_wp",       "Workpiece height h_wp",     "Workpiece geometry", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.l_wp",       "Workpiece length l_wp",    "Workpiece geometry", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.h_void",     "Void height h_void", "Workpiece geometry", "mm",  rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("euler_geometry.l_void",     "Void length l_void", "Workpiece geometry", "mm", rel_range=0.20, kind="numerical", remesh=True),
+        ParamSpec("wp_position.x0",            "Workpiece position x0",      "Workpiece geometry", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("wp_position.y0",            "Workpiece position y0",      "Workpiece geometry", "mm",  rel_range=0.20, abs_range=0.01),
+        ParamSpec("euler_position.x0",         "Eulerian domain position x0", "Workpiece geometry", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
+        ParamSpec("euler_position.y0",         "Eulerian domain position y0", "Workpiece geometry", "mm", rel_range=0.20, abs_range=0.01, kind="numerical", remesh=True),
 
         # --- Process / boundary conditions ---
         # cutting_speed: stored mm/s, displayed in the system's velocity unit.
-        ParamSpec("bcs.cutting_speed",         "Vitesse de coupe",       "Procédé / CL", "m/min", unit_kind="velocity_named", rel_range=0.30),
-        ParamSpec("bcs.initial_velocity",      "Vitesse initiale",       "Procédé / CL", "m/min", unit_kind="velocity_named", rel_range=0.30),
+        ParamSpec("bcs.cutting_speed",         "Cutting speed",       "Process / BCs", "m/min", unit_kind="velocity_named", rel_range=0.30),
+        ParamSpec("bcs.initial_velocity",      "Initial velocity",       "Process / BCs", "m/min", unit_kind="velocity_named", rel_range=0.30),
         # ambient_temperature: stored °C, displayed per temp_unit.
-        ParamSpec("bcs.ambient_temperature",   "Température ambiante",   "Procédé / CL", "°C", is_temp=True, rel_range=0.0, abs_range=50.0),
+        ParamSpec("bcs.ambient_temperature",   "Ambient temperature",   "Process / BCs", "°C", is_temp=True, rel_range=0.0, abs_range=50.0),
 
         # --- Contact ---
-        ParamSpec("interaction.friction_coeff", "Coefficient de frottement µ", "Contact", "—", rel_range=0.50),
-        ParamSpec("interaction.slip_tolerance", "Tolérance de glissement", "Contact", "—", rel_range=0.50, kind="numerical"),
-        ParamSpec("interaction.heat_conversion_fraction", "Fraction convertie en chaleur η", "Contact", "—", rel_range=0.20),
+        ParamSpec("interaction.friction_coeff", "Friction coefficient µ", "Contact", "—", rel_range=0.50),
+        ParamSpec("interaction.slip_tolerance", "Slip tolerance", "Contact", "—", rel_range=0.50, kind="numerical"),
+        ParamSpec("interaction.heat_conversion_fraction", "Fraction converted to heat η", "Contact", "—", rel_range=0.20),
         # The master share follows as 1 - slave (as in the Interaction tab).
-        ParamSpec("interaction.heat_fraction_to_slave", "Part de chaleur vers la pièce", "Contact", "—", rel_range=0.20),
+        ParamSpec("interaction.heat_fraction_to_slave", "Heat fraction to the workpiece", "Contact", "—", rel_range=0.20),
         # None (= not written, Abaqus default) until set in the Interaction tab.
-        ParamSpec("interaction.gap_conductance", "Conductance thermique de contact", "Contact", "mW/(mm²·K)", rel_range=0.50, abs_range=100.0),
+        ParamSpec("interaction.gap_conductance", "Thermal contact conductance", "Contact", "mW/(mm²·K)", rel_range=0.50, abs_range=100.0),
 
         # --- Numerical ---
-        ParamSpec("elem_size",                 "Taille d'élément",       "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
-        ParamSpec("tool_elem_size",            "Maille outil, pointe",   "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
-        ParamSpec("inter_elem_size",           "Maille outil, bout des faces", "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
-        ParamSpec("max_elem_size",             "Maille outil, bords",    "Numérique", "mm", rel_range=0.40, kind="numerical", remesh=True),
-        ParamSpec("step.mass_scaling_factor", "Mass scaling (pièce + outil)", "Numérique", "—", rel_range=0.0, abs_range=0.0, kind="numerical"),
-        ParamSpec("step.sim_time",             "Durée simulée",          "Numérique", "s",  rel_range=0.20, kind="numerical"),
+        ParamSpec("elem_size",                 "Element size",       "Numerical", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("tool_elem_size",            "Tool mesh, tip",   "Numerical", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("inter_elem_size",           "Tool mesh, face ends", "Numerical", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("max_elem_size",             "Tool mesh, edges",    "Numerical", "mm", rel_range=0.40, kind="numerical", remesh=True),
+        ParamSpec("step.mass_scaling_factor", "Mass scaling (workpiece + tool)", "Numerical", "—", rel_range=0.0, abs_range=0.0, kind="numerical"),
+        ParamSpec("step.sim_time",             "Simulated time",          "Numerical", "s",  rel_range=0.20, kind="numerical"),
 
         # --- Outputs: what is written or extracted, not the physics ---
-        ParamSpec("bbox.xmin", "ZOI xmin", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
-        ParamSpec("bbox.xmax", "ZOI xmax", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
-        ParamSpec("bbox.ymin", "ZOI ymin", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
-        ParamSpec("bbox.ymax", "ZOI ymax", "Sorties", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
-        ParamSpec("bbox.zmin", "ZOI zmin", "Sorties", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
-        ParamSpec("bbox.zmax", "ZOI zmax", "Sorties", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
-        ParamSpec("step.n_frames", "Frames de champ", "Sorties", "—", dtype="int", rel_range=0.20, kind="output"),
-        ParamSpec("step.output.ho_n_intervals", "Points des historiques", "Sorties", "—", dtype="int", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_camera_fps", "Filtre champs : cadence caméra", "Sorties", "Hz", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_camera_atten_db", "Filtre champs : atténuation", "Sorties", "dB", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_force_acq_hz", "Filtre efforts : acquisition", "Sorties", "Hz", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_force_atten_db", "Filtre efforts : atténuation", "Sorties", "dB", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_cutoff_hz", "Filtre champs : coupure", "Sorties", "Hz", rel_range=0.20, kind="output"),
-        ParamSpec("step.output_filter_cutoff_history_hz", "Filtre efforts : coupure", "Sorties", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("bbox.xmin", "ZOI xmin", "Outputs", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.xmax", "ZOI xmax", "Outputs", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.ymin", "ZOI ymin", "Outputs", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.ymax", "ZOI ymax", "Outputs", "mm", rel_range=0.20, abs_range=0.01, kind="output"),
+        ParamSpec("bbox.zmin", "ZOI zmin", "Outputs", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
+        ParamSpec("bbox.zmax", "ZOI zmax", "Outputs", "mm", rel_range=0.20, abs_range=0.001, kind="output"),
+        ParamSpec("step.n_frames", "Field frames", "Outputs", "—", dtype="int", rel_range=0.20, kind="output"),
+        ParamSpec("step.output.ho_n_intervals", "History points", "Outputs", "—", dtype="int", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_camera_fps", "Field filter: camera rate", "Outputs", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_camera_atten_db", "Field filter: attenuation", "Outputs", "dB", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_force_acq_hz", "Force filter: acquisition rate", "Outputs", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_force_atten_db", "Force filter: attenuation", "Outputs", "dB", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_cutoff_hz", "Field filter: cutoff", "Outputs", "Hz", rel_range=0.20, kind="output"),
+        ParamSpec("step.output_filter_cutoff_history_hz", "Force filter: cutoff", "Outputs", "Hz", rel_range=0.20, kind="output"),
     ]
 
 
@@ -455,7 +455,7 @@ _LINKED = {
 # ---------------------------------------------------------------------------
 REGISTRY: list[ParamSpec] = (
     _material_specs()
-    + _material_specs("tool_material", _TOOL_MAT_KEYS, "Matériau outil")
+    + _material_specs("tool_material", _TOOL_MAT_KEYS, "Tool material")
     + _non_material_specs())
 
 # Fast lookup by path
