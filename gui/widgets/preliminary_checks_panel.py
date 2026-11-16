@@ -27,7 +27,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -70,6 +70,10 @@ class PreliminaryChecksPanel(QWidget):
     Left: the inputs, each with a short explanation, the buttons and the
     text summary. Right: one tab of plots per check, each with a caption
     that says what is drawn."""
+
+    # the result dict of each finished analysis (keys "inp", "st", "fc",
+    # "rc", ...), for the stop rules of the Initial run tab
+    analysed = Signal(object)
 
     def __init__(self, settings_getter=None, start_dir="", parent=None):
         super().__init__(parent)
@@ -482,6 +486,7 @@ class PreliminaryChecksPanel(QWidget):
         self.lbl_status.setText("Done.")
         self.txt.setPlainText("\n".join(self._summary(res)))
         self._draw(res)
+        self.analysed.emit(res)
 
     # ------------------------------------------------------------------
     def _summary(self, res):
