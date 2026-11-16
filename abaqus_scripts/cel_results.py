@@ -671,8 +671,25 @@ def _extract_history_artificial(step):
     return None, None
 
 
-def extract_results(job_name, model_cfg, full_domain=False):
+def _replace_file(src, dst):
+    """Move src onto dst (os.replace is missing in Abaqus' Python 2.7)."""
+    try:
+        os.replace(src, dst)
+        return
+    except AttributeError:
+        pass
+    if os.path.exists(dst):
+        os.remove(dst)
+    os.rename(src, dst)
+
+
+def extract_results(job_name, model_cfg, full_domain=False, out_base=None):
     """Extract the completed ``job_name.odb`` into the GUI result bundle.
+
+    out_base: base name of the bundle written (default job_name). The live
+    snapshot of a running job (live_snapshot.py) uses '<job>.live' and the
+    files are written under a temporary name first, then moved in place, so
+    a reader never sees half a file.
 
     full_domain=True keeps every element of the Eulerian instance instead of
     cropping it to the ROI bbox (sensitivity maps over the whole domain). The
@@ -950,17 +967,25 @@ def extract_results(job_name, model_cfg, full_domain=False):
             "filter_check_series": _fc_series,
         }
 
-        _out_npz  = job_name + ".results.npz"
-        _out_json = job_name + ".meta.json"
+        _base = out_base or job_name
+        _out_npz  = _base + ".results.npz"
+        _out_json = _base + ".meta.json"
+        # A live snapshot goes through a temporary name (ends in .npz, so
+        # numpy does not add one) and is moved in place afterwards.
+        _w_npz = _out_npz if not out_base else _base + ".tmp.npz"
+        _w_json = _out_json if not out_base else _base + ".tmp.json"
         _progress_line(1.0, "writing the results bundle")
         _vprint("\nWriting %s ..." % _out_npz)
-        _np.savez_compressed(_out_npz, **_npz_payload)
+        _np.savez_compressed(_w_npz, **_npz_payload)
         _vprint("Writing %s ..." % _out_json)
-        _f = open(_out_json, "w")
+        _f = open(_w_json, "w")
         try:
             _json.dump(_meta, _f, indent=2)
         finally:
             _f.close()
+        if out_base:
+            _replace_file(_w_json, _out_json)
+            _replace_file(_w_npz, _out_npz)
 
         _vprint("\nDone. Results bundle ready:")
         _vprint("  " + os.path.abspath(_out_npz))

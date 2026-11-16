@@ -351,6 +351,14 @@ class PreliminaryChecksPanel(QWidget):
         return dict(path=path, zone=zone, L=L * 1e-6, tau=tau, att=att,
                     margin=_num(self.le_margin), gap=gap, band=band, eps=eps)
 
+    def analyse_file(self, path) -> None:
+        """Analyse `path` (e.g. the live bundle of a running initial run)
+        with the parameters shown; does nothing while an analysis runs."""
+        if not self.btn_run.isEnabled():
+            return
+        self.le_run.setText(str(path))
+        self._analyse()
+
     def _analyse(self):
         try:
             inp = self._inputs()
