@@ -198,20 +198,23 @@ class MainWindow(QMainWindow):
         self.opt_tabs.addTab(self.explore_tab,       "2 · Explore")
         self.opt_tabs.addTab(self.sensitivity_tab,   "3 · Sensitivity")
         self.opt_tabs.addTab(self.identify_modes,    "4 · Identify")
-        self.opt_tabs.addTab(self.compare_tab,       "5 · Compare runs")
-        # Opening Compare runs lists the study folders made since.
-        self.opt_tabs.currentChanged.connect(self._refresh_compare_if_visible)
         self.optimization_tab.compareRequested.connect(self._show_compare)
         for tab in self._plan_tabs():
             tab.compareRunsRequested.connect(self._compare_plan_runs)
 
+        # Top-level tabs (Tristan 2026-11-16): Simulate, Experiment,
+        # Compare (its own tab, between Experiment and Optimize), Optimize.
+        # Help is a menu next to File and Preferences.
         tabs = QTabWidget()
-        tabs.addTab(self.model_tabs,        "Numerical Model")
-        tabs.addTab(self.experimental_tab,  "Experimental Data")
-        tabs.addTab(self.opt_tabs,          "Optimization")
-        # Glossary of the abbreviations (run names, Compare runs, tables).
+        tabs.addTab(self.model_tabs,        "Simulate")
+        tabs.addTab(self.experimental_tab,  "Experiment")
+        tabs.addTab(self.compare_tab,       "Compare")
+        tabs.addTab(self.opt_tabs,          "Optimize")
+        # Opening Compare lists the study folders made since.
+        tabs.currentChanged.connect(self._refresh_compare_if_visible)
+        # Glossary of the abbreviations (run names, Compare, tables): shown
+        # from the Help menu in its own window.
         self.help_tab = HelpTab()
-        tabs.addTab(self.help_tab,          "Help")
         self.tabs = tabs
         self.setCentralWidget(tabs)
 
@@ -313,6 +316,33 @@ class MainWindow(QMainWindow):
         act_settings = QAction("&Settings…", self)
         act_settings.triggered.connect(self._open_preferences_dialog)
         m_pref.addAction(act_settings)
+
+        # --- Help menu (was a top-level tab) ---
+        m_help = mb.addMenu("&Help")
+        act_gloss = QAction("&Glossary…", self)
+        act_gloss.setShortcut(QKeySequence.StandardKey.HelpContents)
+        act_gloss.triggered.connect(self.show_help)
+        m_help.addAction(act_gloss)
+
+    def show_help(self, page: str = "Glossary"):
+        """Show the Help window (glossary of the abbreviations), non-modal
+        so it can stay open beside the tabs."""
+        from PySide6.QtWidgets import QDialog
+        dlg = getattr(self, "_help_dialog", None)
+        if dlg is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Help")
+            dlg.resize(900, 600)
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(4, 4, 4, 4)
+            lay.addWidget(self.help_tab)
+            self._help_dialog = dlg
+        for i in range(self.help_tab.count()):
+            if self.help_tab.tabText(i) == page:
+                self.help_tab.setCurrentIndex(i)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _apply_unit_system(self, system):
         """Make `system` the active display system and refresh the input
@@ -515,7 +545,7 @@ class MainWindow(QMainWindow):
         if running:
             QMessageBox.information(
                 self, title,
-                "A Model sizing study (Optimization > Identify, mode Model "
+                "A Model sizing study (Optimize > Identify, mode Model "
                 "sizing) is running. "
                 "Its results go into the current profile: wait for it to end, "
                 "or cancel it, before opening another profile.")
@@ -605,7 +635,7 @@ class MainWindow(QMainWindow):
     def _refresh_compare_if_visible(self, *_):
         """Add to the Compare runs tab the study folders recorded since it
         was last shown (the tab keeps the chosen folder and runs)."""
-        if self.opt_tabs.currentWidget() is self.compare_tab:
+        if self.tabs.currentWidget() is self.compare_tab:
             try:
                 self.compare_tab.add_folders(
                     self.optimization_tab.known_folders()
@@ -632,8 +662,7 @@ class MainWindow(QMainWindow):
 
     def _show_compare(self):
         """'Compare runs…' of the Model sizing tab."""
-        self.tabs.setCurrentWidget(self.opt_tabs)
-        self.opt_tabs.setCurrentWidget(self.compare_tab)
+        self.tabs.setCurrentWidget(self.compare_tab)
         self._refresh_compare_if_visible()
 
     def _compare_plan_runs(self, folder, job_a, job_b):
@@ -641,7 +670,7 @@ class MainWindow(QMainWindow):
         self._show_compare()
         if not self.compare_tab.select_pair(folder, job_a, job_b):
             QMessageBox.information(
-                self, "Compare runs",
+                self, "Compare",
                 "%s or %s is not a finished run of %s." % (
                     job_a, job_b, Path(folder).name))
 

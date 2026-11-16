@@ -16,12 +16,14 @@ def test_optimization_sub_tabs_in_work_order(qapp):
     w = MainWindow(); w._dirty = False
     names = [w.opt_tabs.tabText(i) for i in range(w.opt_tabs.count())]
     assert names == ["1 · Initial run", "2 · Explore", "3 · Sensitivity",
-                     "4 · Identify", "5 · Compare runs"]
+                     "4 · Identify"]
     assert w.opt_tabs.widget(0) is w.initial_run_tab
     assert w.opt_tabs.widget(1) is w.explore_tab
     assert w.opt_tabs.widget(2) is w.sensitivity_tab
     assert w.opt_tabs.widget(3) is w.identify_modes
-    assert w.opt_tabs.widget(4) is w.compare_tab
+    top = [w.tabs.tabText(i) for i in range(w.tabs.count())]
+    assert top == ["Simulate", "Experiment", "Compare", "Optimize"]
+    assert w.tabs.widget(2) is w.compare_tab
 
 
 def test_style_sheet_is_complete():

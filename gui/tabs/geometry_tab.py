@@ -55,7 +55,7 @@ class GeometryTab(QWidget):
         self.chk_ref.setEnabled(False)
         self.chk_ref.setToolTip("Overlay the alignment reference image behind "
                                 "the sketch (set it from the Alignment tab's "
-                                "'Write to Numerical Model').")
+                                "'Write to Simulate').")
         self.chk_ref.toggled.connect(self._on_toggle_reference)
         right_lay.addWidget(self.chk_ref)
         self.preview = GeometryPreview()

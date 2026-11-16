@@ -516,7 +516,11 @@ def test_help_tab_in_main_window(qapp):
     from gui.main import MainWindow
     w = MainWindow(); w._dirty = False
     names = [w.tabs.tabText(i) for i in range(w.tabs.count())]
-    assert names[-1] == "Help"
+    assert "Help" not in names
+    menus = [a.text().replace("&", "") for a in w.menuBar().actions()]
+    assert menus == ["File", "Preferences", "Help"]
+    w.show_help()
+    assert w._help_dialog.isVisible()
     g = w.help_tab.glossary
     g.le_search.setText("frottement")
     shown = [g.table.item(r, 0).text() for r in range(g.table.rowCount())

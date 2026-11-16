@@ -14,7 +14,7 @@ reference is a manual point.
 rake_angle / clear_angle = tilt of the two fitted faces from the vertical;
 tool (x0,y0) = the tip. Frame: origin at image centre, x right (cutting
 direction, tip towards +x), y up. Scale mm/px from the visible calibration or
-a manual override (unit mm/px or px/mm). "Write to Numerical Model" pushes the
+a manual override (unit mm/px or px/mm). "Write to Simulate" pushes the
 values into cfg.Geometry.
 """
 from __future__ import annotations
@@ -528,7 +528,7 @@ class AlignmentTab(QWidget):
             r, c = divmod(i, 2)
             grid.addWidget(QLabel(label), r, 2 * c)
             grid.addWidget(field, r, 2 * c + 1)
-        self.b_write = QPushButton("Write to Numerical Model")
+        self.b_write = QPushButton("Write to Simulate")
         self.b_write.clicked.connect(self._write)
         grid.addWidget(self.b_write, 3, 0, 1, 4)
         return g
@@ -867,7 +867,7 @@ class AlignmentTab(QWidget):
         if self._write_geometry is None:
             QMessageBox.information(self, "Write",
                 "Reference geometry stored in the session.\n"
-                "(No Numerical Model bound in this context.)")
+                "(No Simulate tab bound in this context.)")
             return
         try:
             self._write_geometry(vals)
@@ -876,4 +876,4 @@ class AlignmentTab(QWidget):
             QMessageBox.warning(self, "Write", "Could not write to the model:\n%s" % e)
             return
         QMessageBox.information(self, "Write",
-            "Reference geometry written to the Numerical Model (Geometry tab).")
+            "Reference geometry written to Simulate > Geometry.")

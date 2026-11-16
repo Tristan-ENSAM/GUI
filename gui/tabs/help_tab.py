@@ -96,7 +96,7 @@ class GlossaryPanel(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         intro = QLabel(
-            "Abbreviations used in the run names, in Compare runs and in the "
+            "Abbreviations used in the run names, in Compare and in the "
             "tables. Type in the box to filter.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
