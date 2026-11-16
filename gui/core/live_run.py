@@ -9,6 +9,13 @@ Route A of the design doc; feasibility measured on CL-WTS-1 (2026-11-16:
 5 reads of 6 during the run, ~1 s per read on a small model, one transient
 "Object is not available in DB" error), not on the office PC yet.
 
+A stopped run (Stop button or an automatic stop rule of the tab) gets its
+final results from the last snapshot taken after the stop: the live bundle
+is copied to <job>.results.npz / <job>.meta.json, the names of a finished
+run, so the studies and the Results tab can read it. Hypothesis, not
+checked with Abaqus: the .odb of a terminated job is readable (the last
+snapshot then fails and the run has no final results).
+
 Local runs only (remote mode: a later PR, the agent of the compute PC
 would make the snapshots). The interval is a choice of the design doc
 (30 s); the time of one read on a large model is not measured.
@@ -49,7 +56,8 @@ class LiveRunWorker(QObject):
     log = Signal(str)
     # (path of the live bundle, seconds the snapshot took)
     snapshot = Signal(str, float)
-    # path of the final <job>.results.npz, or "" (failed / stopped)
+    # path of the final <job>.results.npz, or "" (failed, or stopped with
+    # no results read); `stopped` tells a stopped run from a finished one
     finished = Signal(str)
 
     def __init__(self, cfg, *, abaqus_cmd: str, abaqus_script: str,
@@ -71,6 +79,7 @@ class LiveRunWorker(QObject):
         self._clock = clock or time.monotonic
         self._sleep = sleep or time.sleep
         self._stop = False
+        self.stopped = False
         self._proc = None
         self.n_snapshots = 0
 
@@ -79,6 +88,7 @@ class LiveRunWorker(QObject):
         """Stop the run: `abaqus terminate`, then the process tree (off the
         GUI thread). The results read so far stay in the live bundle."""
         self._stop = True
+        self.stopped = True
         proc = self._proc
         self.log.emit("[STOP] asking Abaqus to terminate job %s\n"
                       % self.job_name)
@@ -105,8 +115,30 @@ class LiveRunWorker(QObject):
             self._run()
         except Exception as e:      # never leave the tab waiting
             self.log.emit("[live run] %s\n" % e)
-        self.finished.emit(str(final) if final.is_file() and not self._stop
-                           else "")
+        if self._stop:
+            final = self._promote_live()
+        self.finished.emit(str(final) if final is not None
+                           and final.is_file() else "")
+
+    def _promote_live(self):
+        """Stopped run: the last live bundle becomes <job>.results.npz (and
+        its .meta.json), or None when no bundle was read."""
+        import shutil
+        live = live_bundle_path(self.run_dir, self.job_name)
+        meta = Path(str(live).replace(".results.npz", ".meta.json"))
+        if not live.is_file():
+            return None
+        final = self.run_dir / (self.job_name + ".results.npz")
+        try:
+            shutil.copyfile(live, final)
+            if meta.is_file():
+                shutil.copyfile(meta, self.run_dir
+                                / (self.job_name + ".meta.json"))
+        except OSError as e:
+            self.log.emit("[live run] cannot keep the last results: %s\n"
+                          % e)
+            return None
+        return final
 
     def _run(self):
         self.run_dir.mkdir(parents=True, exist_ok=True)

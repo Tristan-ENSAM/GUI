@@ -168,7 +168,8 @@ class MainWindow(QMainWindow):
             self.optimization_tab, start_dir=_wd,
             prefs_getter=lambda: self.prefs,
             cpus_getter=lambda: self.job_tab.cpus(),
-            profile_name_getter=self._profile_name)
+            profile_name_getter=self._profile_name,
+            step_tab=self.step_tab)
         # The comparison settings, where they belong (decision 2026-11-12):
         # ZOI + chip line in Geometry, sampling step in Mesh, window T in
         # Step, eps_q at the top of Identify. Owned by the Model sizing tab.

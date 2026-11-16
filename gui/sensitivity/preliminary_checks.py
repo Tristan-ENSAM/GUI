@@ -483,3 +483,51 @@ def tool_outline(bundle, frame: int = -1):
                 ids.append(ids[0])
             out.append((xy[ids, 0], xy[ids, 1]))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Automatic stop of the initial run (decision 2026-11-12, design doc
+# "Remplacer Setup par la run initiale")
+# ---------------------------------------------------------------------------
+@dataclass
+class StopProposal:
+    """Why the run can stop, the simulated time it needs (Ttot) and the
+    window T as fractions of Ttot (None when the run never settled before
+    the stop)."""
+    reason: str                        # "stable" or "recontact"
+    t_stop: float
+    window: Optional[Tuple[float, float]]
+    note: str = ""
+
+
+def stop_proposal(st: StationarityResult, rc: Optional[Recontact] = None, *,
+                  on_stable: bool = True, on_recontact: bool = True
+                  ) -> Optional[StopProposal]:
+    """The first rule met on the results read so far, else None.
+
+    * re-contact: the chip came back onto the uncut surface at t_first; the
+      outputs after it are suspect, so Ttot = t_first;
+    * stable: every quantity is settled (P0) and the settled part is at
+      least 2 L long (StationarityResult.too_short is False); Ttot = the
+      last time read.
+
+    T = [t_s / Ttot, 1]. Re-contact is checked first: once it happened, the
+    later outputs are not used. t_s is the one of the results read, which
+    may include frames after a re-contact (not removed)."""
+    ts = st.t_s
+    if on_recontact and rc is not None and rc.t_first is not None:
+        t = float(rc.t_first)
+        if ts is None or ts >= t or not t > 0:
+            return StopProposal(
+                "recontact", t, None,
+                "the chip comes back before the run settles: lower h_void "
+                "(or protect the uncut surface); Ttot and T not proposed")
+        note = ""
+        if t - ts < 2.0 * st.length:
+            note = ("the settled part before the re-contact is shorter "
+                    "than 2 L")
+        return StopProposal("recontact", t, (ts / t, 1.0), note)
+    if on_stable and ts is not None and not st.too_short and st.t_end > 0:
+        return StopProposal("stable", float(st.t_end),
+                            (ts / st.t_end, 1.0))
+    return None

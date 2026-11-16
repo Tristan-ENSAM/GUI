@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import pytest
 
 from gui.core.live_run import LiveRunWorker, live_bundle_path, snapshot_args
 from gui.core.model_config import ModelConfig
@@ -153,3 +154,95 @@ def test_launch_refuses_remote_mode(qapp, monkeypatch):
     tab = InitialRunTab(OptimizationTab(ModelConfig()),
                         prefs_getter=lambda: object())
     assert "remote mode" in tab._launch_problem(object())
+
+
+# ---- automatic stop (PR 4) ------------------------------------------------
+def _st(ts, t_end=1e-3, length=5e-5):
+    from gui.sensitivity import preliminary_checks as pc
+    st = pc.StationarityResult(length=length, tau=0.1, t_end=t_end)
+    for q in pc.QUANTITIES:
+        st.per_quantity[q] = pc.Settling(q, None, None, None, 1.0, ts, 0.0)
+    return st
+
+
+def _rc(t_first):
+    from gui.sensitivity import preliminary_checks as pc
+    return pc.Recontact(None, None, t_first, 3, (0.0, 0.1))
+
+
+def test_stop_proposal_rules():
+    from gui.sensitivity.preliminary_checks import stop_proposal
+    # settled at 0.3 ms, 0.7 ms >= 2 L afterwards: stop at the end
+    p = stop_proposal(_st(3e-4), _rc(None))
+    assert p.reason == "stable" and p.t_stop == 1e-3
+    assert p.window == pytest.approx((0.3, 1.0))
+    # settled part shorter than 2 L: go on
+    assert stop_proposal(_st(9.5e-4), None) is None
+    # one quantity never settles: go on
+    st = _st(3e-4)
+    st.per_quantity["Vx"].t_s = None
+    assert stop_proposal(st, None) is None
+    # re-contact after t_s: Ttot = t_first, T = [t_s/t_first, 1]
+    p = stop_proposal(_st(3e-4), _rc(6e-4))
+    assert p.reason == "recontact" and p.t_stop == 6e-4
+    assert p.window == pytest.approx((0.5, 1.0)) and p.note == ""
+    p = stop_proposal(_st(5.5e-4), _rc(6e-4))
+    assert "shorter than 2 L" in p.note
+    # re-contact before the run settles: stop, nothing for Step
+    p = stop_proposal(_st(None), _rc(2e-4))
+    assert p.reason == "recontact" and p.window is None
+    # rules off
+    assert stop_proposal(_st(3e-4), _rc(6e-4), on_recontact=False).reason \
+        == "stable"
+    assert stop_proposal(_st(3e-4), _rc(6e-4), on_stable=False,
+                         on_recontact=False) is None
+
+
+def test_stopped_worker_keeps_its_last_read(tmp_path):
+    w, reads = _worker(tmp_path, n_polls=1000, interval=1.0)
+    done = []
+    w.finished.connect(done.append)
+    orig = w._snapshot
+
+    def snap(cfg_path):
+        orig(cfg_path)
+        (w.run_dir / "initial_run000.live.meta.json").write_text("{}")
+        if w.n_snapshots == 2:
+            w._stop = True          # as stop(), without abaqus terminate
+            w.stopped = True
+    w._snapshot = snap
+    w.run()
+    final = tmp_path / "initial_run000" / "initial_run000.results.npz"
+    assert done == [str(final)]
+    assert final.read_bytes() == b"live"
+    assert (final.parent / "initial_run000.meta.json").is_file()
+
+
+def test_tab_stops_and_writes_step(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from gui.core.model_config import ModelConfig
+    from gui.tabs.optimization_tab import OptimizationTab
+    from gui.tabs.initial_run_tab import InitialRunTab
+    from gui.tabs.step_tab import StepTab
+    cfg = ModelConfig()
+    opt = OptimizationTab(cfg)
+    step = StepTab(cfg)
+    tab = InitialRunTab(opt, step_tab=step)
+    stops = []
+    monkeypatch.setattr(tab, "_on_stop", lambda: stops.append(1))
+    tab._worker = SimpleNamespace(stopped=False)        # running
+    res = {"st": _st(3e-4, t_end=8e-4), "rc": _rc(None),
+           "fc": SimpleNamespace(dt=2e-6)}
+    tab.cb_stop_stable.setChecked(False)
+    tab._on_analysed(res)
+    assert stops == [] and tab.btn_apply.isEnabled()
+    assert "settled" in tab.lbl_stop.text()
+    tab.cb_stop_stable.setChecked(True)
+    tab._on_analysed(res)
+    assert stops == [1]
+    assert cfg.step.sim_time == pytest.approx(8e-4)
+    assert cfg.step.n_frames == 400                     # 8e-4 / 2e-6
+    assert opt.window() == pytest.approx((0.375, 1.0))
+    assert "Written to Step" in tab.lbl_stop.text()
+    tab._on_analysed(res)                               # once only
+    assert stops == [1]

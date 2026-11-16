@@ -12,8 +12,16 @@ The last frame read is drawn with the checks on it (zone, watched
 re-contact cells, chip-thickness line, tool); editing a check parameter
 recomputes on the same file.
 
-Not here yet (next PRs): the automatic stop rules and the transfer of Ttot
-and T to the Step tab; remote runs (the agent of the compute PC).
+Automatic stop (decision 2026-11-12): after each read, two rules, each with
+its check box, can stop the run (preliminary_checks.stop_proposal): every
+quantity settled for at least 2 L, or the first chip re-contact. On such a
+stop, Ttot = the stop time and T = [t_s / Ttot, 1] are written to the Step
+tab, with the number of frames that keeps the frame interval of the run
+(the one P1 checked). "Apply Ttot and T to Step" does the same by hand from
+the checks shown. The stopped run keeps its last read as its final results
+(gui.core.live_run).
+
+Not here yet (next PR): remote runs (the agent of the compute PC).
 
 The checks read their defaults from the Model sizing tab
 (OptimizationTab.prelim_settings), which still owns every setting.
@@ -27,7 +35,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QCheckBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QSplitter, QVBoxLayout, QWidget)
 
 from gui.core.live_run import DEFAULT_INTERVAL_S, LiveRunWorker
@@ -53,9 +61,14 @@ class InitialRunTab(QWidget):
     name, for launching the run."""
 
     def __init__(self, sizing_tab, start_dir="", prefs_getter=None,
-                 cpus_getter=None, profile_name_getter=None, parent=None):
+                 cpus_getter=None, profile_name_getter=None, step_tab=None,
+                 parent=None):
         super().__init__(parent)
         self._sizing = sizing_tab
+        self._step_tab = step_tab
+        self._proposal = None         # StopProposal of the last analysis
+        self._frame_dt = None         # frame interval of the last analysis
+        self._stop_reason = None      # proposal that stopped the run
         self._prefs_getter = prefs_getter
         self._cpus_getter = cpus_getter
         self._profile_name_getter = profile_name_getter
@@ -108,12 +121,44 @@ class InitialRunTab(QWidget):
         lv.addWidget(self.lbl_live, 1)
         root.addWidget(glive)
 
+        gstop = QGroupBox("Automatic stop of the initial run")
+        sl = QHBoxLayout(gstop)
+        self.cb_stop_stable = QCheckBox("when every quantity is settled for "
+                                        "2 L")
+        self.cb_stop_stable.setChecked(True)
+        self.cb_stop_stable.setToolTip(
+            "Stop when the six quantities of P0 are settled (moving mean\n"
+            "within τ·ε_q) and the settled part is at least 2 L long.\n"
+            "Ttot = the last time read; T starts at the largest t_s.")
+        sl.addWidget(self.cb_stop_stable)
+        self.cb_stop_rc = QCheckBox("at the first chip re-contact")
+        self.cb_stop_rc.setChecked(True)
+        self.cb_stop_rc.setToolTip(
+            "Stop at the first frame where material comes back into the\n"
+            "watched band above the uncut surface: the later outputs are\n"
+            "suspect. Ttot = that time. Before the run settles, nothing is\n"
+            "written to Step (lower h_void instead).")
+        sl.addWidget(self.cb_stop_rc)
+        sl.addSpacing(12)
+        self.btn_apply = QPushButton("Apply Ttot and T to Step")
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setToolTip(
+            "Write the Ttot and window T proposed by the checks shown to\n"
+            "the Step tab (done automatically when a rule stops the run).")
+        self.btn_apply.clicked.connect(self._on_apply)
+        sl.addWidget(self.btn_apply)
+        self.lbl_stop = QLabel("")
+        self.lbl_stop.setWordWrap(True)
+        sl.addWidget(self.lbl_stop, 1)
+        root.addWidget(gstop)
+
         gpre = QGroupBox("Preliminary checks on one run")
         gl = QVBoxLayout(gpre)
         gl.setContentsMargins(4, 4, 4, 4)
         self.prelim = PreliminaryChecksPanel(
             settings_getter=sizing_tab.prelim_settings, start_dir=start_dir,
             parent=gpre)
+        self.prelim.analysed.connect(self._on_analysed)
         gl.addWidget(self.prelim)
 
         gprev = QGroupBox("Model with the ZOI")
@@ -189,6 +234,7 @@ class InitialRunTab(QWidget):
                                 "Cannot create the run folder: %s" % e)
             return
         job = job_name("initial", 0)
+        self._stop_reason = None
         self.start_worker(LiveRunWorker(
             cfg, abaqus_cmd=prefs.abaqus_cmd,
             abaqus_script=prefs.abaqus_script, run_dir=folder / job,
@@ -230,7 +276,12 @@ class InitialRunTab(QWidget):
         self._thread = None
         self.btn_launch.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        if final:
+        stopped = bool(getattr(self._worker, "stopped", False))
+        if final and stopped:
+            self._status("Run stopped: its last read is kept as its "
+                         "results (%s)." % final, "#15803d")
+            self.prelim.analyse_file(final)
+        elif final:
             self._status("Run finished: checks on its full results.",
                          "#15803d")
             self.prelim.analyse_file(final)
@@ -247,3 +298,77 @@ class InitialRunTab(QWidget):
         if self._worker is not None:
             self._worker._stop = True
             self._worker._stop_blocking(self._worker._proc)
+
+    # ---- automatic stop and transfer to Step -----------------------------
+    def _on_analysed(self, res):
+        from gui.sensitivity.preliminary_checks import stop_proposal
+        st = res.get("st")
+        fc = res.get("fc")
+        self._frame_dt = getattr(fc, "dt", None)
+        self._proposal = None
+        if st is None:
+            return
+        rc = res.get("rc")
+        p = self._proposal = stop_proposal(st, rc)
+        self.btn_apply.setEnabled(p is not None and p.window is not None)
+        if p is None:
+            self.lbl_stop.setText("No stop rule met yet."
+                                  if self.is_running() else "")
+            return
+        if self._stop_reason is not None:
+            return                    # keep the rule that stopped the run
+        self.lbl_stop.setText(self._describe(p))
+        if not self.is_running():
+            return
+        rule = stop_proposal(st, rc,
+                             on_stable=self.cb_stop_stable.isChecked(),
+                             on_recontact=self.cb_stop_rc.isChecked())
+        if rule is None:
+            return
+        self._stop_reason = rule
+        self._on_stop()
+        self._status("Stopping the run: %s." % self._describe(rule),
+                     "#b45309")
+        if rule.window is not None:
+            self.apply_to_step(rule)
+
+    @staticmethod
+    def _describe(p):
+        why = ("every quantity settled for 2 L" if p.reason == "stable"
+               else "chip re-contact")
+        text = "%s at t = %.1f µs" % (why, p.t_stop * 1e6)
+        if p.window is not None:
+            text += ": Ttot = %.4g s, T = [%.3f, %.3f]" % (
+                (p.t_stop,) + tuple(p.window))
+        if p.note:
+            text += " (%s)" % p.note
+        return text
+
+    def _on_apply(self):
+        if self._proposal is not None and self._proposal.window is not None:
+            self.apply_to_step(self._proposal)
+
+    def apply_to_step(self, p) -> bool:
+        """Write Ttot = p.t_stop, the number of frames that keeps the frame
+        interval of the run, and T = p.window. False when nothing could be
+        written (no Step tab, no window)."""
+        if p is None or p.window is None:
+            return False
+        done = []
+        st = self._step_tab
+        if st is not None:
+            st.f_sim_time.set_value(float(p.t_stop))
+            dt = self._frame_dt
+            if dt and dt > 0:
+                st.f_n_frames.set_value(max(1, int(round(p.t_stop / dt))))
+            st._on_change()
+            done.append("Ttot")
+        texts = getattr(self._sizing, "_dom_texts", {})
+        if "window_start" in texts and "window_end" in texts:
+            texts["window_start"].setText("%.4g" % p.window[0])
+            texts["window_end"].setText("%.4g" % p.window[1])
+            done.append("T")
+        if done:
+            self.lbl_stop.setText("Written to Step: %s. %s"
+                                  % (" and ".join(done), self._describe(p)))
+        return bool(done)
