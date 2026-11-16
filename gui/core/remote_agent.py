@@ -37,6 +37,15 @@ The model generator (run_simul.py and its modules) is the copy the GUI put
 in the queue folder for this request, so both PCs always run the same
 scripts.
 
+Live reading (Optimization > Initial run): when the request carries
+"live": {"interval": s}, every `interval` seconds once the .odb exists the
+agent runs `abaqus python live_snapshot.py` in the local folder (in a
+thread, so the heartbeat goes on) and copies <job>.live.meta.json,
+<job>.live.results.npz, then <job>.live.json ({"n", "seconds", "time"}) to
+the shared run folder; the GUI brings them back like the .sta. A cancelled
+live run gets one last snapshot after Abaqus stopped, and that snapshot
+becomes its <job>.results.npz / .meta.json, delivered as usual.
+
 Protocol: see gui/core/remote_exec.py (client side).
 """
 from __future__ import print_function
@@ -67,6 +76,10 @@ RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
                    ".msg", ".dat", ".log", ".inp")
 # Also delivered when the GUI PC's folder is reachable (not through Z:).
 DELIVERY_EXTRA_SUFFIXES = (".odb",)
+# Live reading: copied in this order, the .live.json last (the client waits
+# for it to change before it reads the bundle).
+LIVE_BUNDLE_SUFFIXES = (".live.meta.json", ".live.results.npz", ".live.json")
+LIVE_SNAPSHOT_TIMEOUT = 900.0   # s, one live read
 SUBDIRS = ("pending", "running", "cancel", "done")
 # CAE session journals (abaqus.rpy, abaqus.rpy.N): useless, removed from the
 # run's local folder once Abaqus has exited (same rule as
@@ -256,13 +269,15 @@ class Agent(object):
     """`build_args`, `terminate` and `kill` are injectable for the tests."""
 
     def __init__(self, queue, abaqus_cmd, local_root=DEFAULT_LOCAL_ROOT,
-                 build_args=None, terminate=None, kill=None, out=None):
+                 build_args=None, terminate=None, kill=None, out=None,
+                 snapshot=None):
         self.queue = queue
         self.abaqus_cmd = abaqus_cmd
         self.local_root = local_root
         self.build_args = build_args or build_abaqus_args
         self._terminate = terminate
         self._kill = kill
+        self._snapshot_cmd = snapshot     # tests: f(j) -> returncode
         self.out = out or sys.stdout
         self.host = socket.gethostname()
         self.seq = 0
@@ -381,6 +396,7 @@ class Agent(object):
         shared = req["run_dir"]
         local = local_run_dir(self.local_root, shared)
         script = os.path.join(req["scripts_dir"], "run_simul.py")
+        live = req.get("live") or None
         try:
             if not os.path.isfile(script):
                 raise IOError("model generator not found: %s" % script)
@@ -391,6 +407,16 @@ class Agent(object):
                 p = os.path.join(local, f)
                 if f.lower().startswith(low) and os.path.isfile(p):
                     _remove(p)
+            if live:
+                try:
+                    with io.open(os.path.join(local, job + ".live_cfg.json"),
+                                 "w", encoding="utf-8") as f:
+                        f.write(_text(json.dumps(
+                            ast.literal_eval(req["model_params"]))))
+                except Exception as e:      # the run goes on, unread
+                    self.say(u"no live reading for %s: %s"
+                             % (job, _text(e)))
+                    live = None
             args = self.build_args(self.abaqus_cmd, script,
                                    req["model_params"], req["run_params"])
             kwargs = {}
@@ -421,7 +447,10 @@ class Agent(object):
                     "shared": shared, "client_dir": req.get("client_dir") or "",
                     "delivery": None, "chunks": chunks, "reader": reader,
                     "seen": {}, "last_mirror": 0.0, "cancel_at": None,
-                    "killed": False}
+                    "killed": False, "scripts_dir": req["scripts_dir"],
+                    "live": live, "live_next": time.time() + float(
+                        (live or {}).get("interval", 30.0)),
+                    "live_thread": None, "live_n": 0}
         self.say("started %s (from %s) in %s"
                  % (job, req.get("client_host", "?"), local))
 
@@ -450,6 +479,14 @@ class Agent(object):
             j["last_mirror"] = now
             self._mirror()
         if j["proc"].poll() is None:
+            if j["live"] and j["cancel_at"] is None and now >= j["live_next"] \
+                    and not (j["live_thread"] and j["live_thread"].is_alive()) \
+                    and os.path.isfile(os.path.join(j["local"],
+                                                    j["name"] + ".odb")):
+                j["live_thread"] = threading.Thread(target=self._live_read,
+                                                    args=(j,))
+                j["live_thread"].daemon = True
+                j["live_thread"].start()
             if j["cancel_at"] is None \
                     and os.path.exists(self.sub("cancel", j["id"])):
                 j["cancel_at"] = now
@@ -470,6 +507,86 @@ class Agent(object):
             return
         if j["delivery"]["done"]:
             self._finish()
+
+    # -- live reading ------------------------------------------------------
+    def _live_read(self, j):
+        """One snapshot of the running job, then its copy to the shared run
+        folder. Never raises (thread)."""
+        t0 = time.time()
+        try:
+            if self._snapshot_cmd is not None:
+                rc = self._snapshot_cmd(j)
+            else:
+                rc = self._run_snapshot(j)
+        except Exception as e:
+            rc = -1
+            self.say(u"live read of %s failed: %s" % (j["name"], _text(e)))
+        dt = time.time() - t0
+        j["live_next"] = time.time() + float(j["live"].get("interval", 30.0))
+        base = os.path.join(j["local"], j["name"])
+        if rc != 0 or not os.path.isfile(base + ".live.results.npz"):
+            self.say("live read of %s failed (code %s)" % (j["name"], rc))
+            return False
+        j["live_n"] += 1
+        try:
+            write_json_atomic(base + ".live.json", {
+                "n": j["live_n"], "seconds": dt,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")})
+            for suf in LIVE_BUNDLE_SUFFIXES:
+                if os.path.isfile(base + suf):
+                    _copy_atomic(base + suf, os.path.join(
+                        j["shared"], j["name"] + suf))
+        except Exception as e:
+            self.say(u"live results of %s not copied: %s"
+                     % (j["name"], _text(e)))
+        return True
+
+    def _run_snapshot(self, j):
+        argv = [self.abaqus_cmd, "python",
+                os.path.join(j["scripts_dir"], "live_snapshot.py"), j["name"],
+                os.path.join(j["local"], j["name"] + ".live_cfg.json"),
+                "--tries", "3", "--wait", "5"]
+        p = subprocess.Popen(argv, cwd=j["local"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        out = []
+
+        def _drain():
+            try:
+                out.append(p.stdout.read())
+            except Exception:
+                pass
+        th = threading.Thread(target=_drain)
+        th.daemon = True
+        th.start()
+        deadline = time.time() + LIVE_SNAPSHOT_TIMEOUT
+        while p.poll() is None and time.time() < deadline:
+            time.sleep(0.5)
+        if p.poll() is None:
+            kill_tree(p)
+            return -1
+        return p.returncode
+
+    def _keep_last_read(self, j):
+        """Cancelled live run: one last snapshot of what Abaqus wrote, which
+        becomes <job>.results.npz / .meta.json (run_simul.py does not extract
+        after a terminate)."""
+        th = j.get("live_thread")
+        if th is not None:
+            th.join(LIVE_SNAPSHOT_TIMEOUT)
+        base = os.path.join(j["local"], j["name"])
+        if os.path.isfile(base + ".results.npz") \
+                or not os.path.isfile(base + ".odb"):
+            return
+        self.say("last read of the stopped run %s" % j["name"])
+        self._live_read(j)
+        if os.path.isfile(base + ".live.results.npz"):
+            try:
+                _copy_atomic(base + ".live.results.npz", base + ".results.npz")
+                if os.path.isfile(base + ".live.meta.json"):
+                    _copy_atomic(base + ".live.meta.json", base + ".meta.json")
+            except Exception as e:
+                self.say(u"last read of %s not kept: %s"
+                         % (j["name"], _text(e)))
 
     def _do_terminate(self, j):
         if self._terminate is not None:
@@ -559,6 +676,13 @@ class Agent(object):
         d.update(copied=[], delivered_to="", note="", pending=[])
         self._remove_replay_files(j)
         try:
+            if j.get("live"):
+                # A live read still running holds the .odb open: the move
+                # below would fail on Windows.
+                if j.get("live_thread") is not None:
+                    j["live_thread"].join(LIVE_SNAPSHOT_TIMEOUT)
+                if j["cancel_at"] is not None:
+                    self._keep_last_read(j)
             client = j["client_dir"]
             if client:
                 if os.path.isfile(os.path.join(client, token_name(j["id"]))):

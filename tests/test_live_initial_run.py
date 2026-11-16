@@ -146,14 +146,89 @@ def test_tab_reanalyses_each_snapshot(qapp, tmp_path, monkeypatch):
     assert not tab.is_running()
 
 
-def test_launch_refuses_remote_mode(qapp, monkeypatch):
+def test_launch_checks_the_remote_setup(qapp, monkeypatch):
     from gui.tabs.optimization_tab import OptimizationTab
     from gui.tabs.initial_run_tab import InitialRunTab
     import gui.core.remote_exec as rx
     monkeypatch.setattr(rx, "is_remote", lambda p: True)
+    monkeypatch.setattr(rx, "launch_problems",
+                        lambda p, wd: ["Queue folder not found: Z:"])
     tab = InitialRunTab(OptimizationTab(ModelConfig()),
                         prefs_getter=lambda: object())
-    assert "remote mode" in tab._launch_problem(object())
+    assert tab._launch_problem(object()) == "Queue folder not found: Z:"
+    monkeypatch.setattr(rx, "launch_problems", lambda p, wd: [])
+    assert tab._launch_problem(object()) is None
+
+
+class _FakeRemote:
+    """RemoteProcess stand-in: the agent's reads appear in the run folder."""
+
+    def __init__(self, run_dir, job, n_polls, reads_at):
+        self.run_dir, self.job = Path(run_dir), job
+        self.n, self.i, self.reads_at = n_polls, 0, reads_at
+        self.cancelled = False
+        self.launcher_output = b"[REMOTE] done\n"
+
+    def poll(self):
+        self.i += 1
+        if self.i in self.reads_at:
+            k = self.reads_at.index(self.i) + 1
+            live_bundle_path(self.run_dir, self.job).write_bytes(b"l%d" % k)
+            (self.run_dir / (self.job + ".live.json")).write_text(
+                '{"n": %d, "seconds": 1.5}' % k)
+        if self.cancelled and self.i > 3:
+            (self.run_dir / (self.job + ".results.npz")).write_bytes(b"last")
+            return 1
+        return None if self.i < self.n else 0
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _remote_worker(tmp_path, n_polls=10, reads_at=(3, 6)):
+    run_dir = tmp_path / "initial_run000"
+    made = {}
+
+    def submit(rd, model_params, run_params, live_interval):
+        assert live_interval == 30.0 and run_params["job_name"] == \
+            "initial_run000"
+        made["p"] = _FakeRemote(rd, run_params["job_name"], n_polls,
+                                list(reads_at))
+        return made["p"]
+    w = LiveRunWorker(ModelConfig(), abaqus_cmd="abaqus",
+                      abaqus_script=str(tmp_path / "run_simul.py"),
+                      run_dir=run_dir, job_name="initial_run000",
+                      interval=30.0, submit=submit, sleep=lambda s: None)
+    return w, made
+
+
+def test_remote_worker_reanalyses_each_read_of_the_agent(tmp_path):
+    w, made = _remote_worker(tmp_path)
+    snaps, done = [], []
+    w.snapshot.connect(lambda p, s: snaps.append((p, s)))
+    w.finished.connect(done.append)
+    w.run()
+    assert len(snaps) == 2 and snaps[0][1] == 1.5
+    assert snaps[0][0].endswith("initial_run000.live.results.npz")
+    assert done == [""]          # the fake run wrote no results
+
+
+def test_remote_worker_stop_cancels_and_keeps_the_agents_last_read(tmp_path):
+    w, made = _remote_worker(tmp_path, n_polls=1000, reads_at=(2,))
+    done = []
+    w.finished.connect(done.append)
+    orig = w._remote_snapshot
+
+    def snap(stamp, seen):
+        key = orig(stamp, seen)
+        if key == 1 and not w._stop:
+            w.stop()
+        return key
+    w._remote_snapshot = snap
+    w.run()
+    final = tmp_path / "initial_run000" / "initial_run000.results.npz"
+    assert made["p"].cancelled
+    assert done == [str(final)] and final.read_bytes() == b"last"
 
 
 # ---- automatic stop (PR 4) ------------------------------------------------

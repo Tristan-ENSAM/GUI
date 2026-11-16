@@ -16,8 +16,13 @@ run, so the studies and the Results tab can read it. Hypothesis, not
 checked with Abaqus: the .odb of a terminated job is readable (the last
 snapshot then fails and the run has no final results).
 
-Local runs only (remote mode: a later PR, the agent of the compute PC
-would make the snapshots). The interval is a choice of the design doc
+Remote mode (Preferences > Execution remote): the run is submitted to the
+agent of the compute PC with "live": {"interval"}; the agent makes the
+snapshots there and drops them on the shared drive, RemoteProcess brings
+them back to the run folder, and this worker re-analyses each new one (it
+watches <job>.live.json, written by the agent after the bundle). Stop =
+the agent's cancel; the agent then makes one last read, which comes back
+as <job>.results.npz. Not checked with Abaqus or on Windows. The interval is a choice of the design doc
 (30 s); the time of one read on a large model is not measured.
 """
 from __future__ import annotations
@@ -64,7 +69,7 @@ class LiveRunWorker(QObject):
                  run_dir, job_name: str, cpus: int = 1,
                  interval: float = DEFAULT_INTERVAL_S,
                  popen=None, run_cmd=None, clock=None, sleep=None,
-                 parent=None):
+                 submit=None, parent=None):
         super().__init__(parent)
         self._cfg = cfg
         self._abaqus_cmd = abaqus_cmd
@@ -78,8 +83,12 @@ class LiveRunWorker(QObject):
         self._run_cmd = run_cmd or subprocess.run
         self._clock = clock or time.monotonic
         self._sleep = sleep or time.sleep
+        # Remote mode: submit(run_dir, model_params, run_params,
+        # live_interval) -> RemoteProcess (gui.core.remote_exec).
+        self._submit = submit
         self._stop = False
         self.stopped = False
+        self.error = ""
         self._proc = None
         self.n_snapshots = 0
 
@@ -92,10 +101,19 @@ class LiveRunWorker(QObject):
         proc = self._proc
         self.log.emit("[STOP] asking Abaqus to terminate job %s\n"
                       % self.job_name)
+        if self._submit is not None:
+            # The agent terminates the job and makes the last read.
+            if proc is not None:
+                threading.Thread(target=proc.cancel, daemon=True).start()
+            return
         threading.Thread(target=self._stop_blocking, args=(proc,),
                          daemon=True).start()
 
     def _stop_blocking(self, proc):
+        if self._submit is not None:
+            if proc is not None:
+                proc.cancel()
+            return
         if abaqus_terminate_job(self._abaqus_cmd, self.job_name,
                                 self.run_dir):
             if proc is not None:
@@ -114,8 +132,9 @@ class LiveRunWorker(QObject):
         try:
             self._run()
         except Exception as e:      # never leave the tab waiting
+            self.error = str(e)
             self.log.emit("[live run] %s\n" % e)
-        if self._stop:
+        if self._stop and not (self._submit is not None and final.is_file()):
             final = self._promote_live()
         self.finished.emit(str(final) if final is not None
                            and final.is_file() else "")
@@ -141,6 +160,8 @@ class LiveRunWorker(QObject):
         return final
 
     def _run(self):
+        if self._submit is not None:
+            return self._run_remote()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         model_params = self._cfg.to_params_dict()
         cfg_path = self.run_dir / (self.job_name + ".live_cfg.json")
@@ -177,6 +198,42 @@ class LiveRunWorker(QObject):
                 pass
             if odb.is_file():
                 self._snapshot(cfg_path)
+
+    def _run_remote(self):
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        model_params = self._cfg.to_params_dict()
+        self._proc = self._submit(self.run_dir, model_params,
+                                  {"cpus": self._cpus,
+                                   "job_name": self.job_name},
+                                  self.interval)
+        log_path = script_log_path(self.run_dir, self.job_name)
+        stamp = self.run_dir / (self.job_name + ".live.json")
+        offset, seen = 0, None
+        # After a stop, go on until the agent answers: it makes the last
+        # read and sends the results back.
+        while self._proc.poll() is None:
+            offset = self._tail(log_path, offset)
+            seen = self._remote_snapshot(stamp, seen)
+            self._sleep(0.5)
+        self._tail(log_path, offset)
+        self._remote_snapshot(stamp, seen)
+        out = getattr(self._proc, "launcher_output", b"") or b""
+        if out:
+            self.log.emit(out.decode("cp1252", errors="replace"))
+
+    def _remote_snapshot(self, stamp, seen):
+        """Emit `snapshot` when the agent's <job>.live.json changed."""
+        try:
+            info = json.loads(stamp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return seen
+        key = info.get("n")
+        path = live_bundle_path(self.run_dir, self.job_name)
+        if key == seen or not path.is_file():
+            return seen
+        self.n_snapshots += 1
+        self.snapshot.emit(str(path), float(info.get("seconds") or 0.0))
+        return key
 
     def _tail(self, log_path, offset):
         try:
