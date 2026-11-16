@@ -63,6 +63,11 @@ class FieldViewer(QWidget):
         self._polys: PolyCollection | None = None
         self._cbar = None
         self._title = ""
+        # Element bounding boxes and the values shown, for the value under
+        # the cursor (toolbar coordinates read-out).
+        self._bb = None
+        self._values = None
+        self._ax.format_coord = self.format_coord
 
     # =====================================================================
     # Mesh / values API
@@ -92,6 +97,10 @@ class FieldViewer(QWidget):
 
         # Build (n_elements, 4, 2) vertices array for PolyCollection
         verts = nodes_xy[element_face_indices]   # (n_elements, 4, 2)
+        self._verts = verts
+        self._bb = (verts[:, :, 0].min(axis=1), verts[:, :, 0].max(axis=1),
+                    verts[:, :, 1].min(axis=1), verts[:, :, 1].max(axis=1))
+        self._values = None
 
         # Initial dummy values (all zeros) — set_values() will overwrite
         n_elements = verts.shape[0]
@@ -158,6 +167,7 @@ class FieldViewer(QWidget):
             return
 
         self._polys.set_array(values)
+        self._values = values
         if cmap is not None:
             # Copy the colormap so we can mark NaN cells as fully
             # transparent without mutating the shared registered colormap.
@@ -186,6 +196,32 @@ class FieldViewer(QWidget):
             self._title = title
 
         self._canvas.draw_idle()
+
+    def value_at(self, x: float, y: float):
+        """The value shown in the element under (x, y), or None (no element
+        there, or a hidden one: NaN)."""
+        if self._bb is None or self._values is None:
+            return None
+        x0, x1, y0, y1 = self._bb
+        cand = np.nonzero((x0 <= x) & (x <= x1) & (y0 <= y) & (y <= y1))[0]
+        if cand.size == 0:
+            return None
+        if cand.size > 1:                       # deformed mesh: exact test
+            from matplotlib.path import Path as _Path
+            hit = [i for i in cand
+                   if _Path(self._verts[i]).contains_point((x, y))]
+            cand = np.asarray(hit or cand[:1])
+        v = float(self._values[int(cand[0])])
+        return v if np.isfinite(v) else None
+
+    def format_coord(self, x: float, y: float) -> str:
+        """Toolbar read-out: the cursor position and the value under it."""
+        txt = "x = %.4g mm, y = %.4g mm" % (x, y)
+        v = self.value_at(x, y)
+        if v is not None:
+            name = (self._title or "value").split(" ")[0]
+            txt += "   %s = %.5g" % (name, v)
+        return txt
 
     def clear(self):
         """Remove the field & mesh; leave an empty axes. Removal is

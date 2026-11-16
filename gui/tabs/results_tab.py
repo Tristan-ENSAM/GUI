@@ -57,6 +57,51 @@ def _history_time_for(bundle, var, hist_t, n):
     return t if t.size == n else None
 
 
+# Meaning of the energy outputs, for the legend (Tristan 2026-11-16).
+ENERGY_MEANING = {
+    "ALLKE": "kinetic energy",
+    "ALLIE": "internal energy",
+    "ALLAE": "artificial strain energy (hourglass)",
+    "ALLVD": "viscous dissipation",
+    "ALLWK": "external work",
+    "ALLPD": "plastic dissipation",
+    "ALLFD": "frictional dissipation",
+    "ALLSE": "strain energy",
+    "ETOTAL": "total energy balance",
+}
+# Reaction forces of the tool RP shown as cutting / feed force per unit
+# width: Fc = -RF1_RP / h, Ff = -RF2_RP / h, h = element size (the
+# thickness of the 2D model), in N/mm.
+FORCE_NAMES = {"RF1_RP": "Fc", "RF2_RP": "Ff"}
+
+
+def _elem_size(bundle):
+    try:
+        h = float(bundle.model_config["mesh"]["elem_size"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    return h if h > 0 else None
+
+
+def energy_ratio_text(bundle, window) -> str:
+    """R_K = ΣALLKE/ΣALLIE and R_HG = ΣALLAE/ΣALLIE over the window T
+    (as the studies report them) and over the whole run."""
+    from gui.sensitivity.run_record import windowed_energy_ratio
+    rows = []
+    for name, num, num_t in (("R_K = \u03a3ALLKE/\u03a3ALLIE", "ALLKE",
+                              "ENERGY_TIME"),
+                             ("R_HG = \u03a3ALLAE/\u03a3ALLIE", "ALLAE",
+                              "ALLAE_TIME")):
+        vals = []
+        for w in (tuple(window), (0.0, 1.0)):
+            v, _why = windowed_energy_ratio(bundle, num, "ALLIE", num_t,
+                                            "ENERGY_TIME", w)
+            vals.append("\u2014" if v is None else "%.3g %%" % (100.0 * v))
+        rows.append("%s: %s over T = [%g, %g], %s over the run"
+                    % (name, vals[0], window[0], window[1], vals[1]))
+    return "\n".join(rows)
+
+
 # Eulerian cells with volume fraction below this are treated as empty and
 # hidden when rendering EULER fields (only show where material is present).
 _EVF_MIN = 1e-3
@@ -75,8 +120,10 @@ class ResultsTab(QWidget):
                 "#bcbd22", "#17becf")
     _LINESTYLES = ("-", "--", ":", "-.")
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, window_getter=None):
         super().__init__(parent)
+        # Window T (fractions) of the energy ratios; (0.3, 1) without one.
+        self._window_getter = window_getter
 
         # State -------------------------------------------------------
         # Multi-run ready: a dict keyed by run name. For now the UI
@@ -105,7 +152,17 @@ class ResultsTab(QWidget):
     # UI construction
     # =====================================================================
     def _build_ui(self):
-        outer = QVBoxLayout(self)
+        # Pages: the run viewer, then pages added by the main window (the
+        # initial-run checks, add_page).
+        from PySide6.QtWidgets import QTabWidget
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        self.pages = QTabWidget()
+        self.pages.setDocumentMode(True)
+        root.addWidget(self.pages)
+        viewer = QWidget()
+        self.pages.addTab(viewer, "Fields and histories")
+        outer = QVBoxLayout(viewer)
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(6)
 
@@ -205,6 +262,11 @@ class ResultsTab(QWidget):
         split.setStretchFactor(1, 2)
         outer.addWidget(split, stretch=1)
 
+    def add_page(self, widget, title: str) -> None:
+        """Add a page next to the run viewer (e.g. the initial-run checks,
+        moved here from Optimize on 2026-11-16)."""
+        self.pages.addTab(widget, title)
+
     @staticmethod
     def _vline() -> QFrame:
         """Vertical separator for the top bar."""
@@ -295,6 +357,7 @@ class ResultsTab(QWidget):
         run is loaded."""
         self.ts_viewer.clear()
         multi = len(self._runs) > 1
+        no_width = []
         for name, bundle in self._runs.items():
             color = self._run_color(name)
             try:
@@ -311,18 +374,47 @@ class ResultsTab(QWidget):
                 except KeyError:
                     continue
                 t = _history_time_for(bundle, var, hist_t, len(y))
+                shown = var
+                if var in FORCE_NAMES:
+                    h = _elem_size(bundle)
+                    if h is None:
+                        no_width.append(name)
+                        shown = var + " [N]"
+                    else:
+                        y = -np.asarray(y, dtype=float) / h
+                        shown = "%s = \u2212%s / h" % (FORCE_NAMES[var], var)
+                elif _is_energy(var) and var in ENERGY_MEANING:
+                    shown = "%s: %s" % (var, ENERGY_MEANING[var])
                 if t is None:
                     logging.getLogger(__name__).warning(
                         "Results: history %r of run %r has %d samples and "
                         "no time base of that length; not plotted.",
                         var, name, len(y))
                     continue
-                label = ("%s\u00b7%s" % (name, var)) if multi else var
+                label = ("%s\u00b7%s" % (name, shown)) if multi else shown
                 self.ts_viewer.add_series(
                     label, t, y, color=color,
                     linestyle=self._LINESTYLES[k % len(self._LINESTYLES)],
                     energy=_is_energy(var))
                 k += 1
+        self.ts_viewer.set_force_label(
+            "force per unit width [N/mm]" if not no_width
+            else "force [N/mm]; [N] for %s (element size unknown)"
+            % ", ".join(no_width))
+        active = self._runs.get(self._active_run) if self._active_run else None
+        if active is None and self._runs:
+            active = next(iter(self._runs.values()))
+        if active is not None:
+            try:
+                win = (self._window_getter() if self._window_getter
+                       else (0.3, 1.0))
+                note = energy_ratio_text(active, win)
+            except Exception:
+                log_swallowed("computing the energy ratios")
+                note = ""
+            if multi and note:
+                note = "%s\n%s" % (self._active_run, note)
+            self.ts_viewer.set_energy_note(note)
 
     def _on_close_clicked(self):
         """Remove the active run from the comparison."""

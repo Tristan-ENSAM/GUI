@@ -184,7 +184,9 @@ class JobTab(QWidget):
         self.cmb_machine = MachineCombo(self._get_prefs)
         self.cmb_machine.set_machine(getattr(self.cfg.job, "machine", ""))
         self.cmb_machine.machineChanged.connect(self._on_change)
+        self.cmb_machine.machineChanged.connect(self._limit_cpus)
         form.addRow("Machine:", self.cmb_machine)
+        self._limit_cpus()
 
         # Parallelisation: we only expose `cpus` for now. Abaqus offers
         # several parallelisation strategies (domain decomposition, loop
@@ -207,6 +209,27 @@ class JobTab(QWidget):
         self.fld_job_name.textChanged.connect(self._on_change)
         self.spin_cpus.valueChanged.connect(self._on_change)
         return g
+
+    def _limit_cpus(self, *_):
+        """Limit the CPU choice to the logical processors of the chosen
+        machine (Tristan 2026-11-16); no limit when it is not known (queue
+        machine whose agent has not written it yet)."""
+        from gui.core.machines import cpu_count
+        try:
+            n = cpu_count(self._get_prefs(), self.cmb_machine.machine())
+        except Exception:
+            n = None
+        hi = int(n) if n else 256
+        self.spin_cpus.setMaximum(max(1, hi))
+        tip = "Number of CPU cores for the Abaqus solver."
+        if n:
+            tip += ("\nAt most %d: the logical processors of %s." % (
+                n, self.cmb_machine.machine_label()))
+        else:
+            tip += ("\nThe processor count of %s is not known yet (its "
+                    "agent writes it when it starts)."
+                    % self.cmb_machine.machine_label())
+        self.spin_cpus.setToolTip(tip)
 
     def _build_run_controls(self) -> QWidget:
         bar = QWidget()
@@ -248,6 +271,14 @@ class JobTab(QWidget):
         )
         self.btn_cancel.clicked.connect(self._cancel_run)
         row.addWidget(self.btn_cancel)
+
+        from gui.widgets.workdir_button import open_working_dir
+        self.btn_workdir = QPushButton("Open working dir")
+        self.btn_workdir.setToolTip(
+            "Open the folder of the last run of this tab, or the working\n"
+            "directory of the Preferences when there is none yet.")
+        self.btn_workdir.clicked.connect(self._open_workdir)
+        row.addWidget(self.btn_workdir)
 
         self.btn_copy = QPushButton("Copy output")
         self.btn_copy.setToolTip("Copy the entire output panel to clipboard.")
@@ -1068,6 +1099,26 @@ class JobTab(QWidget):
     def refresh_machines(self):
         """The machine list of the Preferences changed."""
         self.cmb_machine.refresh()
+        self._limit_cpus()
+
+    def _open_workdir(self):
+        """Open the run folder of the current job when it exists, else the
+        working directory of the Preferences."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from gui.widgets.workdir_button import open_working_dir
+        prefs = self._get_prefs()
+        wd = getattr(prefs, "default_workdir", "") or ""
+        name = self.fld_job_name.text().strip()
+        if wd and name:
+            try:
+                run = self._run_folder(wd, name)
+            except Exception:
+                run = None
+            if run is not None and Path(run).is_dir():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(run)))
+                return
+        open_working_dir(self, prefs)
 
     # CPU count chosen here is the single source of truth for any Abaqus
     # launch (Job run, and the sensitivity runner).

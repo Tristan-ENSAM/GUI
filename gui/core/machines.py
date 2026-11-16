@@ -161,3 +161,29 @@ def host_name(prefs, name: str = "") -> str:
         return ""
     host = data.get("host") if isinstance(data, dict) else None
     return str(host) if host else ""
+
+
+def cpu_count(prefs, name: str = "") -> Optional[int]:
+    """Logical processors of machine `name` ("" = the default one): this
+    PC's own count for the local machine; for a queue machine, the count
+    its agent writes in `<queue>/agent.json`. None when not known (no such
+    machine, or an agent older than this field)."""
+    import os
+    m = find(prefs, name or default_name(prefs))
+    if m is None:
+        return None
+    if m.kind == LOCAL:
+        return os.cpu_count()
+    if not m.queue_dir:
+        return None
+    try:
+        data = json.loads((Path(m.queue_dir) / "agent.json").read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    n = data.get("cpus") if isinstance(data, dict) else None
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None

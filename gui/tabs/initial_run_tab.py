@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Optimization > Initial run: the preliminary checks on the initial run.
+"""Simulate > Results > Initial run checks (was Optimization > Initial
+run until 2026-11-16): the preliminary checks on the initial run.
 
 Decision 2026-11-12: the Setup tab is gone (its settings are in Geometry,
 Mesh, Step and Identify) and this tab checks the initial run. It can launch
@@ -34,7 +35,7 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QSplitter, QVBoxLayout, QWidget)
@@ -60,6 +61,11 @@ class InitialRunTab(QWidget):
     file dialogs). `prefs_getter`, `cpus_getter` and `profile_name_getter`
     give the Preferences, the CPU count of the Job tab and the profile
     name, for launching the run."""
+
+    # Path of the final results of a finished (or stopped) initial run, for
+    # the run viewer of the Results tab. The reads made while it runs are
+    # not sent: the file is rewritten at each read.
+    resultsReady = Signal(str)
 
     def __init__(self, sizing_tab, start_dir="", prefs_getter=None,
                  cpus_getter=None, profile_name_getter=None, step_tab=None,
@@ -286,10 +292,12 @@ class InitialRunTab(QWidget):
             self._status("Run stopped: its last read is kept as its "
                          "results (%s)." % final, "#15803d")
             self.prelim.analyse_file(final)
+            self.resultsReady.emit(str(final))
         elif final:
             self._status("Run finished: checks on its full results.",
                          "#15803d")
             self.prelim.analyse_file(final)
+            self.resultsReady.emit(str(final))
         else:
             err = getattr(self._worker, "error", "")
             self._status("Run stopped or failed%s: the checks show the last "

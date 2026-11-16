@@ -280,6 +280,12 @@ class Agent(object):
         self._snapshot_cmd = snapshot     # tests: f(j) -> returncode
         self.out = out or sys.stdout
         self.host = socket.gethostname()
+        # Logical processors of the PC, for the CPU choice of the GUI.
+        try:
+            import multiprocessing
+            self.cpus = int(multiprocessing.cpu_count())
+        except (ImportError, NotImplementedError):
+            self.cpus = None
         self.seq = 0
         self._last_hb = 0.0
         self.job = None
@@ -313,6 +319,7 @@ class Agent(object):
         try:
             write_json_atomic(os.path.join(self.queue, "agent.json"), {
                 "seq": self.seq, "host": self.host, "pid": os.getpid(),
+                "cpus": self.cpus,
                 "python": sys.version.split()[0],
                 "abaqus_cmd": self.abaqus_cmd,
                 "busy_job": self.job["id"] if self.job else None,
