@@ -8,9 +8,12 @@ interval the results so far are extracted and the checks (stationarity P0,
 output frames P1, chip re-contact) are run again on them. A finished run
 can still be opened by hand.
 
+The last frame read is drawn with the checks on it (zone, watched
+re-contact cells, chip-thickness line, tool); editing a check parameter
+recomputes on the same file.
+
 Not here yet (next PRs): the automatic stop rules and the transfer of Ttot
-and T to the Step tab; the last-frame view with the checks drawn on it;
-remote runs (the agent of the compute PC).
+and T to the Step tab; remote runs (the agent of the compute PC).
 
 The checks read their defaults from the Model sizing tab
 (OptimizationTab.prelim_settings), which still owns every setting.
