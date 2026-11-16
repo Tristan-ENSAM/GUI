@@ -84,7 +84,7 @@ class InitialRunTab(QWidget):
             "(start of the window T), output-frame subsampling and chip "
             "touching the workpiece again. Launch the current model to see "
             "them while it runs, or open a finished run below. The ZOI is "
-            "set in Numerical Model > Geometry, the window T in Step, the "
+            "set in Simulate > Geometry, the window T in Step, the "
             "ZOI sampling step in Mesh and ε_q in Identify.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#6b7280;")

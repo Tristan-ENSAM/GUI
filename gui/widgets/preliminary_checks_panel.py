@@ -399,7 +399,7 @@ class PreliminaryChecksPanel(QWidget):
         eps = {k: float(v) for k, v in
                (self._model().get("eps") or {}).items()}
         if not eps:
-            raise ValueError("Set ε_q in Optimization > Identify first.")
+            raise ValueError("Set ε_q in Optimize > Identify first.")
         return dict(path=path, zone=zone, L=L * 1e-6, tau=tau, att=att,
                     margin=_num(self.le_margin), gap=gap, band=band, eps=eps)
 

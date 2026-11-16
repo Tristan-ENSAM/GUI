@@ -83,7 +83,7 @@ def setup_qoi_settings(getter, cfg, qois) -> dict:
     eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
     missing = [q for q in qois if not (eps.get(q) or 0) > 0]
     if missing:
-        raise ValueError("Set ε_q of %s in Optimization > Identify first."
+        raise ValueError("Set ε_q of %s in Optimize > Identify first."
                          % ", ".join(missing))
     if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
         raise ValueError("The ZOI (Geometry tab) is empty.")

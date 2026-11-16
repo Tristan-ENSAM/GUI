@@ -86,8 +86,7 @@ def test_compare_button_opens_the_compare_tab(qapp):
     w = MainWindow(); w._dirty = False
     assert not hasattr(w.optimization_tab, "btn_dev_maps")
     w.optimization_tab.btn_compare.click()
-    assert w.tabs.currentWidget() is w.opt_tabs
-    assert w.opt_tabs.currentWidget() is w.compare_tab
+    assert w.tabs.currentWidget() is w.compare_tab
 
 
 def test_compare_tab_uses_the_setup_settings(qapp):

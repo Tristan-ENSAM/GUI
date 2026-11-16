@@ -471,7 +471,7 @@ class SensitivityTab(QWidget):
         self.btn_compare_runs = QPushButton("Compare 2 runs…")
         self.btn_compare_runs.setToolTip(
             "Sweep / grid: select two rows of the Table, then open them in\n"
-            "Compare runs (where and when they differ, in \u03b5_q). The Ref\n"
+            "Compare (where and when they differ, in \u03b5_q). The Ref\n"
             "run, or else the lower run number, is the reference (a).")
         self.btn_compare_runs.setEnabled(False)
         self.btn_compare_runs.clicked.connect(self._on_compare_runs)
@@ -870,7 +870,7 @@ class SensitivityTab(QWidget):
             chk.setCheckState(Qt.Unchecked)
             chk.setFlags(Qt.NoItemFlags)
             chk.setToolTip("Not set in the model: give it a value in the "
-                           "Numerical Model tabs to vary it.")
+                           "Simulate tabs to vary it.")
             ref = self.table.item(row, 2)
             if ref is not None:
                 ref.setText("not set")
@@ -1315,7 +1315,7 @@ class SensitivityTab(QWidget):
         eps = {k: float(v) for k, v in (st.get("eps") or {}).items()}
         missing = [q for q in qois if not (eps.get(q) or 0) > 0]
         if missing:
-            raise ValueError("Set \u03b5_q of %s in Optimization > Identify first."
+            raise ValueError("Set \u03b5_q of %s in Optimize > Identify first."
                              % ", ".join(missing))
         if not (zoi[0] < zoi[1] and zoi[2] < zoi[3]):
             raise ValueError("The ZOI (Geometry tab) is empty.")
@@ -2081,7 +2081,7 @@ class SensitivityTab(QWidget):
                        if v in zp.FIELD_TO_EPS} - {k for k, v in eps.items()
                                                     if v and v > 0})
         if need:
-            self.lbl_zoi.setText("Missing \u03b5_q in Optimization > Identify: %s."
+            self.lbl_zoi.setText("Missing \u03b5_q in Optimize > Identify: %s."
                                  % ", ".join(need))
             return
         plan = self._run_plan or self.plan

@@ -356,14 +356,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         # The widgets stay owned by this tab, which reads, validates and
         # saves them with the profile under the same keys as before.
         # -- ZOI + chip-thickness line (Geometry tab)
-        gzoi = QGroupBox("Comparison zone ZOI (Optimization)")
+        gzoi = QGroupBox("Comparison zone ZOI (Optimize)")
         cg0 = QGridLayout(gzoi)
         cg0.setHorizontalSpacing(8)
         cg0.setVerticalSpacing(4)
         lab = QLabel("Zone where two runs are compared [mm]")
         lab.setToolTip(
             "Zone where two runs are compared (measurement zone of the\n"
-            "Optimization tabs). It is NOT the ROI: the ROI is the output\n"
+            "Optimize tabs). It is NOT the ROI: the ROI is the output\n"
             "zone above, matched to the DIC/IRT fields. An empty bound takes\n"
             "the ROI bound. The Sensitivity tab can propose a ZOI from its\n"
             "maps ('Copy ZOI to the Geometry tab').")
@@ -403,7 +403,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         cg0.setColumnStretch(4, 1)
         self.zoi_group = gzoi
         # -- eps_q, eps_e and the step weights (Identify tab, both modes)
-        geps = QGroupBox("Admitted deviations ε_q (every Optimization tab)")
+        geps = QGroupBox("Admitted deviations ε_q (every Optimize tab)")
         cg0 = QGridLayout(geps)
         cg0.setHorizontalSpacing(8)
         cg0.setVerticalSpacing(4)
@@ -475,7 +475,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         self._eps_grid = cg0            # the step weights go on row 2
         self.eps_group = geps
         # -- ZOI sampling step (Mesh tab)
-        gsam = QGroupBox("ZOI sampling (Optimization)")
+        gsam = QGroupBox("ZOI sampling (Optimize)")
         ag = QGridLayout(gsam)
         ag.setHorizontalSpacing(8)
         ag.addWidget(QLabel("ZOI sampling step [mm]"), 0, 0)
@@ -490,7 +490,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         ag.setColumnStretch(2, 1)
         self.sampling_group = gsam
         # -- time window T (Step tab)
-        gwin = QGroupBox("Comparison window T (Optimization)")
+        gwin = QGroupBox("Comparison window T (Optimize)")
         ag = QGridLayout(gwin)
         ag.setHorizontalSpacing(8)
         lab = QLabel("Time window T (fraction of the simulated time)")
@@ -501,7 +501,7 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "start T after the force has stabilised.\n"
             "Default 0.3 to 1.0: the value hard-coded in the studies before\n"
             "it became a setting. Also used by the Explore, Sensitivity and\n"
-            "Compare runs tabs.")
+            "Compare tabs.")
         ag.addWidget(lab, 0, 0)
         self._dom_texts = {}
         win_row = QHBoxLayout()
@@ -930,9 +930,9 @@ class OptimizationTab(ModelStepsMixin, QWidget):
             "final checks. An unfinished study can then be resumed.")
         self.btn_open.clicked.connect(self._on_open_study)
         top.addWidget(self.btn_open)
-        self.btn_compare = QPushButton("Compare runs…")
+        self.btn_compare = QPushButton("Compare…")
         self.btn_compare.setToolTip(
-            "Opens the Compare runs tab on the study folders of this model:\n"
+            "Opens the Compare tab on the study folders of this model:\n"
             "maps of the deviation between two finished runs, and their time\n"
             "curves at a clicked ZOI point. No Abaqus run.")
         self.btn_compare.clicked.connect(self.compareRequested.emit)
