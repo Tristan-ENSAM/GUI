@@ -13,8 +13,9 @@ Left form:
     combos for that face are hidden.
   - Initial temperature (°C or K depending on Preferences).
 
-Preview: click a face to toggle it in the cutting velocity selection
-(BC view only).
+Each face also has a "Cutting velocity imposed" choice (the faces where
+the material velocity Vc is applied), set in the form like inflow /
+outflow (Tristan 2026-11-16; it used to be a click on the preview).
 """
 from __future__ import annotations
 from PySide6.QtCore import Signal, Qt
@@ -66,6 +67,9 @@ class BCsTab(QWidget):
         ("bottom", "Bottom face"),
         ("top",    "Top face"),
     )
+    # Face key of the form -> face id of cfg.bcs.cutting_velocity_faces.
+    FACE_IDS = {"left": "eul_left", "right": "eul_right",
+                "bottom": "eul_bot", "top": "eul_top"}
 
     def __init__(self, cfg: ModelConfig, parent=None):
         super().__init__(parent)
@@ -97,9 +101,7 @@ class BCsTab(QWidget):
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.addWidget(self._build_view_switch())
         self.preview = GeometryPreview()
-        self.preview.picking_enabled = True
         self.preview.bc_view_mode = "BC"
-        self.preview.facePicked.connect(self._on_face_picked)
         right_lay.addWidget(self.preview)
         splitter.addWidget(right)
 
@@ -126,8 +128,8 @@ class BCsTab(QWidget):
         h.setContentsMargins(8, 2, 8, 2)
         h.setSpacing(8)
         h.addWidget(QLabel("View:"))
-        self.rb_bc = QRadioButton("BC")
-        self.rb_ic = QRadioButton("IC")
+        self.rb_bc = QRadioButton("Boundary conditions")
+        self.rb_ic = QRadioButton("Initial conditions")
         self.rb_bc.setToolTip("Show boundary conditions on the preview")
         self.rb_ic.setToolTip("Show initial conditions on the preview")
         self.rb_bc.setChecked(True)
@@ -162,8 +164,8 @@ class BCsTab(QWidget):
         )
         self.f_vcut.setToolTip(
             "Cutting velocity (display unit set in Preferences → Unit "
-            "system). Click on Eulerian faces in the preview to toggle them\n"
-            "in the application set."
+            "system). Applied on the Eulerian faces where 'Cutting velocity\n"
+            "imposed' is ticked (Eulerian inflow / outflow below)."
         )
         v.addWidget(self.f_vcut)
 
@@ -187,7 +189,7 @@ class BCsTab(QWidget):
     # Eulerian BCs (4 faces, each with an Enabled checkbox)
     # =====================================================================
     def _build_eulerian_group(self) -> QGroupBox:
-        g = QGroupBox("Eulerian inflow / outflow (CEL only)")
+        g = QGroupBox("Eulerian faces: cutting velocity, inflow / outflow (CEL only)")
         self._eul_group = g
         v = QVBoxLayout(g)
         v.setSpacing(4)
@@ -222,6 +224,15 @@ class BCsTab(QWidget):
         )
         enable_cb.toggled.connect(self._on_change)
         lay.addWidget(enable_cb)
+
+        # Cutting velocity on this face (independent of inflow / outflow)
+        vel_cb = QCheckBox("Cutting velocity imposed")
+        vel_cb.setToolTip("Apply the cutting velocity Vc to the material "
+                          "on this face of the Eulerian domain.")
+        vel_cb.setChecked(self.FACE_IDS[face_key] in list(
+            self.cfg.bcs.cutting_velocity_faces or []))
+        vel_cb.toggled.connect(self._on_change)
+        lay.addWidget(vel_cb)
 
         # Mode row
         mode_row = QHBoxLayout()
@@ -270,6 +281,7 @@ class BCsTab(QWidget):
 
         self._face_widgets[face_key] = {
             "enable":      enable_cb,
+            "velocity":    vel_cb,
             "mode":        cb_mode,
             "inflow":      cb_in,
             "outflow":     cb_out,
@@ -326,23 +338,6 @@ class BCsTab(QWidget):
         self._refresh_preview()
 
     # =====================================================================
-    # Picking (BC view only): toggle face in/out of v_cut selection
-    # =====================================================================
-    def _on_face_picked(self, face_id: str):
-        if self.preview.bc_view_mode != "BC":
-            return
-        if not face_id.startswith("eul_"):
-            return
-        current = list(self.cfg.bcs.cutting_velocity_faces or [])
-        if face_id in current:
-            current.remove(face_id)
-        else:
-            current.append(face_id)
-        self.cfg.bcs.cutting_velocity_faces = current
-        self._refresh_preview()
-        self.bcsChanged.emit()
-
-    # =====================================================================
     # Sync widgets <-> cfg
     # =====================================================================
     def _refresh_face_visibility(self):
@@ -370,6 +365,15 @@ class BCsTab(QWidget):
         _sf = units.speed_factor()
         b.cutting_speed    = self.f_vcut.value()   * _sf
         b.initial_velocity = self.f_v_init.value() * _sf
+        # Faces with the cutting velocity, in the order of the form; a face
+        # id the form does not know is kept.
+        known = set(self.FACE_IDS.values())
+        faces = [f for f in (b.cutting_velocity_faces or [])
+                 if f not in known]
+        for face_key, _lbl in self.EUL_FACES:
+            if self._face_widgets[face_key]["velocity"].isChecked():
+                faces.append(self.FACE_IDS[face_key])
+        b.cutting_velocity_faces = faces
         for face_key, w in self._face_widgets.items():
             setattr(b, f"face_enabled_{face_key}",       w["enable"].isChecked())
             setattr(b, f"eulerian_bc_mode_{face_key}",   w["mode"].currentData())
@@ -381,7 +385,8 @@ class BCsTab(QWidget):
     def apply_from_cfg(self):
         widgets = [self.f_vcut, self.f_v_init, self.f_T]
         for w in self._face_widgets.values():
-            widgets += [w["enable"], w["mode"], w["inflow"], w["outflow"]]
+            widgets += [w["enable"], w["velocity"], w["mode"], w["inflow"],
+                        w["outflow"]]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -392,9 +397,11 @@ class BCsTab(QWidget):
             self.f_v_init.set_value(b.initial_velocity / _sf)
             self.f_vcut._lbl.setText(f"Cutting speed [{_su}]")
             self.f_v_init._lbl.setText(f"Initial velocity [{_su}]")
+            vel = list(b.cutting_velocity_faces or [])
             for face_key, w in self._face_widgets.items():
                 w["enable"].setChecked(
                     getattr(b, f"face_enabled_{face_key}", False))
+                w["velocity"].setChecked(self.FACE_IDS[face_key] in vel)
                 idx = w["mode"].findData(
                     getattr(b, f"eulerian_bc_mode_{face_key}", "both"))
                 if idx >= 0:

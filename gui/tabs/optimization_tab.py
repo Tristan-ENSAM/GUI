@@ -490,13 +490,14 @@ class OptimizationTab(ModelStepsMixin, QWidget):
         ag.setColumnStretch(2, 1)
         self.sampling_group = gsam
         # -- time window T (Step tab)
-        gwin = QGroupBox("Comparison window T (Optimize)")
+        gwin = QWidget()
         ag = QGridLayout(gwin)
+        ag.setContentsMargins(2, 2, 2, 2)
         ag.setHorizontalSpacing(8)
-        lab = QLabel("Time window T (fraction of the simulated time)")
+        lab = QLabel("Time window")
         lab.setToolTip(
-            "Part of the simulated time over which the runs are compared\n"
-            "(0 = start, 1 = end). It should cover the steady cutting regime\n"
+            "Time window T, fractions of the simulated time: part of it over\n"
+            "which the runs are compared (0 = start, 1 = end). It should cover the steady cutting regime\n"
             "only: check the cutting force of a run in the Results tab and\n"
             "start T after the force has stabilised.\n"
             "Default 0.3 to 1.0: the value hard-coded in the studies before\n"

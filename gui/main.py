@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         # Step, eps_q at the top of Identify. Owned by the Model sizing tab.
         self.geometry_tab.add_extra_group(self.optimization_tab.zoi_group)
         self.mesh_tab.add_extra_group(self.optimization_tab.sampling_group)
-        self.step_tab.add_extra_group(self.optimization_tab.window_group)
+        self.step_tab.add_to_dynamic_step(self.optimization_tab.window_group)
         self.geometry_tab.preview.extra_drawer = \
             self.optimization_tab.draw_comparison_overlay
         for le in (list(self.optimization_tab.le_zoi.values())
