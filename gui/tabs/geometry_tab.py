@@ -24,7 +24,8 @@ class GeometryTab(QWidget):
         # ------------ left: parameter form (in a scroll area) ------------
         form = QWidget()
         form_lay = QVBoxLayout(form)
-        form_lay.setContentsMargins(6, 6, 6, 6)
+        form_lay.setContentsMargins(4, 4, 4, 4)
+        form_lay.setSpacing(4)
 
         form_lay.addWidget(self._build_tool_group())
         form_lay.addWidget(self._build_workpiece_group())
@@ -35,7 +36,8 @@ class GeometryTab(QWidget):
         _maybe_widget = self._build_mesh_seeds_group()
         if _maybe_widget is not None:
             form_lay.addWidget(_maybe_widget)
-        form_lay.addWidget(self._build_bbox_group())
+        # The ZOI (= extraction zone) group is added by the main window
+        # (add_extra_group): its fields are owned by the Optimize tabs.
         form_lay.addStretch()
         self._form_lay = form_lay
 
@@ -45,7 +47,7 @@ class GeometryTab(QWidget):
         form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         form_scroll.setWidget(form)
-        form_scroll.setMinimumWidth(380)
+        form_scroll.setMinimumWidth(340)
 
         # ------------ right: preview + info ------------
         right = QWidget()
@@ -59,7 +61,14 @@ class GeometryTab(QWidget):
         self.chk_ref.toggled.connect(self._on_toggle_reference)
         right_lay.addWidget(self.chk_ref)
         self.preview = GeometryPreview()
-        right_lay.addWidget(self.preview, stretch=1)
+        # Two views: the model to scale, and a sketch of the parameters.
+        from PySide6.QtWidgets import QTabWidget
+        from gui.widgets.geometry_sketch import GeometrySketch
+        self.sketch = GeometrySketch()
+        self.views = QTabWidget()
+        self.views.addTab(self.preview, "Model (to scale)")
+        self.views.addTab(self.sketch, "Parameter sketch")
+        right_lay.addWidget(self.views, stretch=1)
         right_lay.addWidget(self._build_info_panel())
 
         # ------------ splitter ------------
@@ -68,7 +77,7 @@ class GeometryTab(QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
-        split.setSizes([400, 800])
+        split.setSizes([360, 840])
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -86,109 +95,114 @@ class GeometryTab(QWidget):
     # =====================================================================
     # Group builders
     # =====================================================================
-    def _build_tool_group(self) -> QGroupBox:
-        g = QGroupBox("Tool")
-        lay = QVBoxLayout(g)
+    # Dense form (Tristan 2026-11-16): two fields per row, standard symbols
+    # (ISO 3002: rake angle γ, clearance angle α, cutting-edge radius r_β,
+    # depth of cut t1; h is the element size), the full name in each tooltip and on the parameter
+    # sketch.
+    @staticmethod
+    def _grid_group(title: str, rows) -> QGroupBox:
+        """A group with `rows` of up to two NumFields per row."""
+        g = QGroupBox(title)
+        grid = QGridLayout(g)
+        grid.setContentsMargins(6, 4, 6, 4)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(0)
+        for r, row in enumerate(rows):
+            for c, w in enumerate(row):
+                if w is not None:
+                    grid.addWidget(w, r, c)
+        grid.setColumnStretch(2, 1)
+        return g
 
+    @staticmethod
+    def _field(label, value, unit, tip, **kw):
+        return NumField(label, value, unit, compact=True, tip=tip,
+                        label_width=44, **kw)
+
+    def _build_tool_group(self) -> QGroupBox:
         tg = self.cfg.tool_geometry
         tp = self.cfg.tool_position
-
-        # Single-field rows
-        self.f_h_tool = NumField("h_tool",         tg.h_tool,    "mm")
-        self.f_l_tool = NumField("l_tool",         tg.l_tool,    "mm")
-        self.f_r_tool = NumField("r_tool (edge)",  tg.r_tool,    "mm", minimum=0.0)
-        self.f_rake   = NumField("rake angle",     tg.rake_angle, "°")
-        self.f_clear  = NumField("clear angle",    tg.clear_angle, "°")
-        # Paired position x0 / y0 on a single row
-        self.f_tx = NumField("x0", tp.x0, "mm", compact=True)
-        self.f_ty = NumField("y0", tp.y0, "mm", compact=True)
-        pos_row = PairRow(self.f_tx, self.f_ty)
-
+        f = self._field
+        self.f_h_tool = f("h<sub>tool</sub>", tg.h_tool, "mm", "Tool height")
+        self.f_l_tool = f("l<sub>tool</sub>", tg.l_tool, "mm", "Tool length")
+        self.f_r_tool = f("r<sub>β</sub>", tg.r_tool, "mm",
+                          "Cutting-edge radius r_β (ISO 3002): radius "
+                          "of the rounded edge between the rake and the "
+                          "clearance faces", minimum=0.0)
+        self.f_rake = f("γ", tg.rake_angle, "°",
+                        "Rake angle γ (ISO 3002): angle between the "
+                        "rake face and the normal to the cut surface")
+        self.f_clear = f("α", tg.clear_angle, "°",
+                         "Clearance angle α (ISO 3002): angle between "
+                         "the clearance face and the cut surface")
+        self.f_tx = f("x<sub>0</sub>", tp.x0, "mm",
+                      "Tool position x0: x of the leading point of the cutting edge "
+                      "(first point the material touches)")
+        self.f_ty = f("y<sub>0</sub>", tp.y0, "mm",
+                      "Tool position y0: y of the lowest point of the "
+                      "cutting edge (the cutting line y = y0)")
+        self.lbl_depth = QLabel("h = —")
+        self.lbl_depth.setToolTip(
+            "Depth of cut h (uncut chip thickness t1 of orthogonal cutting) "
+            "= y0 of the workpiece − y0 of the tool.")
+        g = self._grid_group("Tool", [
+            (self.f_h_tool, self.f_l_tool),
+            (self.f_rake, self.f_clear),
+            (self.f_r_tool, None),
+            (self.f_tx, self.f_ty),
+        ])
+        g.layout().addWidget(self.lbl_depth, 2, 1)
         for w in (self.f_h_tool, self.f_l_tool, self.f_r_tool,
-                  self.f_rake, self.f_clear):
-            lay.addWidget(w)
+                  self.f_rake, self.f_clear, self.f_tx, self.f_ty):
             w.valueChanged.connect(self._on_change)
-        lay.addWidget(pos_row)
-        self.f_tx.valueChanged.connect(self._on_change)
-        self.f_ty.valueChanged.connect(self._on_change)
         return g
 
     def _build_workpiece_group(self) -> QGroupBox:
-        g = QGroupBox("Workpiece")
-        self._workpiece_group = g
-        lay = QVBoxLayout(g)
-
         eg = self.cfg.euler_geometry
         wp = self.cfg.wp_position
-
-        # Paired h_wp / l_wp on a single row
-        self.f_h_wp = NumField("h_wp", eg.h_wp, "mm", minimum=0.0, compact=True)
-        self.f_l_wp = NumField("l_wp", eg.l_wp, "mm", minimum=0.0, compact=True)
-        dims_row = PairRow(self.f_h_wp, self.f_l_wp)
-
-        # Paired wp x0 / y0
-        self.f_wp_x = NumField("x0", wp.x0, "mm", compact=True)
-        self.f_wp_y = NumField("y0", wp.y0, "mm", compact=True)
-        pos_row = PairRow(self.f_wp_x, self.f_wp_y)
-
-        lay.addWidget(dims_row)
-        lay.addWidget(pos_row)
-        for f in (self.f_h_wp, self.f_l_wp, self.f_wp_x, self.f_wp_y):
-            f.valueChanged.connect(self._on_change)
+        f = self._field
+        self.f_h_wp = f("h<sub>wp</sub>", eg.h_wp, "mm", "Workpiece height",
+                        minimum=0.0)
+        self.f_l_wp = f("l<sub>wp</sub>", eg.l_wp, "mm", "Workpiece length",
+                        minimum=0.0)
+        self.f_wp_x = f("x<sub>0</sub>", wp.x0, "mm",
+                        "Workpiece position x0: x of its right face")
+        self.f_wp_y = f("y<sub>0</sub>", wp.y0, "mm",
+                        "Workpiece position y0: y of its top face")
+        g = self._grid_group("Workpiece", [(self.f_h_wp, self.f_l_wp),
+                                           (self.f_wp_x, self.f_wp_y)])
+        self._workpiece_group = g
+        for w in (self.f_h_wp, self.f_l_wp, self.f_wp_x, self.f_wp_y):
+            w.valueChanged.connect(self._on_change)
         return g
 
     def _build_euler_group(self) -> QGroupBox:
-        g = QGroupBox("Eulerian domain")
-        self._euler_group = g
-        lay = QVBoxLayout(g)
         eg = self.cfg.euler_geometry
         ep = self.cfg.euler_position
-
-        # Paired h_void / l_void on a single row
-        self.f_h_void = NumField("h_void", eg.h_void, "mm", minimum=0.0, compact=True)
-        self.f_l_void = NumField("l_void", eg.l_void, "mm", minimum=0.0, compact=True)
-        void_row = PairRow(self.f_h_void, self.f_l_void)
-
-        # Paired euler x0 / y0
-        self.f_ex = NumField("x0", ep.x0, "mm", compact=True)
-        self.f_ey = NumField("y0", ep.y0, "mm", compact=True)
-        pos_row = PairRow(self.f_ex, self.f_ey)
-
-        lay.addWidget(void_row)
-        lay.addWidget(pos_row)
-        for f in (self.f_h_void, self.f_l_void, self.f_ex, self.f_ey):
-            f.valueChanged.connect(self._on_change)
+        f = self._field
+        self.f_h_void = f("h<sub>void</sub>", eg.h_void, "mm",
+                          "Height of the empty part of the Eulerian domain "
+                          "above the workpiece", minimum=0.0)
+        self.f_l_void = f("l<sub>void</sub>", eg.l_void, "mm",
+                          "Length of the empty part of the Eulerian domain "
+                          "right of the workpiece", minimum=0.0)
+        self.f_ex = f("x<sub>0</sub>", ep.x0, "mm",
+                      "Eulerian domain position x0 (x of the workpiece "
+                      "right face inside it)")
+        self.f_ey = f("y<sub>0</sub>", ep.y0, "mm",
+                      "Eulerian domain position y0 (y of the workpiece top "
+                      "face inside it)")
+        g = self._grid_group("Eulerian domain", [(self.f_h_void, self.f_l_void),
+                                                 (self.f_ex, self.f_ey)])
+        self._euler_group = g
+        for w in (self.f_h_void, self.f_l_void, self.f_ex, self.f_ey):
+            w.valueChanged.connect(self._on_change)
         return g
 
     def _build_mesh_seeds_group(self) -> QGroupBox | None:
-        """Geometry tab no longer owns any preview options.
-
-        Mesh-related options (elem_size, discretize, show_mesh) live in
-        the Mesh tab. BC-related options (show_bcs, picking) live in the
-        BCs/ICs tab. We keep this method returning None so the layout
-        code stays similar and the change is local."""
+        """Geometry tab no longer owns any preview options (mesh options in
+        the Mesh tab, BC options in the BCs/ICs tab)."""
         return None
-
-    def _build_bbox_group(self) -> QGroupBox:
-        g = QGroupBox("ROI")
-        lay = QVBoxLayout(g)
-        b = self.cfg.bbox
-
-        self.f_xmin = NumField("xmin", b.xmin, "mm", compact=True)
-        self.f_xmax = NumField("xmax", b.xmax, "mm", compact=True)
-        self.f_ymin = NumField("ymin", b.ymin, "mm", compact=True)
-        self.f_ymax = NumField("ymax", b.ymax, "mm", compact=True)
-        x_row = PairRow(self.f_xmin, self.f_xmax)
-        y_row = PairRow(self.f_ymin, self.f_ymax)
-        for row in (x_row, y_row):
-            lay.addWidget(row)
-        note = QLabel("Extraction is taken on the z = 0 face (out-of-plane "
-                      "bounds are fixed).")
-        note.setStyleSheet("color: #888; font-style: italic;")
-        lay.addWidget(note)
-        for f in (self.f_xmin, self.f_xmax, self.f_ymin, self.f_ymax):
-            f.valueChanged.connect(self._on_change)
-        return g
 
     def _build_info_panel(self) -> QGroupBox:
         g = QGroupBox("Derived quantities")
@@ -245,9 +259,8 @@ class GeometryTab(QWidget):
         c.euler_position.y0         = self.f_ey.value()
         # elem_size and discretize are owned by the Mesh tab — not pulled here.
 
-        c.bbox.xmin = self.f_xmin.value(); c.bbox.xmax = self.f_xmax.value()
-        c.bbox.ymin = self.f_ymin.value(); c.bbox.ymax = self.f_ymax.value()
-        # z bounds are fixed (z = 0 face); not edited from the UI.
+        # cfg.bbox (the ZOI) is written by the ZOI fields of the Optimize
+        # tabs, shown in this tab's form.
 
     def apply_from_cfg(self):
         """Inverse of `_pull_from_widgets`: push cfg values back into the
@@ -279,9 +292,6 @@ class GeometryTab(QWidget):
         self.f_ey.set_value(c.euler_position.y0)
         # elem_size / discretize are pushed by MeshTab.apply_from_cfg instead.
 
-        self.f_xmin.set_value(c.bbox.xmin); self.f_xmax.set_value(c.bbox.xmax)
-        self.f_ymin.set_value(c.bbox.ymin); self.f_ymax.set_value(c.bbox.ymax)
-        # z bounds are fixed (z = 0 face); no widget to update.
 
         self._refresh()
 
@@ -304,7 +314,10 @@ class GeometryTab(QWidget):
             self.cfg,
             show_mesh=False,
             show_bcs=False,
+            show_cut_line=True,
         )
+        depth = self.cfg.wp_position.y0 - self.cfg.tool_position.y0
+        self.lbl_depth.setText("t<sub>1</sub> = %.6g mm" % depth)
 
         h_wp, h_void, l_wp, l_void = self.cfg.effective_euler_dims()
 

@@ -181,6 +181,8 @@ class MainWindow(QMainWindow):
         for le in (list(self.optimization_tab.le_zoi.values())
                    + [self.optimization_tab.le_chip_y0]):
             le.textChanged.connect(self.geometry_tab._refresh)
+        # ZOI = ROI (2026-11-16): the ZOI fields write cfg.bbox.
+        self.optimization_tab.bbox_changed_callback = self._on_zoi_changed
         self.geometry_tab._refresh()
         self.compare_tab = CompareRunsPanel(
             folders=self.optimization_tab.known_folders(), start_dir=_wd,
@@ -432,6 +434,15 @@ class MainWindow(QMainWindow):
                           "geometry tab")
         self._mark_dirty()
 
+    def _on_zoi_changed(self):
+        """The ZOI (cfg.bbox) changed: redraw the previews, mark dirty."""
+        for tab in (self.mesh_tab, self.bcs_tab):
+            try:
+                tab.on_external_change()
+            except Exception:
+                log_swallowed("redrawing a preview after a ZOI change")
+        self._mark_dirty()
+
     def _reload_identified(self, _values=None):
         """Identify wrote the values it found into the cfg: reload every
         tab that shows them and mark the profile modified."""
@@ -442,6 +453,7 @@ class MainWindow(QMainWindow):
                 tab.apply_from_cfg()
             except Exception:
                 log_swallowed("reloading a tab after Identify")
+        self.optimization_tab.fill_zoi_from_cfg()
         self._mark_dirty()
 
     def _reload_sized_model(self, _step=None):
@@ -477,7 +489,6 @@ class MainWindow(QMainWindow):
             gt.f_tx, gt.f_ty,
             gt.f_h_wp, gt.f_l_wp, gt.f_wp_x, gt.f_wp_y,
             gt.f_h_void, gt.f_l_void, gt.f_ex, gt.f_ey,
-            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax,
         ]
         for f in all_fields:
             f.valueChanged.connect(self._mark_dirty)
@@ -493,7 +504,6 @@ class MainWindow(QMainWindow):
             gt.f_tx, gt.f_ty,
             gt.f_h_wp, gt.f_l_wp, gt.f_wp_x, gt.f_wp_y,
             gt.f_h_void, gt.f_l_void, gt.f_ex, gt.f_ey,
-            gt.f_xmin, gt.f_xmax, gt.f_ymin, gt.f_ymax,
         ]
         for f in all_fields:
             f.valueChanged.connect(self.mesh_tab.on_external_change)

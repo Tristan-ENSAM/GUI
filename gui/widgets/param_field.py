@@ -26,7 +26,8 @@ class NumField(QWidget):
 
     def __init__(self, label: str, value: float, unit: str = "",
                  decimals: int = 6, minimum: float = -1e9, maximum: float = 1e9,
-                 compact: bool = False, parent=None):
+                 compact: bool = False, parent=None, tip: str = "",
+                 label_width: int | None = None):
         """Labeled numeric input.
 
         `compact=True` is used inside a PairRow: the label is shorter, no
@@ -35,7 +36,9 @@ class NumField(QWidget):
         """
         super().__init__(parent)
         self._lbl = QLabel(label)
-        if compact:
+        if label_width is not None:
+            self._lbl.setMinimumWidth(label_width)
+        elif compact:
             self._lbl.setMinimumWidth(56)
         else:
             self._lbl.setMinimumWidth(110)
@@ -49,6 +52,9 @@ class NumField(QWidget):
         self._edit.setMaximumWidth(90 if compact else 110)
         self._unit = QLabel(unit)
         self._unit.setMinimumWidth(22 if compact else 30)
+        if tip:
+            for w in (self._lbl, self._edit, self._unit):
+                w.setToolTip(tip)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
