@@ -21,7 +21,8 @@ tab, with the number of frames that keeps the frame interval of the run
 the checks shown. The stopped run keeps its last read as its final results
 (gui.core.live_run).
 
-Not here yet (next PR): remote runs (the agent of the compute PC).
+Remote mode (Preferences > Execution remote): the run goes to the agent of
+the compute PC, which makes the reads there (gui.core.live_run).
 
 The checks read their defaults from the Model sizing tab
 (OptimizationTab.prelim_settings), which still owns every setting.
@@ -90,11 +91,13 @@ class InitialRunTab(QWidget):
         root.addWidget(intro)
 
         # ---- launch / stop -------------------------------------------
-        glive = QGroupBox("Initial run of the current model (this PC)")
+        glive = QGroupBox("Initial run of the current model (this PC, or the "
+                          "compute PC in remote mode)")
         lv = QHBoxLayout(glive)
         self.btn_launch = mark_primary(QPushButton("Launch the initial run"))
         self.btn_launch.setToolTip(
-            "Run the current model on this PC and re-read its results every\n"
+            "Run the current model (on this PC, or on the compute PC when\n"
+            "Preferences are in remote mode) and re-read its results every\n"
             "interval while it runs: the checks below are run again on the\n"
             "results so far.")
         self.btn_launch.clicked.connect(self._on_launch)
@@ -185,15 +188,11 @@ class InitialRunTab(QWidget):
     def _launch_problem(self, prefs):
         if prefs is None:
             return "No preferences available (Abaqus command and script)."
-        try:
-            from gui.core.remote_exec import is_remote
-            if is_remote(prefs):
-                return ("Preferences are in remote mode: the live initial "
-                        "run works on this PC only for now. Switch "
-                        "Execution to local, or run the model from the Job "
-                        "tab and open its results here.")
-        except Exception:
-            pass
+        from gui.core.remote_exec import is_remote, launch_problems
+        if is_remote(prefs):
+            lines = launch_problems(prefs, getattr(prefs, "default_workdir",
+                                                   "") or "")
+            return "\n".join(lines) if lines else None
         if not getattr(prefs, "abaqus_cmd", ""):
             return "Set the Abaqus command in Preferences."
         if not Path(getattr(prefs, "abaqus_script", "") or "").is_file():
@@ -235,10 +234,16 @@ class InitialRunTab(QWidget):
             return
         job = job_name("initial", 0)
         self._stop_reason = None
+        from gui.core.remote_exec import is_remote, submit_remote
+        submit = None
+        if is_remote(prefs):
+            def submit(run_dir, model_params, run_params, live_interval):
+                return submit_remote(prefs, run_dir, model_params,
+                                     run_params, live_interval=live_interval)
         self.start_worker(LiveRunWorker(
             cfg, abaqus_cmd=prefs.abaqus_cmd,
             abaqus_script=prefs.abaqus_script, run_dir=folder / job,
-            job_name=job, cpus=cpus, interval=interval))
+            job_name=job, cpus=cpus, interval=interval, submit=submit))
 
     def start_worker(self, worker):
         """Run `worker` (a LiveRunWorker) in a thread (tests inject one)."""
@@ -286,8 +291,10 @@ class InitialRunTab(QWidget):
                          "#15803d")
             self.prelim.analyse_file(final)
         else:
-            self._status("Run stopped or failed: the checks show the last "
-                         "results read.", "#b45309")
+            err = getattr(self._worker, "error", "")
+            self._status("Run stopped or failed%s: the checks show the last "
+                         "results read." % ((" (%s)" % err) if err else ""),
+                         "#b45309")
         self._worker = None
 
     def is_running(self) -> bool:

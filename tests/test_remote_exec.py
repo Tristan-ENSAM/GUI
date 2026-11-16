@@ -489,3 +489,90 @@ def test_resume_reuses_a_run_left_on_the_shared_drive(tmp_path):
         cache.add_folder(f)
     hit = cache.lookup(params, prefer=study)
     assert hit is not None and hit.job == "ms_run000_ms1"
+
+
+# ---- live reading for the Initial run tab ----------------------------------
+def _fake_snapshot(reads):
+    def snap(j):
+        reads.append(time.monotonic())
+        base = os.path.join(j["local"], j["name"])
+        with open(base + ".live.results.npz", "wb") as f:
+            f.write(b"live%d" % len(reads))
+        with open(base + ".live.meta.json", "w") as f:
+            f.write("{}")
+        return 0
+    return snap
+
+
+def _live_submit(setup, duration, interval=0.2):
+    run_dir = setup["gui_wd"] / "initial"
+    proc = rx.RemoteProcess(setup["queue"], run_dir, {"duration": duration},
+                            {"cpus": 2, "job_name": "initial_run000"},
+                            setup["scripts"],
+                            remote_abaqus_cmd=setup["abaqus"],
+                            check_agent=False, live_interval=interval)
+    return proc, run_dir
+
+
+def test_live_run_reads_on_the_compute_pc_and_brings_them_back(setup):
+    reads = []
+    agent = _agent(setup, snapshot=_fake_snapshot(reads))
+    stop = threading.Event()
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
+    th.start()
+    try:
+        proc, run_dir = _live_submit(setup, duration=3.0)
+        req = None
+        deadline = time.monotonic() + 15
+        stamp = run_dir / "initial_run000.live.json"
+        while proc.poll() is None and not stamp.exists() \
+                and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert stamp.exists() and proc.poll() is None
+        bundle = run_dir / "initial_run000.live.results.npz"
+        assert bundle.read_bytes().startswith(b"live")
+        local = Path(agent.job["local"])
+        assert (local / "initial_run000.live_cfg.json").read_text() \
+            == '{"duration": 3.0}'
+        assert proc.wait(timeout=30) == 0
+        # a finished run keeps the results of run_simul, not a live read
+        assert (run_dir / "initial_run000.results.npz").read_bytes() == b"npz"
+        assert len(reads) >= 2
+    finally:
+        stop.set()
+        th.join(timeout=5)
+
+
+def test_cancelled_live_run_sends_its_last_read_as_results(setup):
+    reads = []
+    agent = _agent(setup, snapshot=_fake_snapshot(reads),
+                   terminate=lambda j: False,
+                   kill=lambda j: j["proc"].kill())
+    stop = threading.Event()
+    th = threading.Thread(target=_loop, args=(agent, stop), daemon=True)
+    th.start()
+    try:
+        proc, run_dir = _live_submit(setup, duration=30.0)
+        deadline = time.monotonic() + 15
+        while not reads and time.monotonic() < deadline:
+            proc.poll()
+            time.sleep(0.1)
+        assert reads
+        proc.cancel()
+        proc.wait(timeout=30)
+        assert proc.cancelled
+        final = run_dir / "initial_run000.results.npz"
+        assert final.read_bytes() == b"live%d" % len(reads)
+        assert (run_dir / "initial_run000.meta.json").is_file()
+    finally:
+        stop.set()
+        th.join(timeout=5)
+
+
+def test_request_without_live_has_no_live_field(setup):
+    proc, _ = _submit(setup)
+    req = rx._read_json(proc.dirs["pending"] / (proc.id + ".json"))
+    assert "live" not in req
+    proc2, _ = _live_submit(setup, duration=0.1, interval=30)
+    req2 = rx._read_json(proc2.dirs["pending"] / (proc2.id + ".json"))
+    assert req2["live"] == {"interval": 30.0}

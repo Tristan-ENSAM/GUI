@@ -93,6 +93,11 @@ AGENT_SOURCE = Path(__file__).with_name("remote_agent.py")
 LIVE_PERIOD = 2.0               # s, live copy transit -> local run folder
 # Same lists as remote_agent.py: copied live, then brought back at the end.
 LIVE_SUFFIXES = (".sta", ".gui.log")
+# Live reading of the Initial run tab (request "live"): brought back like
+# the .sta. The agent copies the .live.json AFTER the bundle; here it is
+# copied FIRST, so a new .live.json in the run folder always comes with a
+# bundle at least as new (the worker reads them after the same poll()).
+LIVE_BUNDLE_SUFFIXES = (".live.json", ".live.meta.json", ".live.results.npz")
 RESULT_SUFFIXES = (".results.npz", ".meta.json", ".sta", ".gui.log",
                    ".msg", ".dat", ".log", ".inp")
 
@@ -323,7 +328,8 @@ class RemoteProcess:
 
     def __init__(self, queue, run_dir, model_params: dict, run_params: dict,
                  scripts_dir, remote_abaqus_cmd: Optional[str] = None,
-                 check_agent: bool = True, client_dir: Optional[str] = None):
+                 check_agent: bool = True, client_dir: Optional[str] = None,
+                 live_interval: Optional[float] = None):
         self.queue = Path(queue)
         self.dirs = _queue_dirs(self.queue)
         if remote_abaqus_cmd is not None:
@@ -358,6 +364,8 @@ class RemoteProcess:
         self.transit = self.queue / "runs" / self.id
         self._seen = {}
         self._last_live = 0.0
+        self._live_suffixes = LIVE_SUFFIXES + (
+            LIVE_BUNDLE_SUFFIXES if live_interval else ())
         # Direct delivery (results + .odb) through Remote Desktop drive
         # redirection when the agent can see this token; else Z: transit.
         if client_dir is None:
@@ -382,6 +390,8 @@ class RemoteProcess:
             "client_host": socket.gethostname(),
             "submitted": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        if live_interval:
+            request["live"] = {"interval": float(live_interval)}
         _write_json_atomic(self.dirs["pending"] / (self.id + ".json"), request)
 
     # -- Popen-like API ----------------------------------------------------
@@ -449,7 +459,7 @@ class RemoteProcess:
                 now = time.monotonic()
                 if now - self._last_live >= LIVE_PERIOD:
                     self._last_live = now
-                    self._bring_back(LIVE_SUFFIXES, only_changed=True)
+                    self._bring_back(self._live_suffixes, only_changed=True)
                 return None
             self.delivered_to = out.get("delivered_to") or ""
             if not self.delivered_to:
@@ -536,13 +546,17 @@ class RemoteProcess:
 
 
 def submit_remote(prefs, run_dir, model_params: dict, run_params: dict,
-                  check_agent: bool = True) -> RemoteProcess:
-    """Submit one run with the settings of `prefs` (Preferences)."""
+                  check_agent: bool = True,
+                  live_interval: Optional[float] = None) -> RemoteProcess:
+    """Submit one run with the settings of `prefs` (Preferences).
+    `live_interval`: the agent re-reads the running .odb every that many
+    seconds (Initial run tab)."""
     return RemoteProcess(prefs.remote_queue_dir, run_dir, model_params,
                          run_params, Path(prefs.abaqus_script).parent,
                          remote_abaqus_cmd=getattr(prefs, "remote_abaqus_cmd",
                                                    None),
-                         check_agent=check_agent)
+                         check_agent=check_agent,
+                         live_interval=live_interval)
 
 
 def is_remote(prefs) -> bool:
