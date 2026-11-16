@@ -11,7 +11,13 @@ Before the sizing studies, reads ONE saved run and shows
   Nyquist frequency of the frames, the frame interval a wanted attenuation
   needs, and the change of the window means with one frame in 2, 4, 8;
 * chip re-contact - the first frame where material comes back into a band
-  of cells above the uncut surface, upstream of the tool.
+  of cells above the uncut surface, upstream of the tool;
+* the last frame read, as a map (EVF, T, Vx or Vy), with the checks drawn
+  on it: the zone, the watched re-contact cells, the chip-thickness line,
+  the tool tip and the tool.
+
+Editing a parameter of a check recomputes the checks on the same file (no
+new run).
 
 Nothing is run.
 """
@@ -24,7 +30,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
@@ -40,6 +46,10 @@ _UNITS = {"Vx": "mm/s", "Vy": "mm/s", "T": "°C", "EVF": "–",
 _C_MEAN = "#1d4ed8"
 _C_THR = "#c0392b"
 _C_TS = "#15803d"
+_C_ZONE = "#d97706"
+_C_BAND = "#db2777"
+_MAP_CMAPS = {"EVF": "Greys", "T": "inferno", "Vx": "coolwarm",
+              "Vy": "coolwarm"}
 
 
 def _fmt(v, f="%.4g"):
@@ -67,6 +77,7 @@ class PreliminaryChecksPanel(QWidget):
         # A path, or a callable returning it (read when a file dialog opens).
         self._start_dir_src = start_dir
         self._result = None
+        self._pending = False         # parameters edited during an analysis
         v = QVBoxLayout(self)
 
         intro = QLabel(
@@ -95,6 +106,10 @@ class PreliminaryChecksPanel(QWidget):
         split.setSizes([430, 820])
         v.addWidget(split, 1)
         self._fill_zone_from_model()
+        for le in (list(self.le_zone.values())
+                   + [self.le_len, self.le_tau, self.le_att, self.le_margin,
+                      self.le_gap, self.le_band]):
+            le.editingFinished.connect(self._on_param_edited)
 
     # ---- layout --------------------------------------------------------
     def _help(self, text):
@@ -144,7 +159,7 @@ class PreliminaryChecksPanel(QWidget):
             zg.addWidget(le, i // 2, 2 * (i % 2) + 1)
         b = QPushButton("Zone = ZOI")
         b.setToolTip("Copy the ZOI of the comparison settings into the zone.")
-        b.clicked.connect(self._fill_zone_from_model)
+        b.clicked.connect(self._zone_from_zoi)
         zg.addWidget(b, 0, 4)
         f.addRow("Zone [mm]", zg)
         f.addRow(self._help(
@@ -281,12 +296,31 @@ class PreliminaryChecksPanel(QWidget):
                    "after t_s bounds the end of the window T; before t_s, "
                    "h_void must be lowered."),
         }
+        captions["map"] = (
+            "Last frame",
+            "The last frame read (while the run goes on: the latest one), "
+            "coloured by the chosen field; Vx, Vy and T only where the "
+            "element holds material (EVF ≥ 0.5). Orange: the zone of P0 "
+            "and P1. Pink: the cells watched for chip re-contact. Dotted: "
+            "the chip-thickness line (y0 of Identify, default t1). Black "
+            "line: the tool at that frame; cross: the tool tip of the "
+            "model. Editing a check parameter redraws it.")
         for key, (title, cap) in captions.items():
             w = QWidget()
             wl = QVBoxLayout(w)
             wl.setContentsMargins(4, 4, 4, 4)
             lab = self._help(cap)
             wl.addWidget(lab)
+            if key == "map":
+                row = QHBoxLayout()
+                row.addWidget(QLabel("Field"))
+                self.cb_field = QComboBox()
+                self.cb_field.addItems(["EVF", "T", "Vx", "Vy"])
+                self.cb_field.setToolTip("Field drawn on the last frame.")
+                self.cb_field.currentTextChanged.connect(self._redraw_map)
+                row.addWidget(self.cb_field)
+                row.addStretch(1)
+                wl.addLayout(row)
             fig = Figure(layout="constrained")
             canvas = FigureCanvas(fig)
             canvas.setMinimumHeight(250)
@@ -320,6 +354,20 @@ class PreliminaryChecksPanel(QWidget):
         if z:
             for k, val in zip(("xmin", "xmax", "ymin", "ymax"), z):
                 self.le_zone[k].setText("%.6g" % float(val))
+
+    def _zone_from_zoi(self):
+        self._fill_zone_from_model()
+        self._on_param_edited()
+
+    def _on_param_edited(self):
+        """A check parameter changed: recompute on the file already read
+        (nothing is run); after the current analysis if one is running."""
+        if self._result is None:
+            return
+        if not self.btn_run.isEnabled():
+            self._pending = True
+            return
+        self._analyse()
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -400,6 +448,14 @@ class PreliminaryChecksPanel(QWidget):
                                               inp["band"])
             except Exception as e:
                 out["rc_error"] = str(e)
+            out["tip"] = (x_tip, float(tool.get("y0", float("nan"))))
+            try:
+                out["map"] = pc.frame_map(b)
+                out["tool"] = pc.tool_outline(b)
+            except Exception as e:
+                out["map_error"] = str(e)
+            from gui.results.chip_thickness import surface_and_t1
+            out["surface"] = surface_and_t1(b.model_config)
         except Exception as e:
             return {"error": str(e)}
         finally:
@@ -411,6 +467,11 @@ class PreliminaryChecksPanel(QWidget):
 
     def _on_done(self, res):
         self.btn_run.setEnabled(True)
+        if self._pending:
+            self._pending = False
+            self._analyse()
+            if not self.btn_run.isEnabled():
+                return          # a newer analysis runs; keep its result
         if not res or "error" in res:
             self.lbl_status.setStyleSheet("color: #b91c1c;")
             self.lbl_status.setText((res or {}).get("error", "failed"))
@@ -501,8 +562,78 @@ class PreliminaryChecksPanel(QWidget):
         self._draw_p0(res)
         self._draw_p1(res)
         self._draw_rc(res)
+        self._draw_map(res)
         for c in self.canvases.values():
             c.draw_idle()
+
+    def _redraw_map(self, *_):
+        if self._result is not None:
+            self._draw_map(self._result)
+            self.canvases["map"].draw_idle()
+
+    def _draw_map(self, res):
+        from matplotlib.collections import LineCollection
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Rectangle
+        fig = self.figs["map"]
+        fig.clear()
+        ax = fig.subplots()
+        fm = res.get("map")
+        q = self.cb_field.currentText()
+        if fm is None or q not in fm.values:
+            ax.text(0.5, 0.5, res.get("map_error") or "%s not in the run" % q,
+                    ha="center", va="center", transform=ax.transAxes,
+                    fontsize=8)
+            ax.set_axis_off()
+            return
+        data = np.ma.masked_invalid(fm.values[q])
+        kw = {"cmap": _MAP_CMAPS.get(q, "viridis")}
+        if q == "EVF":
+            kw.update(vmin=0.0, vmax=1.0)
+        elif q in ("Vx", "Vy") and data.count():
+            m = float(np.max(np.abs(data)))
+            kw.update(vmin=-m, vmax=m)
+        mesh = ax.pcolormesh(fm.x_edges, fm.y_edges, data, shading="flat",
+                             **kw)
+        fig.colorbar(mesh, ax=ax, label="%s [%s]" % (q, _UNITS.get(q, "")))
+        inp = res["inp"]
+        z = inp["zone"]
+        ax.add_patch(Rectangle((z[0], z[2]), z[1] - z[0], z[3] - z[2],
+                               fill=False, edgecolor=_C_ZONE, lw=1.6,
+                               label="zone (P0, P1)"))
+        rc = res.get("rc")
+        if rc is not None and rc.cells is not None and len(rc.cells):
+            band = np.isin(fm.index, np.asarray(rc.cells)) & (fm.index >= 0)
+            ax.pcolormesh(fm.x_edges, fm.y_edges,
+                          np.ma.masked_where(~band, band.astype(float)),
+                          shading="flat", cmap=ListedColormap([_C_BAND]),
+                          vmin=0, vmax=1, alpha=0.5)
+            ax.plot([], [], "s", color=_C_BAND, alpha=0.6,
+                    label="watched re-contact cells")
+        ys, t1 = res.get("surface") or (None, None)
+        y0 = self._model().get("chip_y0")
+        y0 = t1 if y0 is None else y0
+        if ys is not None and y0 is not None:
+            ax.axhline(ys + float(y0), color=_C_ZONE, ls=":", lw=1.0,
+                       label="chip-thickness line")
+        segs = [np.column_stack(p) for p in res.get("tool") or []]
+        if segs:
+            ax.add_collection(LineCollection(segs, colors="black",
+                                             linewidths=0.9, label="tool"))
+        tip = res.get("tip")
+        if tip and all(math.isfinite(v) for v in tip):
+            ax.plot([tip[0]], [tip[1]], "x", color="black", ms=7, mew=1.5,
+                    label="tool tip (model)")
+        ax.set_xlim(fm.x_edges[0], fm.x_edges[-1])
+        ax.set_ylim(fm.y_edges[0], fm.y_edges[-1])
+        ax.set_aspect("equal")
+        ax.set_title("%s at frame %d, t = %.1f µs"
+                     % (q, fm.frame, fm.time * 1e6), fontsize=9)
+        ax.set_xlabel("x [mm]", fontsize=8)
+        ax.set_ylabel("y [mm]", fontsize=8)
+        ax.tick_params(labelsize=7)
+        fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center",
+                   ncol=3, fontsize=7.5, frameon=False)
 
     def _draw_p0(self, res):
         fig = self.figs["p0"]

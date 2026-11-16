@@ -326,6 +326,7 @@ class Recontact:
     n_columns: int                    # element columns watched
     x_range: Tuple[float, float]      # watched x range [mm]
     note: str = ""
+    cells: Optional[np.ndarray] = None  # indices of the watched elements
 
 
 def chip_recontact(bundle, x_tip: float, margin: float, gap: float = 1.5,
@@ -385,4 +386,100 @@ def chip_recontact(bundle, x_tip: float, margin: float, gap: float = 1.5,
         note = "material already in the band at the first frame"
     return Recontact(times, band_max,
                      float(times[hit[0]]) if hit.size else None,
-                     len(watch), (min(used_x), max(used_x)), note=note)
+                     len(watch), (min(used_x), max(used_x)), note=note,
+                     cells=sel)
+
+
+# ---------------------------------------------------------------------------
+# One frame as a map (last-frame view of the Initial run tab)
+# ---------------------------------------------------------------------------
+@dataclass
+class FrameMap:
+    """The Eulerian elements of one frame on their structured grid.
+    `values[q]` is (ny, nx), NaN where no element was extracted; Vx, Vy, T
+    are NaN where the element holds no material (EVF < threshold).
+    `index` (ny, nx) gives the element index of each cell (-1: none)."""
+    frame: int
+    time: float
+    x_edges: np.ndarray
+    y_edges: np.ndarray
+    values: Dict[str, np.ndarray]
+    index: np.ndarray
+
+
+def frame_map(bundle, frame: int = -1, evf_threshold: float = 0.5,
+              quantities: Sequence[str] = ("EVF", "T", "Vx", "Vy")
+              ) -> FrameMap:
+    """The fields of frame `frame` (default: the last one) on the element
+    grid. Copies the values, so the bundle can be closed afterwards."""
+    inst = eulerian_instance(bundle)
+    if not inst:
+        raise RuntimeError("No Eulerian instance (EVF carrier) in the run.")
+    times = np.asarray(bundle.times, dtype=float)
+    if times.size == 0:
+        raise RuntimeError("The run has no frame.")
+    fr = int(frame) % times.size
+    c = element_centroids_xy(bundle, inst)
+    dx, dy = _spacing(c[:, 0]), _spacing(c[:, 1])
+    h = elem_size(bundle)
+    dx = dx if math.isfinite(dx) else h
+    dy = dy if math.isfinite(dy) else h
+    if not (math.isfinite(dx) and math.isfinite(dy)):
+        raise RuntimeError("The element spacing cannot be read.")
+    x0, y0 = float(c[:, 0].min()), float(c[:, 1].min())
+    ix = np.round((c[:, 0] - x0) / dx).astype(int)
+    iy = np.round((c[:, 1] - y0) / dy).astype(int)
+    nx, ny = int(ix.max()) + 1, int(iy.max()) + 1
+    index = np.full((ny, nx), -1, dtype=int)
+    index[iy, ix] = np.arange(c.shape[0])
+    evf = np.asarray(bundle.field(inst, FIELD_QUANTITIES["EVF"]),
+                     dtype=float)[fr]
+    values = {}
+    for q in quantities:
+        try:
+            v = np.array(bundle.field(inst, FIELD_QUANTITIES[q])[fr],
+                         dtype=float)
+        except KeyError:
+            continue
+        if q in MASKED_QUANTITIES:
+            v = np.where(evf >= float(evf_threshold), v, np.nan)
+        g = np.full((ny, nx), np.nan)
+        g[iy, ix] = v
+        values[q] = g
+    x_edges = x0 + dx * (np.arange(nx + 1) - 0.5)
+    y_edges = y0 + dy * (np.arange(ny + 1) - 0.5)
+    return FrameMap(fr, float(times[fr]), x_edges, y_edges, values, index)
+
+
+def tool_outline(bundle, frame: int = -1):
+    """[(x, y) arrays, one per element edge path] of the tool (the instance
+    whose mesh moves) at `frame`, or [] when the run has none."""
+    out = []
+    try:
+        names = list(bundle.instance_names)
+    except Exception:
+        return out
+    euler = eulerian_instance(bundle)
+    for name in names:
+        if name == euler:
+            continue
+        try:
+            disp = bundle.displacements(name)
+            nodes = np.array(bundle.nodes_init(name), dtype=float)
+            conn = np.asarray(bundle.elements(name))
+        except Exception:
+            continue
+        if disp is None or nodes.size == 0:
+            continue
+        disp = np.asarray(disp)
+        fr = int(frame) % disp.shape[0]
+        xy = nodes[:, :2] + np.asarray(disp[fr], dtype=float)[:, :2]
+        for row in conn:
+            ids = [int(i) for i in row if 0 <= int(i) < xy.shape[0]]
+            ids = list(dict.fromkeys(ids))
+            if len(ids) < 2:
+                continue
+            if len(ids) > 2:
+                ids.append(ids[0])
+            out.append((xy[ids, 0], xy[ids, 1]))
+    return out

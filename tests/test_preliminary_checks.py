@@ -120,6 +120,86 @@ def test_chip_recontact():
     assert clean.t_first is None and clean.note == ""
 
 
+def test_chip_recontact_reports_watched_cells():
+    b = _Bundle(chip_drop_frame=40)
+    r = pc.chip_recontact(b, x_tip=0.0, margin=0.03, gap=1.5, band=2.0)
+    c = b.element_centroids_init("EULER")[r.cells]
+    assert len(r.cells) == 7 * 2               # 7 columns, 2 cells each
+    assert np.allclose(sorted(set(np.round(c[:, 1], 6))), [0.015, 0.025])
+    assert np.all(c[:, 0] < -0.03)
+
+
+def test_frame_map_last_frame_on_the_grid():
+    b = _Bundle(chip_drop_frame=40)
+    fm = pc.frame_map(b)
+    assert fm.frame == b.times.size - 1 and fm.time == b.times[-1]
+    assert fm.values["EVF"].shape == (NY, NX)
+    assert np.allclose(fm.x_edges[[0, -1]], [-0.1, 0.0])
+    assert np.allclose(fm.y_edges[[0, -1]], [-0.05, 0.03])
+    # material below y = 0 plus the chip cell; Vx only where material is
+    evf = fm.values["EVF"]
+    assert evf[:5].min() == 1.0 and evf[5:].sum() == 1.0
+    vx = fm.values["Vx"]
+    assert np.isfinite(vx[:5]).all() and np.isfinite(vx).sum() == 5 * NX + 1
+    k = fm.index[2, 3]
+    assert np.allclose(b.element_centroids_init("EULER")[k, :2],
+                       [-0.065, -0.025])
+    first = pc.frame_map(b, frame=0)
+    assert first.values["EVF"][5:].sum() == 0.0
+
+
+def test_tool_outline_moves_with_the_tool():
+    b = _Bundle()
+    b.instance_names = ["EULER", "TOOL"]
+    nodes = np.array([[0.0, 0.0, 0], [0.01, 0.0, 0], [0.01, 0.01, 0],
+                      [0.0, 0.01, 0]])
+    disp = np.zeros((b.times.size, 4, 3))
+    disp[-1, :, 0] = -0.02
+    b.nodes_init = lambda n: nodes
+    b.elements = lambda n: np.array([[0, 1, 2, 3, 3, 3, 3, 3]])
+    b.displacements = lambda n: disp
+    segs = pc.tool_outline(b)
+    assert len(segs) == 1
+    x, y = segs[0]
+    assert len(x) == 5 and np.allclose(x[:4], [-0.02, -0.01, -0.01, -0.02])
+    assert np.allclose(pc.tool_outline(b, frame=0)[0][0][:4],
+                       [0, 0.01, 0.01, 0])
+    assert pc.tool_outline(_Bundle()) == []
+
+
+def test_editing_a_check_recomputes_on_the_same_file(qapp, monkeypatch,
+                                                    tmp_path):
+    from gui.widgets import preliminary_checks_panel as pp
+    calls = []
+
+    def fake_async(fn, on_done, parent):
+        calls.append(1)
+        on_done(fn())
+    monkeypatch.setattr(pp, "run_async", fake_async)
+    from gui.results import reader
+    b = _Bundle(chip_drop_frame=40)
+    b.close = lambda: None
+    monkeypatch.setattr(reader.ResultsBundle, "load",
+                        classmethod(lambda cls, p: b))
+    run = tmp_path / "j.results.npz"
+    run.write_bytes(b"")
+    dlg = pp.PreliminaryChecksPanel(
+        settings_getter=lambda: {"eps": EPS, "zoi": ZONE})
+    dlg.le_gap.editingFinished.emit()          # nothing read yet: no-op
+    assert calls == []
+    dlg.le_band.setText("2")
+    dlg.le_margin.setText("0.03")
+    dlg.analyse_file(run)
+    assert len(calls) == 1 and dlg._result["rc"].n_columns == 7
+    dlg.le_margin.setText("0.05")
+    dlg.le_margin.editingFinished.emit()
+    assert len(calls) == 2 and dlg._result["rc"].n_columns == 5
+    # an edit during an analysis is run after it
+    dlg.btn_run.setEnabled(False)
+    dlg._on_param_edited()
+    assert dlg._pending and len(calls) == 2
+
+
 def test_chip_recontact_band_outside_extraction():
     r = pc.chip_recontact(_Bundle(), x_tip=0.0, margin=0.03, band=3.0)
     assert r.n_columns == 0 and r.t_first is None and r.note
@@ -147,9 +227,13 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
     assert res["margin"] == pytest.approx(0.03)          # 2 t1
     assert res["rc"].t_first == pytest.approx(b.times[40])
     dlg._on_done(res)
-    # one tab of plots per check, all filled
-    assert dlg.tabs.count() == 3
+    # one tab of plots per check plus the last frame, all filled
+    assert dlg.tabs.count() == 4
     assert all(f.axes for f in dlg.figs.values())
+    assert "t = %.1f µs" % (b.times[-1] * 1e6) in \
+        dlg.figs["map"].axes[0].get_title()
+    dlg.cb_field.setCurrentText("Vx")          # redraw only
+    assert dlg.figs["map"].axes[0].get_title().startswith("Vx")
     text = dlg.txt.toPlainText()
     assert "proposed window T" in text and "A = 40 dB needs" in text
     out = tmp_path / "s.csv"
@@ -163,7 +247,7 @@ def test_dialog_analyses_a_run(qapp, monkeypatch, tmp_path):
 def test_dialog_help_toggle(qapp):
     from gui.widgets.preliminary_checks_panel import PreliminaryChecksPanel
     dlg = PreliminaryChecksPanel()
-    assert len(dlg._help_labels) == 8      # intro, 4 boxes, 3 plot captions
+    assert len(dlg._help_labels) == 9      # intro, 4 boxes, 4 plot captions
     dlg.cb_help.setChecked(False)
     assert all(lab.isHidden() for lab in dlg._help_labels)
     dlg.cb_help.setChecked(True)
